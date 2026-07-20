@@ -1,0 +1,19 @@
+# attx setting.toml
+[llm]
+default_client = "main"
+
+[[llm.clients]]
+name = "main"
+provider_type = "openai"
+base_url = "https://api.example.com/v1"
+api_key = "YOUR_API_KEY"
+model = "example-model"
+timeout = 600
+
+[translation]
+worker_count = 8
+rpm = 60
+retry_count = 3
+retry_delay = 2
+batch_chars = 2500
+max_context_items = 6

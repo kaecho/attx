@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+setting.toml
+.attx/
+*.db
+*.attxbak
+/tmp/
+.idea/
+.vscode/
+*.swp
+.DS_Store

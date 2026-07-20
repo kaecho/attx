@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build
+        run: cargo build --release
+      - name: cargo test
+        run: cargo test
+      - name: smoke CLI
+        shell: bash
+        run: |
+          cargo run --release -- doctor
+          cargo run --release -- --help
