@@ -33,10 +33,39 @@ struct Choice {
 
 #[derive(Debug, Deserialize)]
 struct ModelItem {
+    #[serde(deserialize_with = "deserialize_id")]
     id: String,
     #[serde(default)]
     role: String,
     translation_lines: Vec<String>,
+}
+
+fn deserialize_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+    struct IdVisitor;
+    impl<'de> Visitor<'de> for IdVisitor {
+        type Value = String;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("string or integer id")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_string<E: de::Error>(self, v: String) -> Result<String, E> {
+            Ok(v)
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+    deserializer.deserialize_any(IdVisitor)
 }
 
 const SYSTEM_JA: &str = r#"你是游戏本地化译者，将源语言翻译为简体中文。
