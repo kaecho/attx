@@ -34,6 +34,39 @@ cargo build --release
 cargo install --path .
 ```
 
+
+---
+
+## 在 AI Agent 里使用（Skill）
+
+attx 自带与 att-mz 同思路的 **Skill 执行协议**，路径：
+
+```text
+skills/attx/SKILL.md
+skills/attx/references/   # CLI 契约、Agent 用法、失败恢复、JSONL、试玩反馈
+```
+
+### 你怎么让 Agent 跑起来
+
+1. 本机配置好 `setting.toml`，`attx doctor --ping` 成功  
+2. 用 Agent **打开游戏目录**（并能访问 attx 目录）  
+3. 把下面提示词发给 Agent（替换路径）：
+
+```text
+请使用 attx（目录：<attx目录>）严格按照 skills/attx/SKILL.md 流程，
+对当前游戏做日文→简体中文汉化。
+
+约束：
+1. 只通过 attx CLI；禁止手改游戏 data、attx.db、工具源码。
+2. 模型配置只用 setting.toml；不要把 API Key 打进对话。
+3. 顺序：doctor --ping → detect → init → extract → status → translate --limit 20 →（确认后）全量 translate。
+4. writeback 前必须得到我明确允许；优先在游戏副本上写回。
+5. 每阶段用中文汇报 status 数字与下一步。
+```
+
+CLI 入口示例：`<attx目录>/target/release/attx` 或已安装的 `attx`。  
+更细的安装 Skill、子代理边界见 `skills/attx/references/agent-usage.md`。
+
 ---
 
 ## 配置大模型

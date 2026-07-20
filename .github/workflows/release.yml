@@ -58,7 +58,8 @@ jobs:
           else
             cp target/${{ matrix.target }}/release/attx dist/$OUT/
           fi
-          cp README.md LICENSE setting.example.toml dist/$OUT/
+          cp README.md README.zh-CN.md LICENSE setting.example.toml dist/$OUT/
+          cp -a skills dist/$OUT/
           cd dist
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             7z a -tzip "$OUT.zip" "$OUT"

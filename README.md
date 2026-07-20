@@ -34,6 +34,38 @@ cargo build --release
 cargo install --path .
 ```
 
+
+---
+
+## Use with an AI Agent (Skill)
+
+attx ships an **execution Skill** (same idea as att-mz):
+
+```text
+skills/attx/SKILL.md
+skills/attx/references/   # CLI contract, agent usage, recovery, JSONL, feedback
+```
+
+### How to run it inside an Agent
+
+1. Configure `setting.toml` and pass `attx doctor --ping`  
+2. Open the **game folder** in the Agent (with access to the attx tree)  
+3. Paste a prompt like:
+
+```text
+Use attx at <attx-dir> and follow skills/attx/SKILL.md strictly to localize this game (ja→zh-CN).
+
+Rules:
+1. Only use the attx CLI; do not hand-edit game data, attx.db, or tool source.
+2. Keep API keys only in setting.toml; never paste keys into chat.
+3. Order: doctor --ping → detect → init → extract → status → translate --limit 20 → (after I confirm) full translate.
+4. Ask before writeback; prefer a game copy.
+5. After each stage report counts and next step.
+```
+
+Binary: `<attx-dir>/target/release/attx` or an installed `attx`.  
+Details: `skills/attx/references/agent-usage.md`.
+
 ---
 
 ## Configure the LLM
