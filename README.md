@@ -1,41 +1,48 @@
 # attx
 
-**Agent Translation Toolkit eXtensible** — pure-Rust universal game text translation framework.
+**English** | [中文](README.zh-CN.md)
+
+**Agent Translation Toolkit eXtensible** — a pure-Rust, engine-agnostic game text translation framework for AI agents and humans.
 
 ```
 extract (engine adapter) → translate (LLM core) → writeback (engine adapter)
 ```
-
-Core is engine-agnostic. Engines plug in as adapters. Ship with:
 
 | Adapter | Target |
 |---------|--------|
 | `rmmz` | RPG Maker MV / MZ (`data/*.json` dialogue, System, base DB) |
 | `jsonl` | Generic JSONL text packs (any engine via external extract/write scripts) |
 
-Issue inspiration: [att-mz#11](https://github.com/yexi-by/att-mz/issues/11) — generalise beyond RM-only tooling.
+Inspired by the generalisation goal in [att-mz#11](https://github.com/yexi-by/att-mz/issues/11).
+
+---
 
 ## Install
 
 ### Release binary
 
-Download from [Releases](https://github.com/emptysuns/attx/releases) (tag `v*`).
+Download from [Releases](https://github.com/emptysuns/attx/releases) (tags `v*`).
 
 ### From source
 
 ```bash
-cargo install --path .
-# or
+git clone https://github.com/emptysuns/attx.git
+cd attx
 cargo build --release
 ./target/release/attx --help
+# optional:
+cargo install --path .
 ```
 
-## Configure LLM
+---
+
+## Configure the LLM
 
 ```bash
 cp setting.example.toml setting.toml
-# edit base_url / api_key / model
 ```
+
+Edit `setting.toml`:
 
 ```toml
 [llm]
@@ -44,64 +51,144 @@ default_client = "main"
 [[llm.clients]]
 name = "main"
 provider_type = "openai"
-base_url = "https://api.example.com/v1"
+base_url = "https://your-provider.example/v1"
 api_key = "YOUR_API_KEY"
-model = "example-model"
+model = "your-model-name"
 timeout = 600
+
+[translation]
+worker_count = 8
+rpm = 60
+retry_count = 3
+retry_delay = 2
+batch_chars = 2500
+max_context_items = 6
 ```
 
-## Quick start (RPG Maker MV/MZ)
+Notes:
+
+- `provider_type` must be `openai` (OpenAI-compatible Chat Completions).
+- `base_url` usually ends with `/v1`.
+- `setting.toml` is gitignored — never commit API keys.
+
+Check connectivity:
 
 ```bash
-# detect engine
-attx detect --game /path/to/game
+attx doctor --ping
+```
 
-# workspace under /path/to/game/.attx by default
+---
+
+## How to translate a game (RPG Maker MV/MZ)
+
+### 1. Detect the engine
+
+```bash
+attx detect --game /path/to/game
+# → {"engine":"rmmz","content_root":"...","label":"RPG Maker MV/MZ"}
+```
+
+### 2. Create a workspace
+
+```bash
 attx init --game /path/to/game --src ja --dst zh
+# default workspace: /path/to/game/.attx
+# or:
+attx init --game /path/to/game --src ja --dst zh --workspace /tmp/my-game-ws
+```
+
+- `--src`: source language (`ja` or `en`)
+- `--dst`: target language (prompted as Simplified Chinese today)
+
+### 3. Extract text
+
+```bash
 attx extract --workspace /path/to/game/.attx
 attx status --workspace /path/to/game/.attx
-
-# needs setting.toml
-attx translate --workspace /path/to/game/.attx
-attx writeback --workspace /path/to/game/.attx
-
-# one-shot
-attx run --game /path/to/game --src ja --dst zh
 ```
 
-Writeback writes `data/*.json` and keeps a one-shot `*.attxbak` backup beside each file.
+Extracts dialogue (event codes 101/401/102/405), `System.json` terms, and base DB fields (`Actors`, `Items`, …).
 
-## Generic JSONL (any engine)
+### 4. Translate with the LLM
 
 ```bash
-# external tool extracts:
-# {"id":"scene1:55","text":"…","context":"00_op","role":"Hero"}
-attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --dst zh
+# full pending set
+attx translate --workspace /path/to/game/.attx
 
-# or via workspace export/import
+# small trial batch
+attx translate --workspace /path/to/game/.attx --limit 20
+
+# plan only
+attx translate --workspace /path/to/game/.attx --dry-run
+```
+
+Identical source hashes are cached in the workspace DB; re-runs skip already translated units.
+
+### 5. Write translations back into the game
+
+```bash
+# preview files that would change
+attx writeback --workspace /path/to/game/.attx --dry-run
+
+# apply (creates one-shot *.attxbak beside each rewritten file)
+attx writeback --workspace /path/to/game/.attx
+```
+
+Then launch the game and playtest.
+
+### One-shot pipeline
+
+```bash
+attx run --game /path/to/game --src ja --dst zh
+# options:
+#   --limit N
+#   --no-translate
+#   --no-writeback
+#   --workspace /custom/ws
+```
+
+### Manual / offline path (JSONL)
+
+Useful for review, external tools, or non-RM engines:
+
+```bash
 attx export-jsonl --workspace .attx --output pending.jsonl --filter pending
+# edit or translate pending.jsonl elsewhere, then:
 attx import-jsonl --workspace .attx --input translated.jsonl
 attx writeback --workspace .attx
 ```
 
-## CLI
+Standalone JSONL (no game tree):
+
+```bash
+# line format: {"id":"scene1:55","text":"…","context":"op","role":"Hero"}
+attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --dst zh
+```
+
+---
+
+## CLI reference
 
 | Command | Role |
 |---------|------|
-| `doctor` | config / optional LLM ping |
-| `detect` | engine probe |
-| `init` | create workspace + SQLite |
-| `extract` | adapter → units |
-| `translate` | LLM pending units |
-| `writeback` | adapter apply translations |
-| `run` | init+extract+translate+writeback |
-| `status` | counts |
-| `translate-jsonl` | pure text pipe (no game tree) |
-| `export-jsonl` / `import-jsonl` | interchange |
+| `doctor [--ping]` | Config check / optional LLM ping |
+| `detect --game` | Engine probe |
+| `init --game` | Create workspace + SQLite |
+| `extract` | Adapter → text units |
+| `translate` | LLM over pending units |
+| `writeback` | Adapter applies translations |
+| `run` | init + extract + translate + writeback |
+| `status` | Counts |
+| `translate-jsonl` | Pure text pipe |
+| `export-jsonl` / `import-jsonl` | Interchange |
+
+Global: `--config /path/to/setting.toml` (default: `./setting.toml` or `$ATTX_HOME/setting.toml`).
+
+---
 
 ## Extend with a new engine
 
-Implement `EngineAdapter` in `src/adapter/`:
+Implement `EngineAdapter` in `src/adapter/` and register it in `all_adapters()`:
 
 ```rust
 pub trait EngineAdapter: Send + Sync {
@@ -114,36 +201,42 @@ pub trait EngineAdapter: Send + Sync {
         content_root: &Path,
         units: &[TextUnit],
         translations: &BTreeMap<String, Translation>,
-    ) -> Result<BTreeMap<String, String>>; // relpath → file body
+    ) -> Result<BTreeMap<String, String>>; // relative path → file body
 }
 ```
 
-Register in `adapter::all_adapters()`. No core changes required.
+No core pipeline changes required. For engines not yet implemented, extract to JSONL externally, run `translate-jsonl`, then write back with your own script.
 
-## Layout
+---
+
+## Project layout
 
 ```
 src/
   main.rs          CLI
-  model.rs         TextUnit / Translation / placeholders
+  model.rs         TextUnit / Translation / control placeholders
   config.rs        setting.toml
   store.rs         SQLite workspace
   llm.rs           OpenAI-compatible chat + batching
-  quality.rs       line/control checks
+  quality.rs       line / control checks
   pipeline.rs      orchestration
   adapter/
     mod.rs         trait + registry
-    rmmz.rs        MV/MZ
+    rmmz.rs        RPG Maker MV/MZ
     jsonl.rs       generic pack
 ```
 
-## What this is not (yet)
+---
 
-- Plugin JS AST / note-tag rule agent workflow (att-mz has those)
-- RGSS Marshal / rgssad archives
-- Unity / Ren'Py / Godot first-class adapters
+## Not included (yet)
 
-Use `jsonl` + external extractors until those adapters land. PRs welcome.
+- Plugin JS AST / note-tag agent workflows (see att-mz)
+- RGSS Marshal / encrypted archives
+- First-class Unity / Ren'Py / Godot adapters
+
+Use the `jsonl` path until those adapters land. PRs welcome.
+
+---
 
 ## License
 
