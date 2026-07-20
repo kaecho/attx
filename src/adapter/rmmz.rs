@@ -559,16 +559,14 @@ fn write_choices(root: &mut Value, location: &str, lines: &[String]) -> Result<(
 
 fn write_long_text(root: &mut Value, unit: &TextUnit, lines: &[String]) -> Result<()> {
     if unit.source_line_paths.is_empty() {
-        // NAME-only shell — nothing to write
         return Ok(());
     }
-    // Map each source_line_path 401/405 → translation line; insert/delete extras.
+    // ponytail: never insert/delete event commands (shifts later indices).
+    // Fit translation into the original number of 401/405 slots.
     let n_src = unit.source_line_paths.len();
-    let n_tr = lines.len();
-    let common = n_src.min(n_tr);
+    let fitted = fit_lines(lines, n_src);
 
-    for i in 0..common {
-        let path = &unit.source_line_paths[i];
+    for (i, path) in unit.source_line_paths.iter().enumerate() {
         let rest = path.split_once('/').map(|(_, r)| r).unwrap_or("");
         let cmd = navigate_mut(root, rest)?;
         let code = cmd.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -579,51 +577,32 @@ fn write_long_text(root: &mut Value, unit: &TextUnit, lines: &[String]) -> Resul
             .get_mut("parameters")
             .and_then(|v| v.as_array_mut())
             .ok_or_else(|| anyhow::anyhow!("missing parameters at {path}"))?;
+        let text = fitted.get(i).cloned().unwrap_or_default();
         if params.is_empty() {
-            params.push(Value::String(lines[i].clone()));
+            params.push(Value::String(text));
         } else {
-            params[0] = Value::String(lines[i].clone());
-        }
-    }
-
-    if n_tr > n_src {
-        // insert extra 401 after last source path
-        let last = &unit.source_line_paths[n_src - 1];
-        let (list_path, idx) = split_list_index(last)?;
-        let rest = list_path.split_once('/').map(|(_, r)| r).unwrap_or("");
-        let list = navigate_mut(root, rest)?
-            .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("expected command list at {list_path}"))?;
-        let code = list
-            .get(idx)
-            .and_then(|c| c.get("code"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(CODE_TEXT);
-        let mut insert_at = idx + 1;
-        for line in &lines[n_src..] {
-            let cmd = json!({"code": code, "indent": list.get(idx).and_then(|c| c.get("indent")).cloned().unwrap_or(json!(0)), "parameters": [line]});
-            list.insert(insert_at, cmd);
-            insert_at += 1;
-        }
-    } else if n_src > n_tr {
-        // delete surplus from end (high index first)
-        let mut to_delete: Vec<(String, usize)> = Vec::new();
-        for path in unit.source_line_paths[n_tr..].iter().rev() {
-            let (list_path, idx) = split_list_index(path)?;
-            to_delete.push((list_path, idx));
-        }
-        // group by list; delete high idx first (already rev)
-        for (list_path, idx) in to_delete {
-            let rest = list_path.split_once('/').map(|(_, r)| r).unwrap_or("");
-            let list = navigate_mut(root, rest)?
-                .as_array_mut()
-                .ok_or_else(|| anyhow::anyhow!("expected command list at {list_path}"))?;
-            if idx < list.len() {
-                list.remove(idx);
-            }
+            params[0] = Value::String(text);
         }
     }
     Ok(())
+}
+
+/// Resize translation lines to exactly `n` slots (join extras into last / pad empty).
+fn fit_lines(lines: &[String], n: usize) -> Vec<String> {
+    if n == 0 {
+        return vec![];
+    }
+    if lines.len() == n {
+        return lines.to_vec();
+    }
+    if lines.len() > n {
+        let mut out: Vec<String> = lines[..n - 1].to_vec();
+        out.push(lines[n - 1..].join(""));
+        return out;
+    }
+    let mut out = lines.to_vec();
+    out.resize(n, String::new());
+    out
 }
 
 fn split_list_index(location: &str) -> Result<(String, usize)> {
@@ -719,9 +698,10 @@ fn navigate_map<'a>(root: &'a mut Value, parts: &[&str]) -> Result<&'a mut Value
 }
 
 fn navigate_array_db<'a>(root: &'a mut Value, parts: &[&str]) -> Result<&'a mut Value> {
-    // CommonEvents: id, cmdIndex?
-    // Troops: id, page, cmd?
-    // Base item short: id, field — handled via set_json_path style on array
+    // CommonEvents: id  | id/cmdIndex  → event or command
+    // Special: when writing inserts/deletes we pass only "id" and need the list array.
+    // Troops: id/page | id/page/cmd
+    // Base: id/field
     let id: i64 = parts[0].parse().context("db id")?;
     let arr = root
         .as_array_mut()
@@ -734,35 +714,45 @@ fn navigate_array_db<'a>(root: &'a mut Value, parts: &[&str]) -> Result<&'a mut 
         }
     }
     let idx = idx.ok_or_else(|| anyhow::anyhow!("id {id} not found"))?;
+
+    // parts == [id] → prefer command list if present (writeback insert/delete)
     if parts.len() == 1 {
+        if arr[idx].get("list").is_some() {
+            return arr[idx]
+                .get_mut("list")
+                .ok_or_else(|| anyhow::anyhow!("no list"));
+        }
         return Ok(&mut arr[idx]);
     }
-    // Troop pages?
-    if parts.len() >= 2 {
-        if arr[idx].get("pages").is_some() {
-            let page: usize = parts[1].parse().context("troop page")?;
-            let pages = arr[idx]
-                .get_mut("pages")
-                .and_then(|v| v.as_array_mut())
-                .ok_or_else(|| anyhow::anyhow!("no pages"))?;
-            if parts.len() == 2 {
-                return pages[page]
-                    .get_mut("list")
-                    .ok_or_else(|| anyhow::anyhow!("no list"));
-            }
-            let cmd: usize = parts[2].parse().context("cmd")?;
-            let list = pages[page]
-                .get_mut("list")
-                .and_then(|v| v.as_array_mut())
-                .ok_or_else(|| anyhow::anyhow!("no list"))?;
-            return list
-                .get_mut(cmd)
-                .ok_or_else(|| anyhow::anyhow!("cmd OOB"));
+
+    if arr[idx].get("pages").is_some() {
+        let page: usize = parts[1].parse().context("troop page")?;
+        let pages = arr[idx]
+            .get_mut("pages")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| anyhow::anyhow!("no pages"))?;
+        if page >= pages.len() {
+            bail!("page {page} OOB");
         }
-        if arr[idx].get("list").is_some() {
-            // CommonEvents
-            if parts.len() == 2 {
-                let cmd: usize = parts[1].parse().context("cmd")?;
+        if parts.len() == 2 {
+            return pages[page]
+                .get_mut("list")
+                .ok_or_else(|| anyhow::anyhow!("no list"));
+        }
+        let cmd: usize = parts[2].parse().context("cmd")?;
+        let list = pages[page]
+            .get_mut("list")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| anyhow::anyhow!("no list"))?;
+        return list
+            .get_mut(cmd)
+            .ok_or_else(|| anyhow::anyhow!("cmd OOB"));
+    }
+
+    if arr[idx].get("list").is_some() {
+        // CommonEvents: id/cmd
+        if parts.len() == 2 {
+            if let Ok(cmd) = parts[1].parse::<usize>() {
                 let list = arr[idx]
                     .get_mut("list")
                     .and_then(|v| v.as_array_mut())
@@ -772,12 +762,12 @@ fn navigate_array_db<'a>(root: &'a mut Value, parts: &[&str]) -> Result<&'a mut 
                     .ok_or_else(|| anyhow::anyhow!("cmd OOB"));
             }
         }
-        // base field
-        let field = parts[1];
-        return arr[idx]
-            .as_object_mut()
-            .and_then(|o| o.get_mut(field))
-            .ok_or_else(|| anyhow::anyhow!("missing field {field}"));
     }
-    Ok(&mut arr[idx])
+
+    // base field id/name etc.
+    let field = parts[1];
+    arr[idx]
+        .as_object_mut()
+        .and_then(|o| o.get_mut(field))
+        .ok_or_else(|| anyhow::anyhow!("missing field {field}"))
 }
