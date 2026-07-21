@@ -1,5 +1,6 @@
 pub mod jsonl;
 pub mod rmmz;
+pub mod rmmz_plugins;
 
 use crate::model::{TextUnit, Translation};
 use anyhow::{Result, bail};

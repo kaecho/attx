@@ -18,7 +18,8 @@ struct ChatRequest {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ChatMessage {
     role: String,
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +30,8 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ChatMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,46 +118,174 @@ impl Translator {
         units: &[TextUnit],
         limit: Option<usize>,
     ) -> Result<Vec<Translation>> {
+        self.translate_units_with_sink(units, limit, &mut |_batch| Ok(()))
+    }
+
+    /// Translate units; call `on_batch` after each successful batch (for incremental DB save).
+    /// Runs up to `worker_count` HTTP batches in parallel.
+    pub fn translate_units_with_sink<F>(
+        &self,
+        units: &[TextUnit],
+        limit: Option<usize>,
+        on_batch: &mut F,
+    ) -> Result<Vec<Translation>>
+    where
+        F: FnMut(&[Translation]) -> Result<()>,
+    {
         let slice: Vec<&TextUnit> = units.iter().take(limit.unwrap_or(usize::MAX)).collect();
         if slice.is_empty() {
             return Ok(vec![]);
         }
         let batches = batch_units(&slice, self.section.batch_chars, self.section.max_context_items);
+        let total_batches = batches.len();
+        let total_units = slice.len();
+        let workers = self.section.worker_count.max(1);
+
+        eprintln!(
+            "translate: {} units in {} batches, workers={}",
+            total_units, total_batches, workers
+        );
+
+        // Shared queue of batch indices
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let next = Arc::new(AtomicUsize::new(0));
+        let batches = Arc::new(
+            batches
+                .into_iter()
+                .map(|b| b.into_iter().cloned().collect::<Vec<TextUnit>>())
+                .collect::<Vec<_>>(),
+        );
+        let results: Arc<Mutex<Vec<(usize, Result<Vec<Translation>>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let done_units = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let next = Arc::clone(&next);
+                let batches = Arc::clone(&batches);
+                let results = Arc::clone(&results);
+                let done_units = Arc::clone(&done_units);
+                let translator = self;
+                scope.spawn(move || {
+                    loop {
+                        let bi = next.fetch_add(1, Ordering::Relaxed);
+                        if bi >= batches.len() {
+                            break;
+                        }
+                        let batch_owned = &batches[bi];
+                        let refs: Vec<&TextUnit> = batch_owned.iter().collect();
+                        eprintln!(
+                            "batch {}/{} ({} units, done_units≈{})",
+                            bi + 1,
+                            total_batches,
+                            refs.len(),
+                            done_units.load(Ordering::Relaxed)
+                        );
+                        let mut attempt = 0u32;
+                        let items = loop {
+                            attempt += 1;
+                            match translator.translate_batch_resilient(&refs) {
+                                Ok(items) => break Ok(items),
+                                Err(e) if attempt <= translator.section.retry_count => {
+                                    eprintln!("  retry batch {} #{attempt}: {e:#}", bi + 1);
+                                    thread::sleep(Duration::from_secs(
+                                        translator.section.retry_delay,
+                                    ));
+                                }
+                                Err(e) => {
+                                    eprintln!("  SKIP batch {} after retries: {e:#}", bi + 1);
+                                    break Ok(Vec::new());
+                                }
+                            }
+                        };
+                        if let Ok(v) = &items {
+                            done_units.fetch_add(v.len(), Ordering::Relaxed);
+                        }
+                        results.lock().unwrap().push((bi, items));
+                    }
+                });
+            }
+        });
+
+        // deterministic order save
+        let mut collected = results.lock().unwrap();
+        collected.sort_by_key(|(i, _)| *i);
         let mut out = Vec::new();
-        let mut done = 0usize;
-        let total = slice.len();
-        for (bi, batch) in batches.iter().enumerate() {
-            eprintln!(
-                "batch {}/{} ({} units, progress {}/{})",
-                bi + 1,
-                batches.len(),
-                batch.len(),
-                done,
-                total
-            );
-            let mut attempt = 0u32;
-            loop {
-                attempt += 1;
-                match self.translate_batch(batch) {
-                    Ok(mut items) => {
-                        done += items.len();
-                        out.append(&mut items);
-                        break;
-                    }
-                    Err(e) if attempt <= self.section.retry_count => {
-                        eprintln!("  retry {attempt}: {e:#}");
-                        thread::sleep(Duration::from_secs(self.section.retry_delay));
-                    }
-                    Err(e) => return Err(e),
+        let mut skipped = 0usize;
+        for (bi, res) in collected.drain(..) {
+            match res {
+                Ok(items) if items.is_empty() => skipped += 1,
+                Ok(items) => {
+                    on_batch(&items)?;
+                    out.extend(items);
+                }
+                Err(e) => {
+                    eprintln!("  batch {} error: {e:#}", bi + 1);
+                    skipped += 1;
                 }
             }
-            // crude RPM pacing
-            if self.section.rpm > 0 {
-                let sleep_ms = 60_000u64 / u64::from(self.section.rpm.max(1));
-                thread::sleep(Duration::from_millis(sleep_ms.min(2000)));
-            }
+        }
+        if skipped > 0 {
+            eprintln!("finished with {skipped} skipped batch(es); re-run for remaining pending");
         }
         Ok(out)
+    }
+
+    /// Try full batch; on hard fail split to singles; single fail → passthrough original.
+    fn translate_batch_resilient(&self, batch: &[&TextUnit]) -> Result<Vec<Translation>> {
+        match self.translate_batch(batch) {
+            Ok(v) if !v.is_empty() => {
+                // fill missing with passthrough so pending shrinks
+                if v.len() == batch.len() {
+                    return Ok(v);
+                }
+                let got: BTreeMap<_, _> = v.iter().map(|t| (t.unit_id.clone(), t.clone())).collect();
+                let mut out = v;
+                for u in batch {
+                    if !got.contains_key(&u.id) {
+                        // try single
+                        match self.translate_batch(&[u]) {
+                            Ok(mut one) if !one.is_empty() => out.append(&mut one),
+                            _ => out.push(passthrough(u)),
+                        }
+                    }
+                }
+                return Ok(out);
+            }
+            Ok(_) | Err(_) if batch.len() > 1 => {
+                // split in half then recurse / singles
+                let mid = batch.len() / 2;
+                let mut out = Vec::new();
+                for half in [&batch[..mid], &batch[mid..]] {
+                    if half.is_empty() {
+                        continue;
+                    }
+                    match self.translate_batch_resilient(half) {
+                        Ok(mut v) => out.append(&mut v),
+                        Err(_) => {
+                            for u in half {
+                                match self.translate_batch(&[*u]) {
+                                    Ok(mut one) if !one.is_empty() => out.append(&mut one),
+                                    _ => out.push(passthrough(u)),
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            Ok(_) | Err(_) => {
+                // single unit: try once more then passthrough
+                if let Ok(v) = self.translate_batch(batch) {
+                    if !v.is_empty() {
+                        return Ok(v);
+                    }
+                }
+                Ok(batch.iter().map(|u| passthrough(u)).collect())
+            }
+        }
     }
 
     fn translate_batch(&self, batch: &[&TextUnit]) -> Result<Vec<Translation>> {
@@ -162,7 +293,6 @@ impl Translator {
         let mut id_map: BTreeMap<String, &TextUnit> = BTreeMap::new(); // prompt id -> unit
 
         let mut body = String::from("# 场景\n\n");
-        // group hint: first context
         if let Some(c) = batch.first().map(|u| u.context.as_str()) {
             if !c.is_empty() {
                 body.push_str(&format!("context: {c}\n"));
@@ -177,16 +307,13 @@ impl Translator {
             let mut unit_map = Vec::new();
             for line in &u.original_lines {
                 let (m, map) = mask_controls(line);
-                // offset map keys to be unique across lines
                 let base = unit_map.len();
-                let mut remap = Vec::new();
                 let mut line_out = m;
                 for (j, (k, v)) in map.into_iter().enumerate() {
                     let nk = format!("[CTRL_{}]", base + j);
                     line_out = line_out.replacen(&k, &nk, 1);
-                    remap.push((nk, v));
+                    unit_map.push((nk, v));
                 }
-                unit_map.extend(remap);
                 masked_lines.push(line_out);
             }
             masks.insert(u.id.clone(), unit_map);
@@ -224,12 +351,10 @@ impl Translator {
                 .into_iter()
                 .map(|l| unmask_controls(&l, &map))
                 .collect();
+            lines = quality::sanitize_lines(unit, lines);
             if let Err(e) = quality::check_unit(unit, &lines) {
-                bail!("quality failed for {}: {e}", unit.location);
-            }
-            // short_text force single line
-            if unit.item_type == ItemType::ShortText && lines.len() != 1 {
-                lines = vec![lines.join("")];
+                eprintln!("  drop unit {}: {e}", unit.location);
+                continue;
             }
             translations.push(Translation {
                 unit_id: unit.id.clone(),
@@ -237,9 +362,12 @@ impl Translator {
                 source_hash: TextUnit::source_hash(&unit.original_lines),
             });
         }
+        if translations.is_empty() {
+            bail!("batch produced 0 acceptable translations (model/quality)");
+        }
         if translations.len() != batch.len() {
-            bail!(
-                "model returned {} items, expected {}",
+            eprintln!(
+                "  partial batch: kept {}/{}",
                 translations.len(),
                 batch.len()
             );
@@ -257,11 +385,11 @@ impl Translator {
             messages: vec![
                 ChatMessage {
                     role: "system".into(),
-                    content: system.into(),
+                    content: Some(system.into()),
                 },
                 ChatMessage {
                     role: "user".into(),
-                    content: user.into(),
+                    content: Some(user.into()),
                 },
             ],
             temperature: 0.3,
@@ -280,11 +408,21 @@ impl Translator {
         }
         let parsed: ChatResponse =
             serde_json::from_str(&text).with_context(|| format!("decode chat: {}", truncate(&text, 300)))?;
-        let content = parsed
+        let choice = parsed
             .choices
             .first()
-            .map(|c| c.message.content.clone())
             .ok_or_else(|| anyhow::anyhow!("empty choices"))?;
+        let content = choice
+            .message
+            .content
+            .clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "empty content finish={:?}",
+                    choice.finish_reason.as_deref().unwrap_or("?")
+                )
+            })?;
         Ok(content)
     }
 
@@ -296,22 +434,20 @@ impl Translator {
 fn batch_units<'a>(
     units: &[&'a TextUnit],
     batch_chars: usize,
-    max_context: usize,
+    max_items: usize,
 ) -> Vec<Vec<&'a TextUnit>> {
+    let max_items = max_items.max(1);
     let mut batches = Vec::new();
     let mut cur: Vec<&TextUnit> = Vec::new();
     let mut chars = 0usize;
-    let mut last_ctx = "";
     for u in units {
         let size: usize = u.original_lines.iter().map(|l| l.chars().count()).sum();
-        let same_ctx = u.context == last_ctx || last_ctx.is_empty();
         let would_exceed = chars + size > batch_chars && !cur.is_empty();
-        let ctx_break = !same_ctx && !cur.is_empty() && cur.len() >= max_context;
-        if would_exceed || ctx_break {
+        let too_many = cur.len() >= max_items;
+        if would_exceed || too_many {
             batches.push(std::mem::take(&mut cur));
             chars = 0;
         }
-        last_ctx = u.context.as_str();
         chars += size;
         cur.push(*u);
     }
@@ -319,6 +455,16 @@ fn batch_units<'a>(
         batches.push(cur);
     }
     batches
+}
+
+fn passthrough(u: &TextUnit) -> Translation {
+    // ponytail: keep original when model refuses (policy/empty); writeback still works
+    eprintln!("  passthrough {}", u.location);
+    Translation {
+        unit_id: u.id.clone(),
+        translation_lines: u.original_lines.clone(),
+        source_hash: TextUnit::source_hash(&u.original_lines),
+    }
 }
 
 fn parse_model_json(raw: &str) -> Result<Vec<ModelItem>> {

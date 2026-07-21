@@ -102,6 +102,17 @@ impl EngineAdapter for RmmzAdapter {
             extract_base(file, &arr, source_lang, &mut units);
         }
 
+        // Plugin parameters (js/plugins.js + header @param types; never rewrite plugin source)
+        match super::rmmz_plugins::extract_plugins(content_root, source_lang) {
+            Ok(mut pu) => {
+                if !pu.is_empty() {
+                    eprintln!("rmmz: extracted {} plugin parameter unit(s)", pu.len());
+                }
+                units.append(&mut pu);
+            }
+            Err(e) => eprintln!("rmmz: plugin extract skipped: {e:#}"),
+        }
+
         Ok(units)
     }
 
@@ -114,10 +125,13 @@ impl EngineAdapter for RmmzAdapter {
         let data_dir = resolve_data_dir(content_root)?;
         let mut files: BTreeMap<String, Value> = BTreeMap::new();
 
-        // Load only files we need
+        // Load only data/* files we need (skip js/plugins.js locations)
         let mut needed = BTreeMap::<String, ()>::new();
         for u in units {
             if !translations.contains_key(&u.id) {
+                continue;
+            }
+            if u.domain == "plugins" || u.location.starts_with("js/") {
                 continue;
             }
             if let Some(file) = u.location.split('/').next() {
@@ -137,6 +151,9 @@ impl EngineAdapter for RmmzAdapter {
         }
 
         for u in units {
+            if u.domain == "plugins" || u.location.starts_with("js/") {
+                continue;
+            }
             let Some(tr) = translations.get(&u.id) else {
                 continue;
             };
@@ -148,11 +165,17 @@ impl EngineAdapter for RmmzAdapter {
 
         let mut out = BTreeMap::new();
         for (file, value) in files {
-            // RPG Maker expects compact-ish JSON; keep pretty for diffability is ok for MZ
             let text = serde_json::to_string(&value)?;
             let rel = format!("data/{file}");
             out.insert(rel, text);
         }
+
+        if let Some(plugins_js) =
+            super::rmmz_plugins::writeback_plugins(content_root, units, translations)?
+        {
+            out.insert("js/plugins.js".into(), plugins_js);
+        }
+
         Ok(out)
     }
 }

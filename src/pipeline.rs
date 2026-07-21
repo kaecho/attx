@@ -15,6 +15,8 @@ pub struct TranslateReport {
     pub translated: usize,
     pub pending_after: usize,
     pub dry_run: bool,
+    #[serde(default)]
+    pub skipped_note: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +121,7 @@ pub fn translate(
             translated: 0,
             pending_after: pending_before,
             dry_run: true,
+            skipped_note: String::new(),
         });
     }
     if pending.is_empty() {
@@ -127,20 +130,29 @@ pub fn translate(
             translated: 0,
             pending_after: 0,
             dry_run: false,
+            skipped_note: String::new(),
         });
     }
     let client = config::require_llm(settings)?;
     let translator = Translator::new(client, &settings.translation, &meta.source_lang)?;
-    let results = translator.translate_units(&pending, limit)?;
-    for tr in &results {
-        store.save_translation(tr)?;
-    }
+    // Incremental save: each batch hits SQLite immediately so crashes keep progress.
+    let results = translator.translate_units_with_sink(&pending, limit, &mut |batch| {
+        for tr in batch {
+            store.save_translation(tr)?;
+        }
+        Ok(())
+    })?;
     let (_, _, pending_after) = store.counts()?;
     Ok(TranslateReport {
         pending_before,
         translated: results.len(),
         pending_after,
         dry_run: false,
+        skipped_note: if pending_after > 0 {
+            "re-run translate to fill remaining pending".into()
+        } else {
+            String::new()
+        },
     })
 }
 
@@ -231,6 +243,7 @@ pub fn translate_jsonl(
         translated: n.min(results.len()),
         pending_after: pending_before.saturating_sub(results.len()),
         dry_run: false,
+        skipped_note: String::new(),
     })
 }
 

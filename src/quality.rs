@@ -5,8 +5,10 @@ pub fn check_unit(unit: &TextUnit, translation_lines: &[String]) -> Result<()> {
     if translation_lines.is_empty() {
         bail!("empty translation");
     }
-    if translation_lines.iter().any(|l| l.is_empty()) {
-        bail!("empty translation line");
+    // Allow blank lines (model often emits "" for empty 401 slots / line breaks).
+    // Only reject if every line is empty/whitespace.
+    if translation_lines.iter().all(|l| l.trim().is_empty()) {
+        bail!("empty translation");
     }
     match unit.item_type {
         ItemType::Array => {
@@ -25,26 +27,60 @@ pub fn check_unit(unit: &TextUnit, translation_lines: &[String]) -> Result<()> {
         }
         ItemType::LongText => {}
     }
-    // placeholder count
-    for (i, src) in unit.original_lines.iter().enumerate() {
-        let src_ctrl = count_ctrl_tokens(src) + count_raw_controls(src);
-        if let Some(dst) = translation_lines.get(i) {
-            let dst_ph = count_ctrl_tokens(dst);
-            // after unmask, placeholders gone; check raw backslash controls roughly
-            let dst_raw = count_raw_controls(dst);
-            // allow reflow: only compare total across all lines for long_text
-            let _ = (src_ctrl, dst_ph, dst_raw);
-        }
-    }
     let src_total: usize = unit.original_lines.iter().map(|l| count_raw_controls(l)).sum();
     let dst_total: usize = translation_lines.iter().map(|l| count_raw_controls(l)).sum();
-    if src_total > 0 && dst_total < src_total {
-        // soft: many models drop controls; hard-fail only severe loss
-        if dst_total * 2 < src_total {
-            bail!("control codes likely lost: src={src_total} dst={dst_total}");
-        }
+    if src_total > 0 && dst_total < src_total && dst_total * 2 < src_total {
+        bail!("control codes likely lost: src={src_total} dst={dst_total}");
     }
     Ok(())
+}
+
+/// Soft-fix common model issues so full runs can continue.
+pub fn sanitize_lines(unit: &TextUnit, lines: Vec<String>) -> Vec<String> {
+    let mut lines = lines;
+    if unit.item_type == ItemType::ShortText {
+        if lines.len() != 1 {
+            lines = vec![lines.join("")];
+        }
+        if lines[0].trim().is_empty() {
+            // fall back to original rather than failing the batch
+            lines = unit.original_lines.clone();
+        }
+        return lines;
+    }
+    if unit.item_type == ItemType::Array {
+        if lines.len() < unit.original_lines.len() {
+            lines.resize(unit.original_lines.len(), String::new());
+        } else if lines.len() > unit.original_lines.len() {
+            let n = unit.original_lines.len();
+            let mut out = lines[..n.saturating_sub(1)].to_vec();
+            if n > 0 {
+                out.push(lines[n.saturating_sub(1)..].join(""));
+            }
+            lines = out;
+        }
+        for (i, l) in lines.iter_mut().enumerate() {
+            if l.trim().is_empty() {
+                if let Some(src) = unit.original_lines.get(i) {
+                    *l = src.clone();
+                }
+            }
+        }
+        return lines;
+    }
+    // long_text: drop pure-empty trailing lines if we have at least one non-empty
+    if lines.iter().any(|l| !l.trim().is_empty()) {
+        while lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        // replace internal empty with single space so writeback keeps a slot
+        for l in &mut lines {
+            if l.is_empty() {
+                *l = " ".to_string();
+            }
+        }
+    }
+    lines
 }
 
 fn count_ctrl_tokens(s: &str) -> usize {

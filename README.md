@@ -10,7 +10,7 @@ extract (engine adapter) → translate (LLM core) → writeback (engine adapter)
 
 | Adapter | Target |
 |---------|--------|
-| `rmmz` | RPG Maker MV / MZ (`data/*.json` dialogue, System, base DB) |
+| `rmmz` | RPG Maker MV / MZ (`data/*.json` + **plugin params** in `js/plugins.js`; plugin *source* never modified) |
 | `jsonl` | Generic JSONL text packs (any engine via external extract/write scripts) |
 
 Inspired by the generalisation goal in [att-mz#11](https://github.com/yexi-by/att-mz/issues/11).

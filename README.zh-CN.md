@@ -10,7 +10,7 @@
 
 | 适配器 | 目标 |
 |--------|------|
-| `rmmz` | RPG Maker MV / MZ（`data/*.json` 对白、System、基础数据库） |
+| `rmmz` | RPG Maker MV / MZ（`data/*.json` + **`js/plugins.js` 插件参数**；**不改** `js/plugins/*.js` 源码） |
 | `jsonl` | 通用 JSONL 文本包（任意引擎，用外部脚本提取/写回） |
 
 设计目标对齐 [att-mz#11](https://github.com/yexi-by/att-mz/issues/11) 的通用化方向。

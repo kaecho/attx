@@ -110,6 +110,7 @@ attx status --workspace <工作区>
 ```
 
 - `detect.engine` 必须记录。非 `rmmz` 且无适配器 → 转 `references/jsonl-workflow.md`。
+- `rmmz` 提取会包含 **`js/plugins.js` 插件参数**（读 `plugins/*.js` 头部 `@param/@type` 判断用户可见字段；**禁止**改插件源码，写回只动 `plugins.js`）。
 - 大游戏提取后用 `status` 向用户报告条数与预估费用风险（pending 很大时建议先 `--limit` 试译）。
 
 ### 阶段 5 — 小批量试译（强制）
