@@ -20,29 +20,41 @@ attx doctor --ping
 ```
 
 用途：检查配置；`--ping` 发极短请求。  
-失败常见：无 clients、HTTP 401、超时。
+失败常见：无 clients、HTTP 401、超时。  
+`adapters:` 行列出全部格式 id。
+
+## formats
+
+```bash
+attx formats
+```
+
+stdout：`{"formats":[{"id","label","extensions":[],"input":"file|directory"}]}`  
+用途：Agent 判断某输入能否翻译、向用户展示能力清单。
 
 ## detect
 
 ```bash
-attx detect --game <游戏目录>
+attx detect --input <文件或目录>     # --game 为兼容别名
 ```
 
 stdout 示例：
 
 ```json
-{"engine":"rmmz","content_root":"/abs/path","label":"RPG Maker MV/MZ"}
+{"engine":"epub","content_root":"/abs/path/book.epub","label":"EPUB e-book"}
 ```
 
-字段：`engine`、`content_root`、`label`。
+字段：`engine`、`content_root`（文件输入时即文件路径）、`label`。  
+`.json` 输入按内容嗅探（paratranz → vnt → mtool → i18next）；歧义时加 `--engine`。
 
 ## init
 
 ```bash
-attx init --game <游戏目录> --src ja|en --dst zh [--engine rmmz|jsonl] [--workspace <目录>]
+attx init --input <文件或目录> --src ja|en --dst zh [--engine <id>] [--workspace <目录>]
 ```
 
-- 默认工作区：`<content_root>/.attx`
+- 默认工作区：目录输入 `<content_root>/.attx`；文件输入 `<父目录>/.attx-<文件名去扩展名>`
+- `--dst`：目标语言（`zh`/`zh-tw`/`en`/`ko` 等，写入译文 prompt 与输出文件名）
 - stdout：`{"workspace":"...","status":"ok"}`
 - 副作用：创建 `attx.db`、`workspace.json`
 
@@ -91,19 +103,21 @@ attx translate --workspace <工作区> [--limit N] [--dry-run]
 attx writeback --workspace <工作区> [--dry-run]
 ```
 
-- 将已译单元写回游戏 `data/*`（rmmz）或 `translated.jsonl`（jsonl）
-- 真写回前对已有文件生成 `*.attxbak`（若不存在）
-- stdout：`files`、`units_applied`、`dry_run`、`paths[]`
+- 输出目标由适配器决定：
+  - `rmmz`：**原地**写回游戏 `data/*`、`js/plugins.js`（已有文件先备份 `*.attxbak`）
+  - 文档/字幕/JSON 类：写**翻译副本** `<名>.<目标语言>.<扩展名>`（原文件不动）
+  - `jsonl`：`translated.jsonl`
+- stdout：`files`、`units_applied`、`dry_run`、`paths[]`（绝对路径）
 
 ## run
 
 ```bash
-attx run --game <游戏目录> --src ja --dst zh \
+attx run --input <文件或目录> --src ja --dst zh \
   [--workspace] [--engine] [--limit] [--no-translate] [--no-writeback]
 ```
 
 顺序：init → extract → [translate] → [writeback]。  
-**含写回时等同需要用户写回许可。**
+**rmmz 含写回时等同需要用户写回许可；文档类无需。**
 
 ## translate-jsonl
 

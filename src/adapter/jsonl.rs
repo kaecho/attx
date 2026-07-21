@@ -1,131 +1,105 @@
-use super::{DetectHit, EngineAdapter};
+//! Generic JSONL text-pack adapter — the universal escape hatch for engines
+//! without a native adapter: extract to JSONL with any external tool, translate
+//! here, write back with your own script.
+//!
+//! Input: a `.jsonl` file, or a directory containing `source.jsonl`.
+//! Line format: `{"id","text","context"?,"role"?,"item_type"?}`.
+
+use super::{DetectHit, FormatAdapter, OutputFile, output_sibling};
 use crate::model::{ItemType, TextUnit, Translation};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Adapter for a directory containing `source.jsonl` (or any *.jsonl marked as game).
-/// Detects when path is a file ending in .jsonl or a dir with source.jsonl.
 pub struct JsonlAdapter;
 
-impl EngineAdapter for JsonlAdapter {
+impl JsonlAdapter {
+    /// The actual jsonl file for a file-or-directory input.
+    fn source_file(input: &Path) -> Result<PathBuf> {
+        if input.is_file() {
+            return Ok(input.to_path_buf());
+        }
+        let candidate = input.join("source.jsonl");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        bail!(
+            "jsonl adapter expects a .jsonl file or source.jsonl under {}",
+            input.display()
+        );
+    }
+}
+
+impl FormatAdapter for JsonlAdapter {
     fn id(&self) -> &'static str {
         "jsonl"
     }
     fn label(&self) -> &'static str {
         "Generic JSONL text pack"
     }
-
-    fn detect(&self, game_path: &Path) -> Option<DetectHit> {
-        if game_path.is_file()
-            && game_path
-                .extension()
-                .and_then(|e| e.to_str())
-                == Some("jsonl")
-        {
-            return Some(DetectHit {
-                engine_id: self.id(),
-                label: self.label(),
-                content_root: game_path
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .canonicalize()
-                    .unwrap_or_else(|_| game_path.parent().unwrap_or(Path::new(".")).to_path_buf()),
-            });
-        }
-        if game_path.is_dir() && game_path.join("source.jsonl").is_file() {
-            return Some(DetectHit {
-                engine_id: self.id(),
-                label: self.label(),
-                content_root: game_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| game_path.to_path_buf()),
-            });
-        }
-        None
+    fn extensions(&self) -> &'static [&'static str] {
+        &["jsonl"]
+    }
+    fn input_kind(&self) -> &'static str {
+        "file|directory"
     }
 
-    fn extract(&self, content_root: &Path, _source_lang: &str) -> Result<Vec<TextUnit>> {
-        let path = if content_root.join("source.jsonl").is_file() {
-            content_root.join("source.jsonl")
-        } else {
-            bail!("jsonl adapter expects source.jsonl under {}", content_root.display());
-        };
-        let file = fs::File::open(&path).with_context(|| format!("{}", path.display()))?;
-        let reader = BufReader::new(file);
-        let mut units = Vec::new();
-        for (lineno, line) in reader.lines().enumerate() {
-            let line = line?;
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let rec: crate::model::JsonlRecord = serde_json::from_str(line)
-                .with_context(|| format!("jsonl line {}", lineno + 1))?;
-            let item_type = ItemType::parse(rec.item_type.as_deref().unwrap_or("long_text"));
-            let lines: Vec<String> = if item_type == ItemType::Array {
-                rec.text.lines().map(|s| s.to_string()).collect()
-            } else if rec.text.contains('\n') {
-                rec.text.lines().map(|s| s.to_string()).collect()
-            } else {
-                vec![rec.text.clone()]
-            };
-            let location = rec.id.clone();
-            let id = TextUnit::compute_id("jsonl", &location, &lines);
-            units.push(TextUnit {
-                id,
-                engine: "jsonl".into(),
-                domain: "jsonl".into(),
-                location,
-                item_type,
-                role: if rec.role.is_empty() {
-                    "旁白".into()
-                } else {
-                    rec.role
-                },
-                original_lines: lines,
-                source_line_paths: vec![],
-                context: rec.context,
-                payload: String::new(),
-            });
-        }
-        Ok(units)
+    fn detect(&self, input: &Path) -> Option<DetectHit> {
+        let is_hit = (input.is_file()
+            && input.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            || (input.is_dir() && input.join("source.jsonl").is_file());
+        is_hit.then(|| DetectHit {
+            engine_id: self.id(),
+            label: self.label(),
+            content_root: input.canonicalize().unwrap_or_else(|_| input.to_path_buf()),
+        })
+    }
+
+    fn extract(&self, input: &Path, _source_lang: &str) -> Result<Vec<TextUnit>> {
+        read_jsonl_units(&Self::source_file(input)?)
     }
 
     fn writeback(
         &self,
-        content_root: &Path,
+        input: &Path,
+        target_lang: &str,
         units: &[TextUnit],
         translations: &BTreeMap<String, Translation>,
-    ) -> Result<BTreeMap<String, String>> {
+    ) -> Result<Vec<OutputFile>> {
         let mut out_lines = Vec::new();
         for u in units {
-            let tr = translations.get(&u.id);
-            let translation_lines = tr.map(|t| t.translation_lines.clone());
-            let translation = translation_lines
-                .as_ref()
-                .map(|l| l.join("\n"))
-                .unwrap_or_default();
-            let rec = serde_json::json!({
-                "id": u.location,
-                "text": u.joined_text(),
-                "context": u.context,
-                "role": u.role,
-                "item_type": u.item_type.as_str(),
-                "translation": translation,
-                "translation_lines": translation_lines,
-            });
-            out_lines.push(serde_json::to_string(&rec)?);
+            out_lines.push(serde_json::to_string(&record_for(
+                u,
+                translations.get(&u.id),
+            ))?);
         }
         let body = out_lines.join("\n") + "\n";
-        // also write to content_root/translated.jsonl for convenience when not using pipeline file writer
-        let mut map = BTreeMap::new();
-        map.insert("translated.jsonl".into(), body);
-        let _ = content_root;
-        Ok(map)
+        let dest = if input.is_dir() {
+            input.join("translated.jsonl")
+        } else {
+            output_sibling(input, target_lang, "jsonl")
+        };
+        Ok(vec![OutputFile::text(dest, body)])
     }
+}
+
+fn record_for(u: &TextUnit, tr: Option<&Translation>) -> serde_json::Value {
+    let translation_lines = tr.map(|t| t.translation_lines.clone());
+    let translation = translation_lines
+        .as_ref()
+        .map(|l| l.join("\n"))
+        .unwrap_or_default();
+    serde_json::json!({
+        "id": u.location,
+        "text": u.joined_text(),
+        "context": u.context,
+        "role": u.role,
+        "item_type": u.item_type.as_str(),
+        "translation": translation,
+        "translation_lines": translation_lines,
+    })
 }
 
 /// Standalone helper used by translate-jsonl CLI (no workspace).
@@ -142,28 +116,22 @@ pub fn read_jsonl_units(path: &Path) -> Result<Vec<TextUnit>> {
         let rec: crate::model::JsonlRecord =
             serde_json::from_str(line).with_context(|| format!("line {}", lineno + 1))?;
         let item_type = ItemType::parse(rec.item_type.as_deref().unwrap_or("long_text"));
-        let lines = if item_type == ItemType::Array {
-            rec.text.lines().map(|s| s.to_string()).collect()
-        } else if rec.text.contains('\n') {
+        let lines: Vec<String> = if rec.text.contains('\n') {
             rec.text.lines().map(|s| s.to_string()).collect()
         } else {
-            vec![rec.text]
+            vec![rec.text.clone()]
         };
-        let location = rec.id.clone();
-        let id = if rec.id.is_empty() {
-            TextUnit::compute_id("jsonl", &format!("line:{}", lineno + 1), &lines)
+        let location = if rec.id.is_empty() {
+            format!("line:{}", lineno + 1)
         } else {
-            TextUnit::compute_id("jsonl", &location, &lines)
+            rec.id.clone()
         };
+        let id = TextUnit::compute_id("jsonl", &location, &lines);
         units.push(TextUnit {
             id,
             engine: "jsonl".into(),
             domain: "jsonl".into(),
-            location: if rec.id.is_empty() {
-                format!("line:{}", lineno + 1)
-            } else {
-                rec.id
-            },
+            location,
             item_type,
             role: if rec.role.is_empty() {
                 "旁白".into()
@@ -187,22 +155,11 @@ pub fn write_jsonl_translations(
     let mut f = fs::File::create(path).with_context(|| format!("{}", path.display()))?;
     let mut n = 0;
     for u in units {
-        let tr = translations.get(&u.id);
-        let translation_lines = tr.map(|t| t.translation_lines.clone());
-        let translation = translation_lines
-            .as_ref()
-            .map(|l| l.join("\n"))
-            .unwrap_or_default();
-        let rec = serde_json::json!({
-            "id": u.location,
-            "text": u.joined_text(),
-            "context": u.context,
-            "role": u.role,
-            "item_type": u.item_type.as_str(),
-            "translation": translation,
-            "translation_lines": translation_lines,
-        });
-        writeln!(f, "{}", serde_json::to_string(&rec)?)?;
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&record_for(u, translations.get(&u.id)))?
+        )?;
         n += 1;
     }
     Ok(n)

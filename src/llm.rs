@@ -38,8 +38,6 @@ struct Choice {
 struct ModelItem {
     #[serde(deserialize_with = "deserialize_id")]
     id: String,
-    #[serde(default)]
-    role: String,
     translation_lines: Vec<String>,
 }
 
@@ -71,37 +69,120 @@ where
     deserializer.deserialize_any(IdVisitor)
 }
 
-const SYSTEM_JA: &str = r#"你是游戏本地化译者，将源语言翻译为简体中文。
-规则：
-- 对白自然口语化，系统/UI 文本简洁准确。
-- 忠实保留原意、语气和内容尺度，不净化、不扩写。
-- 形如 [CTRL_n] 的标记必须原样保留，数量一致，不翻译。
-- long_text 可按中文语气调整断句；array 必须输出 line_count 行；short_text 的 translation_lines 只有 1 个字符串。
-- 顶层输出严格 JSON 数组，不要 Markdown、解释或额外文本。
-- 每个元素：{"id":"<id>","role":"<角色>","translation_lines":["..."]}
-- id 与 role 原样复制输入；没有角色时 role 为空字符串。
-"#;
+/// Prompt flavor derived from the format adapter — dialogue, prose, subtitles,
+/// documents, and UI strings need different registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Game,
+    Literary,
+    Subtitle,
+    Document,
+    Software,
+}
 
-const SYSTEM_EN: &str = r#"You are a game localizer. Translate source text into Simplified Chinese.
+pub fn profile_for_format(format_id: &str) -> Profile {
+    match format_id {
+        "epub" | "txt" => Profile::Literary,
+        "srt" | "vtt" | "lrc" => Profile::Subtitle,
+        "docx" | "md" => Profile::Document,
+        "po" | "i18next" | "paratranz" => Profile::Software,
+        // rmmz, jsonl, mtool, vnt, renpy and unknown formats
+        _ => Profile::Game,
+    }
+}
+
+fn lang_display(code: &str) -> &str {
+    match code.to_ascii_lowercase().as_str() {
+        "zh" | "zh-cn" | "zh-hans" => "简体中文 (Simplified Chinese)",
+        "zh-tw" | "zh-hant" => "繁體中文 (Traditional Chinese)",
+        "en" => "English",
+        "ja" => "日本語 (Japanese)",
+        "ko" => "한국어 (Korean)",
+        _ => code,
+    }
+}
+
+fn profile_line_zh(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Game => "这是游戏文本：对白自然口语化，系统/UI 文本简洁准确。",
+        Profile::Literary => {
+            "这是小说/文学文本：译文流畅自然，符合目标语言叙事习惯，保留人名、敬称与语气差异，不添加译注。"
+        }
+        Profile::Subtitle => "这是字幕/歌词：口语化、简短，适合单行显示，不添加注释。",
+        Profile::Document => "这是文档文本：语义准确，术语一致，保持原文格式结构。",
+        Profile::Software => "这是软件界面/本地化文本：简洁、术语一致，符合软件界面惯例。",
+    }
+}
+
+fn profile_line_en(profile: Profile) -> &'static str {
+    match profile {
+        Profile::Game => "This is game text: natural dialogue, concise UI/system strings.",
+        Profile::Literary => {
+            "This is literary prose: fluent and natural in the target language; keep names, honorifics and tone; no translator notes."
+        }
+        Profile::Subtitle => {
+            "These are subtitles/lyrics: colloquial and short, fit for one-line display."
+        }
+        Profile::Document => {
+            "This is document text: accurate, consistent terminology, keep formatting."
+        }
+        Profile::Software => "These are software UI strings: concise, consistent terminology.",
+    }
+}
+
+/// Build the system prompt. Chinese instructions for zh targets (best model
+/// adherence), English otherwise.
+fn system_prompt(source_lang: &str, target_lang: &str, profile: Profile) -> String {
+    let src = lang_display(source_lang);
+    let dst = lang_display(target_lang);
+    if target_lang.to_ascii_lowercase().starts_with("zh") {
+        format!(
+            r#"你是专业本地化译者，将 {src} 翻译为 {dst}。
+{profile_line}
+规则：
+- 忠实保留原意、语气和内容尺度，不净化、不扩写、不遗漏。
+- 形如 [CTRL_n] 的标记必须原样保留，数量一致，不翻译。
+- 文中的占位符与标记（如 {{tag}}、[var]、<tag>、%s、%d、\n）原样保留，不翻译其内部。
+- long_text 可按目标语言语感调整断句；array 必须输出 line_count 行；short_text 的 translation_lines 只有 1 个字符串。
+- 顶层输出严格 JSON 数组，不要 Markdown、解释或额外文本。
+- 每个元素：{{"id":"<id>","role":"<角色>","translation_lines":["..."]}}
+- id 与 role 原样复制输入；没有角色时 role 为空字符串。
+"#,
+            profile_line = profile_line_zh(profile),
+        )
+    } else {
+        format!(
+            r#"You are a professional localizer. Translate {src} into {dst}.
+{profile_line}
 Rules:
-- Natural dialogue; concise UI/system text.
-- Keep meaning, tone, and content rating. Do not censor or expand.
+- Keep meaning, tone, and content rating. Do not censor, expand, or omit.
 - Tokens like [CTRL_n] must be kept verbatim with the same count.
+- Placeholders and markup ({{tag}}, [var], <tag>, %s, %d, \n) stay verbatim; never translate inside them.
 - long_text may reflow lines; array must return exactly line_count lines; short_text has exactly 1 string in translation_lines.
 - Output a strict JSON array only. No markdown.
-- Each element: {"id":"<id>","role":"<role>","translation_lines":["..."]}
+- Each element: {{"id":"<id>","role":"<role>","translation_lines":["..."]}}
 - Copy id and role from input.
-"#;
+"#,
+            profile_line = profile_line_en(profile),
+        )
+    }
+}
 
 pub struct Translator {
     client: LlmClient,
     section: TranslationSection,
     http: reqwest::blocking::Client,
-    source_lang: String,
+    system: String,
 }
 
 impl Translator {
-    pub fn new(client: &LlmClient, section: &TranslationSection, source_lang: &str) -> Result<Self> {
+    pub fn new(
+        client: &LlmClient,
+        section: &TranslationSection,
+        source_lang: &str,
+        target_lang: &str,
+        profile: Profile,
+    ) -> Result<Self> {
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(client.timeout.max(30)))
             .build()?;
@@ -109,7 +190,7 @@ impl Translator {
             client: client.clone(),
             section: section.clone(),
             http,
-            source_lang: source_lang.to_string(),
+            system: system_prompt(source_lang, target_lang, profile),
         })
     }
 
@@ -121,8 +202,10 @@ impl Translator {
         self.translate_units_with_sink(units, limit, &mut |_batch| Ok(()))
     }
 
-    /// Translate units; call `on_batch` after each successful batch (for incremental DB save).
-    /// Runs up to `worker_count` HTTP batches in parallel.
+    /// Translate units with up to `worker_count` HTTP batches in parallel.
+    /// `on_batch` runs on the *calling* thread as each batch completes, so a
+    /// crash mid-run keeps everything already saved (Store is !Sync — workers
+    /// hand results over an mpsc channel instead of touching SQLite).
     pub fn translate_units_with_sink<F>(
         &self,
         units: &[TextUnit],
@@ -136,7 +219,11 @@ impl Translator {
         if slice.is_empty() {
             return Ok(vec![]);
         }
-        let batches = batch_units(&slice, self.section.batch_chars, self.section.max_context_items);
+        let batches = batch_units(
+            &slice,
+            self.section.batch_chars,
+            self.section.max_context_items,
+        );
         let total_batches = batches.len();
         let total_units = slice.len();
         let workers = self.section.worker_count.max(1);
@@ -147,8 +234,9 @@ impl Translator {
         );
 
         // Shared queue of batch indices
+        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex};
+        use std::sync::mpsc;
 
         let next = Arc::new(AtomicUsize::new(0));
         let batches = Arc::new(
@@ -157,16 +245,19 @@ impl Translator {
                 .map(|b| b.into_iter().cloned().collect::<Vec<TextUnit>>())
                 .collect::<Vec<_>>(),
         );
-        let results: Arc<Mutex<Vec<(usize, Result<Vec<Translation>>)>>> =
-            Arc::new(Mutex::new(Vec::new()));
         let done_units = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = mpsc::channel::<Vec<Translation>>();
+
+        let mut out = Vec::new();
+        let mut skipped = 0usize;
+        let mut sink_err: Option<anyhow::Error> = None;
 
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 let next = Arc::clone(&next);
                 let batches = Arc::clone(&batches);
-                let results = Arc::clone(&results);
                 let done_units = Arc::clone(&done_units);
+                let tx = tx.clone();
                 let translator = self;
                 scope.spawn(move || {
                     loop {
@@ -187,7 +278,7 @@ impl Translator {
                         let items = loop {
                             attempt += 1;
                             match translator.translate_batch_resilient(&refs) {
-                                Ok(items) => break Ok(items),
+                                Ok(items) => break items,
                                 Err(e) if attempt <= translator.section.retry_count => {
                                     eprintln!("  retry batch {} #{attempt}: {e:#}", bi + 1);
                                     thread::sleep(Duration::from_secs(
@@ -196,36 +287,37 @@ impl Translator {
                                 }
                                 Err(e) => {
                                     eprintln!("  SKIP batch {} after retries: {e:#}", bi + 1);
-                                    break Ok(Vec::new());
+                                    break Vec::new();
                                 }
                             }
                         };
-                        if let Ok(v) = &items {
-                            done_units.fetch_add(v.len(), Ordering::Relaxed);
+                        done_units.fetch_add(items.len(), Ordering::Relaxed);
+                        if tx.send(items).is_err() {
+                            break; // receiver gone (sink error) — stop early
                         }
-                        results.lock().unwrap().push((bi, items));
                     }
                 });
             }
-        });
+            drop(tx); // workers hold clones; rx ends when they finish
 
-        // deterministic order save
-        let mut collected = results.lock().unwrap();
-        collected.sort_by_key(|(i, _)| *i);
-        let mut out = Vec::new();
-        let mut skipped = 0usize;
-        for (bi, res) in collected.drain(..) {
-            match res {
-                Ok(items) if items.is_empty() => skipped += 1,
-                Ok(items) => {
-                    on_batch(&items)?;
-                    out.extend(items);
-                }
-                Err(e) => {
-                    eprintln!("  batch {} error: {e:#}", bi + 1);
+            // Drain on this thread: incremental save as batches arrive.
+            for items in rx {
+                if items.is_empty() {
                     skipped += 1;
+                    continue;
+                }
+                match on_batch(&items) {
+                    Ok(()) => out.extend(items),
+                    Err(e) => {
+                        sink_err = Some(e);
+                        break; // dropping rx makes workers bail on next send
+                    }
                 }
             }
+        });
+
+        if let Some(e) = sink_err {
+            return Err(e.context("saving translations"));
         }
         if skipped > 0 {
             eprintln!("finished with {skipped} skipped batch(es); re-run for remaining pending");
@@ -241,7 +333,8 @@ impl Translator {
                 if v.len() == batch.len() {
                     return Ok(v);
                 }
-                let got: BTreeMap<_, _> = v.iter().map(|t| (t.unit_id.clone(), t.clone())).collect();
+                let got: BTreeMap<_, _> =
+                    v.iter().map(|t| (t.unit_id.clone(), t.clone())).collect();
                 let mut out = v;
                 for u in batch {
                     if !got.contains_key(&u.id) {
@@ -252,7 +345,7 @@ impl Translator {
                         }
                     }
                 }
-                return Ok(out);
+                Ok(out)
             }
             Ok(_) | Err(_) if batch.len() > 1 => {
                 // split in half then recurse / singles
@@ -278,10 +371,10 @@ impl Translator {
             }
             Ok(_) | Err(_) => {
                 // single unit: try once more then passthrough
-                if let Ok(v) = self.translate_batch(batch) {
-                    if !v.is_empty() {
-                        return Ok(v);
-                    }
+                if let Ok(v) = self.translate_batch(batch)
+                    && !v.is_empty()
+                {
+                    return Ok(v);
                 }
                 Ok(batch.iter().map(|u| passthrough(u)).collect())
             }
@@ -293,10 +386,10 @@ impl Translator {
         let mut id_map: BTreeMap<String, &TextUnit> = BTreeMap::new(); // prompt id -> unit
 
         let mut body = String::from("# 场景\n\n");
-        if let Some(c) = batch.first().map(|u| u.context.as_str()) {
-            if !c.is_empty() {
-                body.push_str(&format!("context: {c}\n"));
-            }
+        if let Some(c) = batch.first().map(|u| u.context.as_str())
+            && !c.is_empty()
+        {
+            body.push_str(&format!("context: {c}\n"));
         }
         body.push_str("\n# 正文\n\n");
 
@@ -333,12 +426,7 @@ impl Translator {
             body.push('\n');
         }
 
-        let system = if self.source_lang == "en" {
-            SYSTEM_EN
-        } else {
-            SYSTEM_JA
-        };
-        let raw = self.chat(system, &body)?;
+        let raw = self.chat(self.system.as_str(), &body)?;
         let items = parse_model_json(&raw)?;
         let mut translations = Vec::new();
         for item in items {
@@ -406,8 +494,8 @@ impl Translator {
         if !status.is_success() {
             bail!("LLM HTTP {status}: {}", truncate(&text, 500));
         }
-        let parsed: ChatResponse =
-            serde_json::from_str(&text).with_context(|| format!("decode chat: {}", truncate(&text, 300)))?;
+        let parsed: ChatResponse = serde_json::from_str(&text)
+            .with_context(|| format!("decode chat: {}", truncate(&text, 300)))?;
         let choice = parsed
             .choices
             .first()
@@ -483,7 +571,8 @@ fn parse_model_json(raw: &str) -> Result<Vec<ModelItem>> {
     let start = body.find('[').unwrap_or(0);
     let end = body.rfind(']').map(|i| i + 1).unwrap_or(body.len());
     let slice = &body[start..end];
-    serde_json::from_str(slice).with_context(|| format!("parse model json: {}", truncate(slice, 400)))
+    serde_json::from_str(slice)
+        .with_context(|| format!("parse model json: {}", truncate(slice, 400)))
 }
 
 fn truncate(s: &str, n: usize) -> String {

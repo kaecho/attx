@@ -1,4 +1,4 @@
-use super::{DetectHit, EngineAdapter, set_json_path};
+use super::{DetectHit, FormatAdapter, OutputFile, set_json_path};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -33,12 +33,15 @@ const BASE_FIELDS: &[&str] = &[
 
 pub struct RmmzAdapter;
 
-impl EngineAdapter for RmmzAdapter {
+impl FormatAdapter for RmmzAdapter {
     fn id(&self) -> &'static str {
         "rmmz"
     }
     fn label(&self) -> &'static str {
         "RPG Maker MV/MZ"
+    }
+    fn input_kind(&self) -> &'static str {
+        "directory"
     }
 
     fn detect(&self, game_path: &Path) -> Option<DetectHit> {
@@ -76,10 +79,10 @@ impl EngineAdapter for RmmzAdapter {
                 continue;
             }
             let path = entry.path();
-            let raw = fs::read_to_string(&path)
-                .with_context(|| format!("read {}", path.display()))?;
-            let value: Value = serde_json::from_str(&raw)
-                .with_context(|| format!("json {}", path.display()))?;
+            let raw =
+                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            let value: Value =
+                serde_json::from_str(&raw).with_context(|| format!("json {}", path.display()))?;
             extract_commands(&name, &value, source_lang, &mut units)?;
         }
 
@@ -119,9 +122,10 @@ impl EngineAdapter for RmmzAdapter {
     fn writeback(
         &self,
         content_root: &Path,
+        _target_lang: &str,
         units: &[TextUnit],
         translations: &BTreeMap<String, Translation>,
-    ) -> Result<BTreeMap<String, String>> {
+    ) -> Result<Vec<OutputFile>> {
         let data_dir = resolve_data_dir(content_root)?;
         let mut files: BTreeMap<String, Value> = BTreeMap::new();
 
@@ -144,8 +148,8 @@ impl EngineAdapter for RmmzAdapter {
             if !p.is_file() {
                 continue;
             }
-            let raw = fs::read_to_string(&p)
-                .with_context(|| format!("read origin {}", p.display()))?;
+            let raw =
+                fs::read_to_string(&p).with_context(|| format!("read origin {}", p.display()))?;
             let v: Value = serde_json::from_str(&raw)?;
             files.insert(file.clone(), v);
         }
@@ -163,21 +167,32 @@ impl EngineAdapter for RmmzAdapter {
             apply_unit(&mut files, u, tr)?;
         }
 
-        let mut out = BTreeMap::new();
+        let mut out = Vec::new();
         for (file, value) in files {
             let text = serde_json::to_string(&value)?;
-            let rel = format!("data/{file}");
-            out.insert(rel, text);
+            out.push(OutputFile::text(
+                data_dir_target(content_root).join(&file),
+                text,
+            ));
         }
 
         if let Some(plugins_js) =
             super::rmmz_plugins::writeback_plugins(content_root, units, translations)?
         {
-            out.insert("js/plugins.js".into(), plugins_js);
+            out.push(OutputFile::text(
+                content_root.join("js/plugins.js"),
+                plugins_js,
+            ));
         }
 
         Ok(out)
     }
+}
+
+/// Writeback always targets the live `data/` dir, even when extraction read
+/// from a `data_origin` snapshot.
+fn data_dir_target(content_root: &Path) -> PathBuf {
+    content_root.join("data")
 }
 
 fn find_content_root(game_path: &Path) -> Option<PathBuf> {
@@ -290,55 +305,57 @@ fn extract_command_list(
     // (location, role, lines, line_paths)
     let mut pending_scroll: Option<(String, Vec<String>, Vec<String>, usize)> = None;
 
-    let flush_long = |units: &mut Vec<TextUnit>,
-                      pending: &mut Option<(String, String, Vec<String>, Vec<String>)>| {
-        if let Some((loc, role, lines, paths)) = pending.take() {
-            if lines.is_empty() {
-                return;
+    let flush_long =
+        |units: &mut Vec<TextUnit>,
+         pending: &mut Option<(String, String, Vec<String>, Vec<String>)>| {
+            if let Some((loc, role, lines, paths)) = pending.take() {
+                if lines.is_empty() {
+                    return;
+                }
+                if !lines.iter().any(|l| needs_translation(l, source_lang)) {
+                    return;
+                }
+                let id = TextUnit::compute_id("rmmz", &loc, &lines);
+                units.push(TextUnit {
+                    id,
+                    engine: "rmmz".into(),
+                    domain: "dialogue".into(),
+                    location: loc,
+                    item_type: ItemType::LongText,
+                    role,
+                    original_lines: lines,
+                    source_line_paths: paths,
+                    context: prefix.to_string(),
+                    payload: String::new(),
+                });
             }
-            if !lines.iter().any(|l| needs_translation(l, source_lang)) {
-                return;
-            }
-            let id = TextUnit::compute_id("rmmz", &loc, &lines);
-            units.push(TextUnit {
-                id,
-                engine: "rmmz".into(),
-                domain: "dialogue".into(),
-                location: loc,
-                item_type: ItemType::LongText,
-                role,
-                original_lines: lines,
-                source_line_paths: paths,
-                context: prefix.to_string(),
-                payload: String::new(),
-            });
-        }
-    };
+        };
 
-    let flush_scroll = |units: &mut Vec<TextUnit>,
-                        pending: &mut Option<(String, Vec<String>, Vec<String>, usize)>| {
-        if let Some((loc, lines, paths, _)) = pending.take() {
-            if lines.is_empty() {
-                return;
+    let flush_scroll =
+        |units: &mut Vec<TextUnit>,
+         pending: &mut Option<(String, Vec<String>, Vec<String>, usize)>| {
+            if let Some((loc, lines, paths, _)) = pending.take() {
+                if lines.is_empty() {
+                    return;
+                }
+                if !lines.iter().any(|l| needs_translation(l, source_lang)) {
+                    return;
+                }
+                let id = TextUnit::compute_id("rmmz", &loc, &lines);
+                units.push(TextUnit {
+                    id,
+                    engine: "rmmz".into(),
+                    domain: "scroll".into(),
+                    location: loc,
+                    item_type: ItemType::LongText,
+                    role: "旁白".into(),
+                    original_lines: lines,
+                    source_line_paths: paths,
+                    context: prefix.to_string(),
+                    payload: String::new(),
+                });
             }
-            if !lines.iter().any(|l| needs_translation(l, source_lang)) {
-                return;
-            }
-            let id = TextUnit::compute_id("rmmz", &loc, &lines);
-            units.push(TextUnit {
-                id,
-                engine: "rmmz".into(),
-                domain: "scroll".into(),
-                location: loc,
-                item_type: ItemType::LongText,
-                role: "旁白".into(),
-                original_lines: lines,
-                source_line_paths: paths,
-                context: prefix.to_string(),
-                payload: String::new(),
-            });
-        }
-    };
+        };
 
     for (idx, cmd) in list.iter().enumerate() {
         let code = cmd.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -350,14 +367,14 @@ fn extract_command_list(
                 flush_scroll(units, &mut pending_scroll);
                 flush_long(units, &mut pending_long);
                 let mut role = "旁白".to_string();
-                if let Some(arr) = params.as_array() {
-                    if arr.len() >= 5 {
-                        if let Some(s) = arr[4].as_str() {
-                            let t = s.trim();
-                            if !t.is_empty() {
-                                role = t.to_string();
-                            }
-                        }
+                if let Some(s) = params
+                    .as_array()
+                    .filter(|a| a.len() >= 5)
+                    .and_then(|a| a[4].as_str())
+                {
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        role = t.to_string();
                     }
                 }
                 pending_long = Some((location, role, Vec::new(), Vec::new()));
@@ -498,7 +515,13 @@ fn extract_base(file: &str, arr: &Value, source_lang: &str, units: &mut Vec<Text
     }
 }
 
-fn push_short(units: &mut Vec<TextUnit>, location: &str, text: &str, source_lang: &str, domain: &str) {
+fn push_short(
+    units: &mut Vec<TextUnit>,
+    location: &str,
+    text: &str,
+    source_lang: &str,
+    domain: &str,
+) {
     let t = text.trim();
     if t.is_empty() || !needs_translation(t, source_lang) {
         return;
@@ -551,10 +574,7 @@ fn apply_unit(
 fn write_short(root: &mut Value, location: &str, lines: &[String]) -> Result<()> {
     let text = lines.first().cloned().unwrap_or_default();
     // location like System.json/gameTitle or Actors.json/1/name
-    let rest = location
-        .split_once('/')
-        .map(|(_, r)| r)
-        .unwrap_or("");
+    let rest = location.split_once('/').map(|(_, r)| r).unwrap_or("");
     if rest.is_empty() {
         bail!("short path missing fields: {location}");
     }
@@ -563,10 +583,7 @@ fn write_short(root: &mut Value, location: &str, lines: &[String]) -> Result<()>
 }
 
 fn write_choices(root: &mut Value, location: &str, lines: &[String]) -> Result<()> {
-    let rest = location
-        .split_once('/')
-        .map(|(_, r)| r)
-        .unwrap_or("");
+    let rest = location.split_once('/').map(|(_, r)| r).unwrap_or("");
     // navigate to command object
     let cmd = navigate_mut(root, rest)?;
     let params = cmd
@@ -626,21 +643,6 @@ fn fit_lines(lines: &[String], n: usize) -> Vec<String> {
     let mut out = lines.to_vec();
     out.resize(n, String::new());
     out
-}
-
-fn split_list_index(location: &str) -> Result<(String, usize)> {
-    // "Map003.json/2/0/5" → list path "Map003.json/2/0" is not list; need events/N/pages/M/list
-    // Our location uses compact form Map/event/page/cmdIndex for maps.
-    // Navigate rebuilds actual JSON path.
-    let parts: Vec<&str> = location.split('/').collect();
-    if parts.len() < 2 {
-        bail!("bad line path {location}");
-    }
-    let idx: usize = parts[parts.len() - 1]
-        .parse()
-        .with_context(|| format!("cmd index in {location}"))?;
-    let list_loc = parts[..parts.len() - 1].join("/");
-    Ok((list_loc, idx))
 }
 
 fn navigate_mut<'a>(root: &'a mut Value, compact_rest: &str) -> Result<&'a mut Value> {
@@ -767,23 +769,19 @@ fn navigate_array_db<'a>(root: &'a mut Value, parts: &[&str]) -> Result<&'a mut 
             .get_mut("list")
             .and_then(|v| v.as_array_mut())
             .ok_or_else(|| anyhow::anyhow!("no list"))?;
-        return list
-            .get_mut(cmd)
-            .ok_or_else(|| anyhow::anyhow!("cmd OOB"));
+        return list.get_mut(cmd).ok_or_else(|| anyhow::anyhow!("cmd OOB"));
     }
 
     if arr[idx].get("list").is_some() {
         // CommonEvents: id/cmd
-        if parts.len() == 2 {
-            if let Ok(cmd) = parts[1].parse::<usize>() {
-                let list = arr[idx]
-                    .get_mut("list")
-                    .and_then(|v| v.as_array_mut())
-                    .ok_or_else(|| anyhow::anyhow!("no list"))?;
-                return list
-                    .get_mut(cmd)
-                    .ok_or_else(|| anyhow::anyhow!("cmd OOB"));
-            }
+        if parts.len() == 2
+            && let Ok(cmd) = parts[1].parse::<usize>()
+        {
+            let list = arr[idx]
+                .get_mut("list")
+                .and_then(|v| v.as_array_mut())
+                .ok_or_else(|| anyhow::anyhow!("no list"))?;
+            return list.get_mut(cmd).ok_or_else(|| anyhow::anyhow!("cmd OOB"));
         }
     }
 

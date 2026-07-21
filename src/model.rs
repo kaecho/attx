@@ -132,13 +132,11 @@ pub fn mask_controls(text: &str) -> (String, Vec<(String, String)>) {
     let mut map = Vec::new();
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
-    let mut i = 0usize;
-    for m in re.find_iter(text) {
+    for (i, m) in re.find_iter(text).enumerate() {
         out.push_str(&text[last..m.start()]);
         let key = format!("[CTRL_{i}]");
         map.push((key.clone(), m.as_str().to_string()));
         out.push_str(&key);
-        i += 1;
         last = m.end();
     }
     out.push_str(&text[last..]);

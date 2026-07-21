@@ -14,7 +14,7 @@ use std::path::PathBuf;
 #[command(
     name = "attx",
     version,
-    about = "Agent Translation Toolkit eXtensible — universal game text translation framework"
+    about = "Agent Translation Toolkit eXtensible — universal AI translation framework (games, ebooks, documents, subtitles, localization files)"
 )]
 struct Cli {
     /// Path to setting.toml (default: ./setting.toml or $ATTX_HOME/setting.toml)
@@ -33,25 +33,29 @@ enum Commands {
         #[arg(long)]
         ping: bool,
     },
-    /// Detect game engine for a directory
+    /// List supported format adapters as JSON
+    Formats,
+    /// Detect the format adapter for a file or directory
     Detect {
-        #[arg(long)]
-        game: PathBuf,
+        /// Input file (epub/docx/txt/md/srt/…) or game directory (--game also accepted)
+        #[arg(long, alias = "game")]
+        input: PathBuf,
     },
-    /// Register / open a workspace for a game
+    /// Register / open a workspace for an input
     Init {
-        #[arg(long)]
-        game: PathBuf,
-        /// Force engine id (rmmz | jsonl). Auto-detect when omitted.
+        /// Input file or game directory (--game also accepted)
+        #[arg(long, alias = "game")]
+        input: PathBuf,
+        /// Force format id (see `attx formats`). Auto-detect when omitted.
         #[arg(long)]
         engine: Option<String>,
         /// Source language: ja | en
         #[arg(long, default_value = "ja")]
         src: String,
-        /// Target language
+        /// Target language (e.g. zh, zh-tw, en, ko)
         #[arg(long, default_value = "zh")]
         dst: String,
-        /// Workspace dir (default: <game>/.attx)
+        /// Workspace dir (default: <dir>/.attx or <parent>/.attx-<stem>)
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
@@ -81,8 +85,9 @@ enum Commands {
     },
     /// extract → translate → writeback
     Run {
-        #[arg(long)]
-        game: PathBuf,
+        /// Input file or game directory (--game also accepted)
+        #[arg(long, alias = "game")]
+        input: PathBuf,
         #[arg(long)]
         engine: Option<String>,
         #[arg(long, default_value = "ja")]
@@ -152,8 +157,12 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Doctor { ping } => pipeline::doctor(&settings, ping),
-        Commands::Detect { game } => {
-            let hit = adapter::detect(&game)?;
+        Commands::Formats => {
+            println!("{}", serde_json::to_string_pretty(&pipeline::formats())?);
+            Ok(())
+        }
+        Commands::Detect { input } => {
+            let hit = adapter::detect(&input)?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -165,13 +174,13 @@ fn run() -> Result<()> {
             Ok(())
         }
         Commands::Init {
-            game,
+            input,
             engine,
             src,
             dst,
             workspace,
         } => {
-            let ws = pipeline::init_workspace(&game, engine.as_deref(), &src, &dst, workspace)?;
+            let ws = pipeline::init_workspace(&input, engine.as_deref(), &src, &dst, workspace)?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -201,7 +210,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Commands::Run {
-            game,
+            input,
             engine,
             src,
             dst,
@@ -210,7 +219,7 @@ fn run() -> Result<()> {
             no_translate,
             no_writeback,
         } => {
-            let ws = pipeline::init_workspace(&game, engine.as_deref(), &src, &dst, workspace)?;
+            let ws = pipeline::init_workspace(&input, engine.as_deref(), &src, &dst, workspace)?;
             let extracted = pipeline::extract(&ws, &settings)?;
             let mut out = serde_json::json!({
                 "workspace": ws,

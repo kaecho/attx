@@ -22,13 +22,23 @@ pub fn check_unit(unit: &TextUnit, translation_lines: &[String]) -> Result<()> {
         }
         ItemType::ShortText => {
             if translation_lines.len() != 1 {
-                bail!("short_text must have 1 line, got {}", translation_lines.len());
+                bail!(
+                    "short_text must have 1 line, got {}",
+                    translation_lines.len()
+                );
             }
         }
         ItemType::LongText => {}
     }
-    let src_total: usize = unit.original_lines.iter().map(|l| count_raw_controls(l)).sum();
-    let dst_total: usize = translation_lines.iter().map(|l| count_raw_controls(l)).sum();
+    let src_total: usize = unit
+        .original_lines
+        .iter()
+        .map(|l| count_raw_controls(l))
+        .sum();
+    let dst_total: usize = translation_lines
+        .iter()
+        .map(|l| count_raw_controls(l))
+        .sum();
     if src_total > 0 && dst_total < src_total && dst_total * 2 < src_total {
         bail!("control codes likely lost: src={src_total} dst={dst_total}");
     }
@@ -60,10 +70,10 @@ pub fn sanitize_lines(unit: &TextUnit, lines: Vec<String>) -> Vec<String> {
             lines = out;
         }
         for (i, l) in lines.iter_mut().enumerate() {
-            if l.trim().is_empty() {
-                if let Some(src) = unit.original_lines.get(i) {
-                    *l = src.clone();
-                }
+            if l.trim().is_empty()
+                && let Some(src) = unit.original_lines.get(i)
+            {
+                *l = src.clone();
             }
         }
         return lines;
@@ -83,10 +93,6 @@ pub fn sanitize_lines(unit: &TextUnit, lines: Vec<String>) -> Vec<String> {
     lines
 }
 
-fn count_ctrl_tokens(s: &str) -> usize {
-    s.matches("[CTRL_").count()
-}
-
 fn count_raw_controls(s: &str) -> usize {
     // count backslash-letter patterns
     let mut n = 0;
@@ -95,7 +101,12 @@ fn count_raw_controls(s: &str) -> usize {
     while i + 1 < b.len() {
         if b[i] == b'\\' {
             let c = b[i + 1];
-            if c.is_ascii_alphabetic() || matches!(c, b'.' | b'!' | b'|' | b'>' | b'{' | b'}' | b'$' | b'^' | b'\\') {
+            if c.is_ascii_alphabetic()
+                || matches!(
+                    c,
+                    b'.' | b'!' | b'|' | b'>' | b'{' | b'}' | b'$' | b'^' | b'\\'
+                )
+            {
                 n += 1;
                 i += 2;
                 continue;

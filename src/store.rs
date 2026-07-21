@@ -1,11 +1,10 @@
 use crate::model::{ItemType, TextUnit, Translation, WorkspaceMeta};
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct Store {
-    pub path: PathBuf,
     conn: Connection,
 }
 
@@ -13,8 +12,8 @@ impl Store {
     pub fn open(workspace: &Path) -> Result<Self> {
         std::fs::create_dir_all(workspace)?;
         let path = workspace.join("attx.db");
-        let conn = Connection::open(&path)
-            .with_context(|| format!("open db {}", path.display()))?;
+        let conn =
+            Connection::open(&path).with_context(|| format!("open db {}", path.display()))?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
@@ -43,7 +42,7 @@ impl Store {
             );
             "#,
         )?;
-        Ok(Self { path, conn })
+        Ok(Self { conn })
     }
 
     pub fn set_meta(&self, meta: &WorkspaceMeta) -> Result<()> {
@@ -216,9 +215,9 @@ impl Store {
     }
 
     pub fn all_translations(&self) -> Result<BTreeMap<String, Translation>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT unit_id, translation_lines, source_hash FROM translations",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT unit_id, translation_lines, source_hash FROM translations")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -252,47 +251,6 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok((total, translated, total.saturating_sub(translated)))
-    }
-
-    pub fn get_unit(&self, id: &str) -> Result<Option<TextUnit>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT id,engine,domain,location,item_type,role,original_lines,source_line_paths,context,payload FROM units WHERE id=?1",
-                params![id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, String>(5)?,
-                        r.get::<_, String>(6)?,
-                        r.get::<_, String>(7)?,
-                        r.get::<_, String>(8)?,
-                        r.get::<_, String>(9)?,
-                    ))
-                },
-            )
-            .optional()?;
-        Ok(match row {
-            None => None,
-            Some((id, engine, domain, location, item_type, role, lines, paths, context, payload)) => {
-                Some(TextUnit {
-                    id,
-                    engine,
-                    domain,
-                    location,
-                    item_type: ItemType::parse(&item_type),
-                    role,
-                    original_lines: serde_json::from_str(&lines)?,
-                    source_line_paths: serde_json::from_str(&paths)?,
-                    context,
-                    payload,
-                })
-            }
-        })
     }
 }
 

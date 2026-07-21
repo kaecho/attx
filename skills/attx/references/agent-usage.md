@@ -4,8 +4,11 @@
 
 ## 1. 准备（用户做一次）
 
-1. 拿到 attx：克隆仓库或下载 Release 二进制  
-2. 配置模型：
+1. 拿到 attx：克隆仓库或下载 Release 二进制
+2. 配置模型（两种方式任选）：
+   - **问答向导（推荐）**：直接对 Agent 说"帮我配置 attx"，Agent 按 SKILL.md
+     阶段 -1 逐项询问 base_url / api_key / model / 语向并写入 `setting.toml`
+   - 手动：
 
 ```bash
 cd <attx目录>
@@ -22,14 +25,29 @@ attx doctor --ping
 ```
 
 4. 在 Agent 中：
-   - **打开游戏目录** 作为工作区根（推荐），或同时能访问 `<attx目录>` 与 `<游戏目录>`
+   - **打开输入所在目录**（游戏根目录，或 epub/文档所在目录），或同时能访问 `<attx目录>` 与输入
    - 确保 Agent 能读到 `skills/attx/SKILL.md`（仓库内路径，或把 skills 拷进 Agent 的 skill 搜索路径）
 
 ## 2. 安装 Skill 的几种方式
 
-### A. 仓库内 Skill（开发/源码用户）
+### A. Claude Code（个人全局 / 项目级）
 
-路径：`<attx目录>/skills/attx/SKILL.md`  
+```bash
+# 个人全局：对所有会话生效
+mkdir -p ~/.claude/skills
+cp -a <attx目录>/skills/attx ~/.claude/skills/
+
+# 或项目级：仅当前项目生效
+mkdir -p <项目>/.claude/skills
+cp -a <attx目录>/skills/attx <项目>/.claude/skills/
+```
+
+之后在会话里 `/attx` 或说"用 attx 翻译 xxx"即可触发；
+Agent 会读取 skill 列表看到 attx 的 description 自动路由。
+
+### B. 仓库内 Skill（开发/源码用户，任何 Agent 通用）
+
+路径：`<attx目录>/skills/attx/SKILL.md`
 
 在对话里明确：
 
@@ -37,26 +55,19 @@ attx doctor --ping
 严格遵循 <attx目录>/skills/attx/SKILL.md
 ```
 
-### B. 拷贝到 Agent 全局 skills 目录
+### C. 其他 Agent 的 skills 目录
 
 按你使用的 Agent 文档放置，例如：
 
 ```bash
-# 示例：某些工具使用 ~/.agents/skills 或项目 .agents/skills
 mkdir -p <Agent的skills根>/attx
 cp -a <attx目录>/skills/attx/* <Agent的skills根>/attx/
 ```
 
-Skill frontmatter：
+由 Agent 的 skill 发现机制自动加载；frontmatter 的 `description`
+限定了**仅在用户要求翻译时触发**。
 
-```yaml
-name: attx
-description: ...仅在用户明确要求执行 attx 翻译流程时使用...
-```
-
-由 Agent 的 skill 发现机制自动加载；**仅在用户要汉化时触发**。
-
-### C. 发行包内附带（推荐给终端用户）
+### D. 发行包内附带（推荐给终端用户）
 
 Release 资产中保留 `skills/attx/`，用户解压后提示词写：
 
@@ -82,16 +93,17 @@ CLI：<发行包>/attx
 
 ## 4. 标准命令序列（复制即用）
 
-把 `<ATTX>`、`<GAME>`、`<WS>` 换成真路径：
+把 `<ATTX>`、`<INPUT>`、`<WS>` 换成真路径：
 
 ```bash
 ATTX=<attx目录>/target/release/attx   # 或 PATH 中的 attx
-GAME=<游戏目录>
-WS=<工作区>   # 常用 $GAME/.attx
+INPUT=<输入文件或游戏目录>            # epub/docx/srt/… 或 RM 游戏根目录
+WS=<工作区>   # 目录输入常用 $INPUT/.attx；文件输入省略让 init 自动生成
 
 $ATTX --config <attx目录>/setting.toml doctor --ping
-$ATTX detect --game "$GAME"
-$ATTX init --game "$GAME" --src ja --dst zh --workspace "$WS"
+$ATTX formats                        # 能力清单（可选）
+$ATTX detect --input "$INPUT"
+$ATTX init --input "$INPUT" --src ja --dst zh --workspace "$WS"
 $ATTX extract --workspace "$WS"
 $ATTX status --workspace "$WS"
 $ATTX translate --workspace "$WS" --limit 20
@@ -99,18 +111,18 @@ $ATTX status --workspace "$WS"
 # 用户确认后：
 $ATTX translate --workspace "$WS"
 $ATTX writeback --workspace "$WS" --dry-run
-# 用户明确允许写回后：
+# 文档类直接写（产出翻译副本）；rmmz 需用户明确允许后：
 $ATTX writeback --workspace "$WS"
 ```
 
-**强烈建议**：先 `cp -a "$GAME" /tmp/game-copy` 再对副本写回。
+**rmmz 强烈建议**：先 `cp -a "$INPUT" /tmp/game-copy` 再对副本写回。
 
 ## 5. 用户一句话触发示例
 
 ```text
-用 attx（~/Desktop/workspace/Github/AT）按 skill 汉化
-游戏：/path/to/Game/SM
-源语言日文。先试译 20 条，全量前问我；写回前必须问我。
+用 attx（~/Desktop/workspace/Github/AT）按 skill 翻译
+输入：/path/to/novel.epub（或游戏目录）
+源语言日文，目标简体中文。先试译 20 条，全量前问我。
 ```
 
 ## 6. Agent 常见误区

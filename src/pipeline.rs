@@ -1,6 +1,6 @@
 use crate::adapter::{self, detect_or_force};
 use crate::config::{self, Settings};
-use crate::llm::Translator;
+use crate::llm::{Profile, Translator, profile_for_format};
 use crate::model::{TextUnit, Translation, WorkspaceMeta};
 use crate::store::{self, Store};
 use anyhow::{Context, Result, bail};
@@ -46,7 +46,7 @@ pub fn doctor(settings: &Settings, ping: bool) -> Result<()> {
             println!("llm client: {} ({})", c.name, c.model);
             println!("base_url: {}", c.base_url);
             if ping {
-                let t = Translator::new(c, &settings.translation, "ja")?;
+                let t = Translator::new(c, &settings.translation, "ja", "zh", Profile::Game)?;
                 let r = t.ping()?;
                 println!("ping: {}", r.chars().take(80).collect::<String>());
             } else {
@@ -58,7 +58,8 @@ pub fn doctor(settings: &Settings, ping: bool) -> Result<()> {
             println!("write setting.toml from setting.example.toml");
         }
     }
-    println!("adapters: rmmz, jsonl");
+    let ids: Vec<&str> = adapter::all_adapters().iter().map(|a| a.id()).collect();
+    println!("adapters: {}", ids.join(", "));
     Ok(())
 }
 
@@ -70,7 +71,7 @@ pub fn init_workspace(
     workspace: Option<PathBuf>,
 ) -> Result<PathBuf> {
     let hit = detect_or_force(game, engine)?;
-    let ws = workspace.unwrap_or_else(|| hit.content_root.join(".attx"));
+    let ws = workspace.unwrap_or_else(|| default_workspace(&hit.content_root));
     std::fs::create_dir_all(&ws)?;
     let store = Store::open(&ws)?;
     let meta = WorkspaceMeta {
@@ -134,7 +135,13 @@ pub fn translate(
         });
     }
     let client = config::require_llm(settings)?;
-    let translator = Translator::new(client, &settings.translation, &meta.source_lang)?;
+    let translator = Translator::new(
+        client,
+        &settings.translation,
+        &meta.source_lang,
+        &meta.target_lang,
+        profile_for_format(&meta.engine),
+    )?;
     // Incremental save: each batch hits SQLite immediately so crashes keep progress.
     let results = translator.translate_units_with_sink(&pending, limit, &mut |batch| {
         for tr in batch {
@@ -156,11 +163,7 @@ pub fn translate(
     })
 }
 
-pub fn writeback(
-    workspace: &Path,
-    _settings: &Settings,
-    dry_run: bool,
-) -> Result<WritebackReport> {
+pub fn writeback(workspace: &Path, _settings: &Settings, dry_run: bool) -> Result<WritebackReport> {
     let store = store::workspace_db(workspace)?;
     let meta = store.meta()?;
     let adapter = adapter::get(&meta.engine)?;
@@ -171,9 +174,12 @@ pub fn writeback(
         .iter()
         .filter(|u| translations.contains_key(&u.id))
         .count();
-    let content_root = PathBuf::from(&meta.content_root);
-    let files = adapter.writeback(&content_root, &units, &translations)?;
-    let paths: Vec<String> = files.keys().cloned().collect();
+    let input = PathBuf::from(&meta.content_root);
+    let outputs = adapter.writeback(&input, &meta.target_lang, &units, &translations)?;
+    let paths: Vec<String> = outputs
+        .iter()
+        .map(|o| o.path.display().to_string())
+        .collect();
     if dry_run {
         return Ok(WritebackReport {
             files: paths.len(),
@@ -182,19 +188,18 @@ pub fn writeback(
             paths,
         });
     }
-    for (rel, content) in &files {
-        let dest = content_root.join(rel);
-        if let Some(parent) = dest.parent() {
+    for out in &outputs {
+        if let Some(parent) = out.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if dest.is_file() {
-            let bak = PathBuf::from(format!("{}.attxbak", dest.display()));
+        if out.path.is_file() {
+            let bak = PathBuf::from(format!("{}.attxbak", out.path.display()));
             if !bak.exists() {
-                let _ = std::fs::copy(&dest, &bak);
+                let _ = std::fs::copy(&out.path, &bak);
             }
         }
-        std::fs::write(&dest, content)
-            .with_context(|| format!("write {}", dest.display()))?;
+        std::fs::write(&out.path, &out.bytes)
+            .with_context(|| format!("write {}", out.path.display()))?;
     }
     Ok(WritebackReport {
         files: paths.len(),
@@ -224,13 +229,13 @@ pub fn translate_jsonl(
     output: &Path,
     settings: &Settings,
     src: &str,
-    _dst: &str,
+    dst: &str,
     limit: Option<usize>,
 ) -> Result<TranslateReport> {
     let units = adapter::jsonl::read_jsonl_units(input)?;
     let pending_before = units.len();
     let client = config::require_llm(settings)?;
-    let translator = Translator::new(client, &settings.translation, src)?;
+    let translator = Translator::new(client, &settings.translation, src, dst, Profile::Game)?;
     let results = translator.translate_units(&units, limit)?;
     let mut map = BTreeMap::new();
     for tr in &results {
@@ -254,9 +259,7 @@ pub fn export_jsonl(workspace: &Path, output: &Path, filter: &str) -> Result<usi
         "translated" => {
             let all = store.all_units()?;
             let tr = store.all_translations()?;
-            all.into_iter()
-                .filter(|u| tr.contains_key(&u.id))
-                .collect()
+            all.into_iter().filter(|u| tr.contains_key(&u.id)).collect()
         }
         "all" => store.all_units()?,
         other => bail!("unknown filter {other}, use pending|all|translated"),
@@ -307,4 +310,36 @@ fn now_secs() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_else(|_| "0".into())
+}
+
+/// Directory inputs nest `.attx/` inside; file inputs get a sibling
+/// `.attx-<stem>/` so several files in one directory don't collide.
+fn default_workspace(input: &Path) -> PathBuf {
+    if input.is_dir() {
+        return input.join(".attx");
+    }
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("input");
+    input
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!(".attx-{stem}"))
+}
+
+/// Machine-readable adapter capability list for `attx formats`.
+pub fn formats() -> serde_json::Value {
+    let list: Vec<serde_json::Value> = adapter::all_adapters()
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "id": a.id(),
+                "label": a.label(),
+                "extensions": a.extensions(),
+                "input": a.input_kind(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "formats": list })
 }

@@ -2,8 +2,13 @@
 **/*.rs.bk
 setting.toml
 .attx/
+.attx-*/
 *.db
 *.attxbak
+# never commit source material or translated outputs
+*.epub
+*.zh.txt
+*.zh.json
 /tmp/
 .idea/
 .vscode/
