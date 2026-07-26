@@ -1,12 +1,12 @@
 use crate::config::{LlmClient, TranslationSection};
-use crate::model::{ItemType, TextUnit, Translation, mask_controls, unmask_controls};
+use crate::model::{ItemType, TextUnit, Translation, mask_unit_lines, unmask_controls};
 use crate::quality;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -168,11 +168,44 @@ Rules:
     }
 }
 
+/// Global request pacing shared by all worker threads: each request reserves
+/// the next `min_interval` slot. `rpm = 0` disables pacing.
+struct RateLimiter {
+    min_interval: Duration,
+    next_at: Mutex<Instant>,
+}
+
+impl RateLimiter {
+    fn new(rpm: u32) -> Option<Self> {
+        if rpm == 0 {
+            return None;
+        }
+        Some(Self {
+            min_interval: Duration::from_secs_f64(60.0 / rpm as f64),
+            next_at: Mutex::new(Instant::now()),
+        })
+    }
+
+    fn wait(&self) {
+        let slot = {
+            let mut next = self.next_at.lock().expect("rate limiter lock");
+            let slot = (*next).max(Instant::now());
+            *next = slot + self.min_interval;
+            slot
+        };
+        let now = Instant::now();
+        if slot > now {
+            thread::sleep(slot - now);
+        }
+    }
+}
+
 pub struct Translator {
     client: LlmClient,
     section: TranslationSection,
     http: reqwest::blocking::Client,
     system: String,
+    rate: Option<RateLimiter>,
 }
 
 impl Translator {
@@ -191,6 +224,7 @@ impl Translator {
             section: section.clone(),
             http,
             system: system_prompt(source_lang, target_lang, profile),
+            rate: RateLimiter::new(section.rpm),
         })
     }
 
@@ -396,19 +430,7 @@ impl Translator {
         for (i, u) in batch.iter().enumerate() {
             let pid = (i + 1).to_string();
             id_map.insert(pid.clone(), *u);
-            let mut masked_lines = Vec::new();
-            let mut unit_map = Vec::new();
-            for line in &u.original_lines {
-                let (m, map) = mask_controls(line);
-                let base = unit_map.len();
-                let mut line_out = m;
-                for (j, (k, v)) in map.into_iter().enumerate() {
-                    let nk = format!("[CTRL_{}]", base + j);
-                    line_out = line_out.replacen(&k, &nk, 1);
-                    unit_map.push((nk, v));
-                }
-                masked_lines.push(line_out);
-            }
+            let (masked_lines, unit_map) = mask_unit_lines(&u.original_lines);
             masks.insert(u.id.clone(), unit_map);
 
             body.push_str(&format!("## {pid}\n"));
@@ -430,9 +452,12 @@ impl Translator {
         let items = parse_model_json(&raw)?;
         let mut translations = Vec::new();
         for item in items {
-            let unit = id_map
-                .get(&item.id)
-                .with_context(|| format!("model returned unknown id {}", item.id))?;
+            // Unknown id: the model hallucinated — drop that item, keep the rest.
+            // Missing units are retried as singles by translate_batch_resilient.
+            let Some(unit) = id_map.get(&item.id) else {
+                eprintln!("  drop item with unknown id {:?}", item.id);
+                continue;
+            };
             let map = masks.get(&unit.id).cloned().unwrap_or_default();
             let mut lines: Vec<String> = item
                 .translation_lines
@@ -448,6 +473,7 @@ impl Translator {
                 unit_id: unit.id.clone(),
                 translation_lines: lines,
                 source_hash: TextUnit::source_hash(&unit.original_lines),
+                passthrough: false,
             });
         }
         if translations.is_empty() {
@@ -482,6 +508,9 @@ impl Translator {
             ],
             temperature: 0.3,
         };
+        if let Some(rate) = &self.rate {
+            rate.wait();
+        }
         let resp = self
             .http
             .post(&url)
@@ -546,12 +575,15 @@ fn batch_units<'a>(
 }
 
 fn passthrough(u: &TextUnit) -> Translation {
-    // ponytail: keep original when model refuses (policy/empty); writeback still works
+    // Keep the original when the model refuses (policy/empty) so writeback and
+    // progress still work; flagged so status reports it and
+    // `translate --retry-passthrough` can re-queue.
     eprintln!("  passthrough {}", u.location);
     Translation {
         unit_id: u.id.clone(),
         translation_lines: u.original_lines.clone(),
         source_hash: TextUnit::source_hash(&u.original_lines),
+        passthrough: true,
     }
 }
 
@@ -581,9 +613,4 @@ fn truncate(s: &str, n: usize) -> String {
         t.push('…');
     }
     t
-}
-
-#[allow(dead_code)]
-pub fn dummy_request_body() -> serde_json::Value {
-    json!({"ok": true})
 }

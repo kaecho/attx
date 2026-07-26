@@ -12,7 +12,7 @@ timeout = 600
 
 [translation]
 worker_count = 8
-rpm = 60
+rpm = 60          # global request rate limit per minute (0 = unlimited)
 retry_count = 3
 retry_delay = 2
 batch_chars = 2500

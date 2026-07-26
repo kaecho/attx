@@ -4,7 +4,8 @@
 
 use super::{FormatAdapter, OutputFile, output_sibling};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
-use anyhow::{Context, Result};
+use crate::textio;
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -20,9 +21,7 @@ struct Cues {
 }
 
 fn read_utf8(input: &Path) -> Result<String> {
-    let bytes = std::fs::read(input).with_context(|| format!("{}", input.display()))?;
-    let s = String::from_utf8_lossy(&bytes).into_owned();
-    Ok(s.strip_prefix('\u{FEFF}').map(str::to_string).unwrap_or(s))
+    textio::read_text(input)
 }
 
 fn parse_blocks(body: &str) -> Cues {
@@ -270,6 +269,7 @@ mod tests {
                         unit_id: u.id.clone(),
                         translation_lines: vec!["中文字幕".to_string()],
                         source_hash: TextUnit::source_hash(&u.original_lines),
+                        passthrough: false,
                     },
                 )
             })

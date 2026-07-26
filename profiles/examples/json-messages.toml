@@ -1,0 +1,17 @@
+# Example: arbitrary JSON game data — translate values under common text keys
+# anywhere in the tree, plus specific paths. Use `attx analyze` to learn the
+# real key names first.
+name = "json-messages"
+label = "Generic JSON message fields"
+extensions = ["json", "dat"]
+min_units = 1
+overwrite = false
+notes = "json_keys matches object keys at any depth (arrays of strings included); json_paths pins exact locations (* = one level, ** = any depth)"
+
+[[rules]]
+kind = "json_keys"
+keys = ["message", "text", "dialogue", "description", "title", "name", "choice"]
+
+[[rules]]
+kind = "json_paths"
+paths = ["**/lines/*"]

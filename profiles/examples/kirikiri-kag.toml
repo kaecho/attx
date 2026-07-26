@@ -1,0 +1,20 @@
+# Example: KiriKiri/KAG scenario scripts (.ks) — dialogue + narration lines.
+# Copy, adapt to the actual game (tag syntax varies!), then:
+#   attx profile test --profile kirikiri-kag.toml --input <game/scenario> --roundtrip
+#   attx profile save --profile kirikiri-kag.toml
+name = "kirikiri-kag"
+label = "KiriKiri KAG scenario (.ks)"
+extensions = ["ks"]
+detect_regex = ['(?m)^[@\[;]']
+min_units = 3
+overwrite = true            # engines read these in place; *.attxbak backups are kept
+skip_lines = ['^\s*;', '^\s*@', '^\s*\[', '^\s*\*']
+notes = "【name】「text」 dialogue plus plain narration; commands (@/[), labels (*), comments (;) skipped"
+
+[[rules]]
+kind = "line_regex"
+pattern = '^【(?P<role>[^】]+)】「(?P<text>.+)」$'
+
+[[rules]]
+kind = "line_regex"
+pattern = '^(?P<text>[^;@\[*【].*)$'

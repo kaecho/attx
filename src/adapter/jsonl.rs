@@ -103,10 +103,13 @@ fn record_for(u: &TextUnit, tr: Option<&Translation>) -> serde_json::Value {
 }
 
 /// Standalone helper used by translate-jsonl CLI (no workspace).
+/// Duplicate (id, text) lines are skipped with a warning — they would collide
+/// on the derived unit id.
 pub fn read_jsonl_units(path: &Path) -> Result<Vec<TextUnit>> {
     let file = fs::File::open(path).with_context(|| format!("{}", path.display()))?;
     let reader = BufReader::new(file);
     let mut units = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for (lineno, line) in reader.lines().enumerate() {
         let line = line?;
         let line = line.trim();
@@ -127,6 +130,10 @@ pub fn read_jsonl_units(path: &Path) -> Result<Vec<TextUnit>> {
             rec.id.clone()
         };
         let id = TextUnit::compute_id("jsonl", &location, &lines);
+        if !seen.insert(id.clone()) {
+            eprintln!("jsonl: skip duplicate id+text at line {}", lineno + 1);
+            continue;
+        }
         units.push(TextUnit {
             id,
             engine: "jsonl".into(),

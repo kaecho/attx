@@ -2,9 +2,10 @@
 name: attx
 description: >
   通用 AI 翻译执行协议。当用户要求翻译游戏（RPG Maker MV/MZ、MTool、Ren'Py、
-  VNText）、电子书（EPUB）、文档（DOCX/TXT/Markdown）、字幕（SRT/VTT/LRC）或本地化
-  文件（PO/Paratranz/i18next/JSONL）时使用：探测格式、问答式配置、提取文本、
-  LLM 翻译、写回输出、试玩/审阅反馈补漏。
+  VNText）、电子书（EPUB）、网页（HTML）、文档（DOCX/XLSX/TXT/Markdown）、字幕
+  （SRT/VTT/ASS/LRC）、表格（CSV/TSV）或本地化文件（PO/Paratranz/i18next/JSONL）
+  时使用：探测格式、问答式配置、提取文本、LLM 翻译、写回输出、试玩/审阅反馈补漏。
+  遇到不支持的格式时：analyze 侦察 → 写自定义 Profile → 试跑 → 翻译 → 保存记住格式。
 ---
 
 # attx Skill
@@ -17,27 +18,33 @@ description: >
 
 ---
 
-## 支持的格式（v0.3+）
+## 支持的格式（v0.4+）
 
-运行 `attx formats` 获取机器可读清单（JSON）。当前适配器：
+运行 `attx formats` 获取机器可读清单（JSON，含已保存的自定义 Profile）。当前适配器：
 
 | id | 输入 | 说明 | 输出 |
 |----|------|------|------|
 | `rmmz` | 目录 | RPG Maker MV/MZ（data/*.json + plugins.js 参数） | 原地写回 + `*.attxbak` |
 | `epub` | .epub | 电子书/轻小说（段落级，保留插图与排版，rt 注音剔除） | `<名>.<目标语言>.epub` |
+| `html` | .html/.htm/.xhtml | 单页 HTML（块级 + `<title>`） | 同名副本 |
 | `docx` | .docx | Word 文档 | `<名>.<目标语言>.docx` |
+| `xlsx` | .xlsx/.xlsm | Excel（译 sharedStrings，全表一致生效） | 同名副本 |
 | `txt` / `md` | 文件 | 小说纯文本 / Markdown（跳过代码块，保留语法前缀） | 同名 `.zh.txt` 等 |
 | `srt` / `vtt` / `lrc` | 文件 | 字幕/歌词（时间轴原样保留） | 同名副本 |
+| `ass` | .ass/.ssa | ASS/SSA 字幕（`{\tag}` 与 `\N` 保留，Name 作角色） | 同名副本 |
+| `csv` | .csv/.tsv | 表格（RFC4180，含引号/内嵌换行；只重写有译文的记录） | 同名副本 |
 | `po` | .po/.pot | Gettext（填 msgstr；复数条目跳过） | 同名副本 |
 | `renpy` | .rpy | Ren'Py `translate` 块（对白 + old/new strings） | 同名副本 |
 | `mtool` | .json | MTool ManualTransFile（内容嗅探） | 同名副本 |
 | `paratranz` | .json | Paratranz 导出（只译空 translation） | 同名副本 |
 | `vnt` | .json | VNTextPatch 导出 | 同名副本 |
-| `i18next` | .json | 嵌套字符串 JSON | 同名副本 |
+| `i18next` | .json | 嵌套字符串 JSON（≥80% 字符串叶子） | 同名副本 |
 | `jsonl` | 文件/目录 | 通用逃生舱：任何引擎外部导出 | `translated.jsonl` |
+| `custom:<名>` | 文件/目录 | **自定义 Profile**（TOML 规则，agent 可自行编写并保存） | 副本或原地（看 Profile） |
 
 `.json` 由内容嗅探区分四种；歧义时 `--engine <id>` 强制。  
-不支持（roadmap）：Translator++ 工程、XLSX、PDF、Shift-JIS 原文（先 `iconv` 转 UTF-8）。
+文本类输入编码自动检测（UTF-8 / Shift-JIS / GBK / UTF-16 BOM），输出一律 UTF-8。  
+不支持（roadmap）：Translator++ 工程、PDF、二进制封包（走 JSONL 逃生舱）。
 
 ---
 
@@ -123,6 +130,20 @@ attx doctor --ping
 attx run --input <输入> --src ja --dst zh [--limit N]
 ```
 
+### 阶段 1b — 未知格式（detect 失败时）
+
+不停止、不放弃：走 `references/custom-format-discovery.md` 完整流程：
+
+```bash
+attx analyze --input <输入>                 # 侦察：编码/结构/样本
+attx profile new --output ./fmt.toml        # 起草规则（line_regex / json_keys / json_paths）
+attx profile test --profile ./fmt.toml --input <输入> --roundtrip   # 迭代到 units/样本正确
+attx init --input <输入> --profile ./fmt.toml --src ja --dst zh     # 后续流程照常
+```
+
+翻译成功后**问用户是否 `attx profile save` 记住该格式**（下次自动识别）。
+纯二进制/加密封包 → JSONL 逃生舱（`references/jsonl-workflow.md`）。
+
 ### 关键差异：写回许可
 
 - **文档/字幕/JSON 类**（epub/docx/txt/md/srt/vtt/lrc/po/renpy/mtool/paratranz/vnt/i18next/jsonl）：
@@ -141,10 +162,11 @@ attx run --input <输入> --src ja --dst zh [--limit N]
 |------|------|
 | CLI 找不到 / 无法启动 | 停止，说明如何安装或 `cargo build --release` |
 | `doctor --ping` 401 / 无效 Key | 停止，走阶段 -1 配置向导；禁止重试刷 Key |
-| `detect` 无适配器 | 停止或转 JSONL 流程（`references/jsonl-workflow.md`） |
-| 提取 0 且输入明显有文本 | 停止，报告格式/路径问题（可能需 `--engine` 强制或 iconv 转码） |
+| `detect` 无适配器 | 转阶段 1b：analyze → 自定义 Profile；纯二进制转 JSONL 流程 |
+| 提取 0 且输入明显有文本 | 停止，报告格式/路径问题（可能需 `--engine` 强制） |
 | 试译连续失败（格式/质量） | 停止全量，先排障（`references/failure-recovery.md`） |
-| rmmz 未获写回许可 | **禁止** `writeback`（dry-run 除外） |
+| rmmz / `overwrite=true` Profile 未获写回许可 | **禁止** `writeback`（dry-run 除外） |
+| `status.passthrough > 0` 收尾时 | 报告条数；经用户同意后 `translate --retry-passthrough` |
 | 用户要求改 attx 源码 | 暂停翻译流程，单独走源码任务 |
 | 用户要求重置/删库 | 需明确确认后再删 `<工作区>` |
 
@@ -166,8 +188,9 @@ attx run --input <输入> --src ja --dst zh [--limit N]
 |------|------|--------|
 | 命令与 JSON 字段 | `references/cli-command-contract.md` | 任何 CLI 调用前 / 解析输出时 |
 | Agent 如何开局 | `references/agent-usage.md` | 新会话第一次接到翻译任务时 |
+| **未知格式 → 自定义 Profile** | `references/custom-format-discovery.md` | `detect` 失败、用户要求"记住格式"时 |
 | 失败与重试 | `references/failure-recovery.md` | 401/超时/质量失败/写回失败时 |
-| 非内建格式 / 通用 JSONL | `references/jsonl-workflow.md` | 无适配器，或用户要离线审校时 |
+| 二进制封包 / 通用 JSONL | `references/jsonl-workflow.md` | Profile 也搞不定，或用户要离线审校时 |
 | 试玩/审阅反馈 | `references/feedback-iteration.md` | 用户反馈漏翻/误翻/显示问题 |
 
 不要把整份 reference 塞进模型 prompt；只读当前阶段需要的小节。

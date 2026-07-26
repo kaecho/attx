@@ -38,10 +38,16 @@ impl Store {
                 unit_id TEXT PRIMARY KEY,
                 translation_lines TEXT NOT NULL,
                 source_hash TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                passthrough INTEGER NOT NULL DEFAULT 0
             );
             "#,
         )?;
+        // Migrate pre-0.4 workspaces (no passthrough column); ignore "duplicate column".
+        let _ = conn.execute(
+            "ALTER TABLE translations ADD COLUMN passthrough INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self { conn })
     }
 
@@ -86,8 +92,10 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM units", [])?;
         {
+            // OR REPLACE: duplicate unit ids (same location + text emitted twice)
+            // must not abort extraction of an otherwise valid input.
             let mut stmt = tx.prepare(
-                "INSERT INTO units(id,engine,domain,location,item_type,role,original_lines,source_line_paths,context,payload,source_hash)
+                "INSERT OR REPLACE INTO units(id,engine,domain,location,item_type,role,original_lines,source_line_paths,context,payload,source_hash)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?;
             for u in units {
@@ -203,44 +211,55 @@ impl Store {
         let lines = serde_json::to_string(&tr.translation_lines)?;
         let now = chrono_like_now();
         self.conn.execute(
-            "INSERT INTO translations(unit_id, translation_lines, source_hash, updated_at)
-             VALUES(?1,?2,?3,?4)
+            "INSERT INTO translations(unit_id, translation_lines, source_hash, updated_at, passthrough)
+             VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(unit_id) DO UPDATE SET
                translation_lines=excluded.translation_lines,
                source_hash=excluded.source_hash,
-               updated_at=excluded.updated_at",
-            params![tr.unit_id, lines, tr.source_hash, now],
+               updated_at=excluded.updated_at,
+               passthrough=excluded.passthrough",
+            params![tr.unit_id, lines, tr.source_hash, now, tr.passthrough as i64],
         )?;
         Ok(())
     }
 
     pub fn all_translations(&self) -> Result<BTreeMap<String, Translation>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT unit_id, translation_lines, source_hash FROM translations")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT unit_id, translation_lines, source_hash, passthrough FROM translations",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
             ))
         })?;
         let mut map = BTreeMap::new();
         for row in rows {
-            let (id, lines, hash) = row?;
+            let (id, lines, hash, pt) = row?;
             map.insert(
                 id.clone(),
                 Translation {
                     unit_id: id,
                     translation_lines: serde_json::from_str(&lines)?,
                     source_hash: hash,
+                    passthrough: pt != 0,
                 },
             );
         }
         Ok(map)
     }
 
-    pub fn counts(&self) -> Result<(usize, usize, usize)> {
+    /// Delete passthrough placeholder rows so their units become pending again.
+    pub fn clear_passthrough(&self) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM translations WHERE passthrough=1", [])?;
+        Ok(n)
+    }
+
+    pub fn counts(&self) -> Result<Counts> {
         let total: usize = self
             .conn
             .query_row("SELECT COUNT(*) FROM units", [], |r| r.get(0))?;
@@ -250,8 +269,52 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
-        Ok((total, translated, total.saturating_sub(translated)))
+        let passthrough: usize = self.conn.query_row(
+            "SELECT COUNT(*) FROM units u
+             INNER JOIN translations t ON t.unit_id=u.id AND t.source_hash=u.source_hash
+             WHERE t.passthrough=1",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(Counts {
+            total,
+            translated,
+            pending: total.saturating_sub(translated),
+            passthrough,
+        })
     }
+
+    /// `domain -> (total, translated)` breakdown for status reports.
+    pub fn domain_counts(&self) -> Result<BTreeMap<String, (usize, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT u.domain, COUNT(*),
+                    COUNT(CASE WHEN t.unit_id IS NOT NULL THEN 1 END)
+             FROM units u
+             LEFT JOIN translations t ON t.unit_id=u.id AND t.source_hash=u.source_hash
+             GROUP BY u.domain",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut map = BTreeMap::new();
+        for row in rows {
+            let (domain, total, translated) = row?;
+            map.insert(domain, (total as usize, translated as usize));
+        }
+        Ok(map)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Counts {
+    pub total: usize,
+    pub translated: usize,
+    pub pending: usize,
+    pub passthrough: usize,
 }
 
 fn chrono_like_now() -> String {

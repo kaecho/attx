@@ -6,7 +6,7 @@
 
 use super::{FormatAdapter, OutputFile, output_sibling};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -104,7 +104,7 @@ impl FormatAdapter for PoAdapter {
 }
 
 fn parse_entries(input: &Path) -> Result<Vec<Entry>> {
-    let body = std::fs::read_to_string(input).with_context(|| format!("{}", input.display()))?;
+    let body = crate::textio::read_text(input)?;
     let mut entries = Vec::new();
     let mut cur: Vec<String> = Vec::new();
     for line in body.lines() {
@@ -247,6 +247,7 @@ mod tests {
                 unit_id: units[0].id.clone(),
                 translation_lines: vec!["你好".into(), "世界".into()],
                 source_hash: TextUnit::source_hash(&units[0].original_lines),
+                passthrough: false,
             },
         );
         let outs = PoAdapter.writeback(&input, "zh", &units, &tr).unwrap();

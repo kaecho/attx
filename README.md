@@ -16,22 +16,45 @@ Translate games, ebooks, documents, subtitles, and localization files with any O
 |----|-------|-------|--------|
 | `rmmz` | directory | RPG Maker MV/MZ: `data/*.json` events/system/DB + plugin params in `js/plugins.js` (plugin *source* never modified) | in-place + `*.attxbak` |
 | `epub` | `.epub` | E-books / light novels: paragraph-level, ruby readings (`<rt>`) stripped from source text, images & layout preserved, `dc:language` updated | `<name>.<dst>.epub` |
+| `html` | `.html` `.htm` `.xhtml` | Standalone HTML pages: block-level + `<title>` | translated copy |
 | `docx` | `.docx` | Word documents: paragraph-level over `w:t` runs | `<name>.<dst>.docx` |
-| `txt` | `.txt` | Plain-text novels, one unit per line (UTF-8; `iconv` legacy encodings first) | `<name>.<dst>.txt` |
+| `xlsx` | `.xlsx` `.xlsm` | Excel workbooks: shared-string table translated, all sheets consistent | translated copy |
+| `txt` | `.txt` | Plain-text novels, one unit per line | `<name>.<dst>.txt` |
 | `md` | `.md` | Markdown: code fences skipped, heading/list/quote prefixes preserved | `<name>.<dst>.md` |
 | `srt` / `vtt` | file | Subtitles: timing lines & headers verbatim, cue text translated | translated copy |
+| `ass` | `.ass` `.ssa` | ASS/SSA subtitles: `{\tag}` overrides & `\N` breaks preserved, Name → speaker | translated copy |
 | `lrc` | `.lrc` | Lyrics: timestamps kept, `[ti:…]` meta tags skipped | translated copy |
+| `csv` | `.csv` `.tsv` | Tables (RFC4180: quotes, embedded newlines); only translated records re-rendered | translated copy |
 | `po` | `.po` `.pot` | Gettext: fills `msgstr`; plural entries & header pass through | translated copy |
 | `renpy` | `.rpy` | Ren'Py `translate` blocks: dialogue + `old`/`new` strings | translated copy |
 | `mtool` | `.json` | MTool `ManualTransFile.json` (content-sniffed) | translated copy |
 | `paratranz` | `.json` | Paratranz export; only empty `translation` fields are filled | translated copy |
 | `vnt` | `.json` | VNTextPatch export (`name`/`message`) | translated copy |
-| `i18next` | `.json` | Nested JSON with string leaves | translated copy |
+| `i18next` | `.json` | Nested JSON with string leaves (≥80%) | translated copy |
 | `jsonl` | file/dir | Universal escape hatch: any engine via external extract/write scripts | `translated.jsonl` |
+| `custom:<name>` | file/dir | **Custom profile**: TOML rules an agent (or you) writes for any unknown text/JSON format | copy or in-place |
 
-`attx formats` prints this list as JSON. The four `.json` flavors are distinguished by content sniffing; force with `--engine <id>` when ambiguous.
+`attx formats` prints this list as JSON (saved custom profiles included). The four `.json` flavors are distinguished by content sniffing; force with `--engine <id>` when ambiguous.
 
-Not yet supported (adapter contributions welcome, see [Contributing](#contributing)): Translator++ projects, XLSX, PDF, ASS subtitles, non-UTF-8 input.
+Text inputs auto-detect their encoding (UTF-8 / Shift-JIS / GBK / UTF-16 BOM via chardetng); output is always UTF-8.
+
+Not yet supported (adapter contributions welcome, see [Contributing](#contributing)): Translator++ projects, PDF, binary archives (use the JSONL escape hatch).
+
+### Unknown format? Teach attx a profile
+
+When `detect` fails, don't stop — attx ships a discovery toolchain built for agents:
+
+```bash
+attx analyze --input ./game            # recon: encoding, structure, samples, JSON shape
+attx profile new --output fmt.toml     # documented rule template (line_regex / json_keys / json_paths)
+attx profile test --profile fmt.toml --input ./game --roundtrip   # iterate until units look right
+attx init --input ./game --profile fmt.toml --src ja --dst zh     # then extract/translate/writeback as usual
+attx profile save --profile fmt.toml   # "remember this format" — detect auto-recognizes it from now on
+```
+
+A profile is a small TOML file: per-line regexes with named `text`/`role` groups, and/or
+JSON key/path selectors. See `profiles/examples/` (KiriKiri KAG, INI, generic JSON) and
+`skills/attx/references/custom-format-discovery.md` for the full agent workflow.
 
 ---
 
@@ -60,8 +83,14 @@ attx ships an **execution Skill** — a protocol the agent follows instead of im
 
 ```text
 skills/attx/SKILL.md           # stages, hard stops, Q&A config wizard
-skills/attx/references/        # CLI contract, agent usage, recovery, JSONL, feedback
+skills/attx/references/        # CLI contract, agent usage, custom-format discovery, recovery, JSONL, feedback
 ```
+
+**Why a Skill instead of an MCP server?** attx is a local CLI with JSON on stdout — that is
+already the native tool surface for coding agents, with zero extra infrastructure. A Skill is
+plain markdown any agent can follow (Claude Code, Cursor, Codex, OpenCode, …), while an MCP
+server would just wrap the same CLI behind a process you have to keep running. If you need MCP
+for a non-CLI client, wrapping `attx` is trivial precisely because every command speaks JSON.
 
 ### Install the skill
 
@@ -126,7 +155,7 @@ timeout = 600
 
 [translation]
 worker_count = 8       # parallel HTTP batches
-rpm = 60
+rpm = 60               # global request rate limit per minute (0 = unlimited)
 retry_count = 3
 retry_delay = 2
 batch_chars = 2500     # max source chars per batch
@@ -187,18 +216,24 @@ attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --d
 
 | Command | Role |
 |---------|------|
-| `doctor [--ping]` | Config check / LLM ping |
-| `formats` | Supported adapters as JSON |
-| `detect --input <path>` | Format probe (`--game` alias kept) |
-| `init --input <path> --src --dst` | Create workspace + SQLite |
+| `doctor [--ping] [--json]` | Config check / LLM ping |
+| `formats` | Supported adapters + saved profiles as JSON |
+| `detect --input <path>` | Format probe, saved profiles included (`--game` alias kept) |
+| `analyze --input <path>` | Recon report for unknown inputs (encoding, structure, samples) |
+| `profile new/test/save/list` | Author, iterate, and remember custom format profiles |
+| `init --input <path> --src --dst [--profile]` | Create workspace + SQLite |
 | `extract --workspace` | Adapter → text units |
-| `translate --workspace [--limit] [--dry-run]` | LLM over pending units, incremental saves |
+| `translate --workspace [--limit] [--dry-run] [--retry-passthrough]` | LLM over pending units, incremental saves |
 | `writeback --workspace [--dry-run]` | Render translated output |
 | `run --input …` | init + extract + translate + writeback |
-| `status --workspace` | Counts |
-| `translate-jsonl` / `export-jsonl` / `import-jsonl` | Interchange |
+| `status --workspace` | Counts incl. passthrough + per-domain breakdown |
+| `translate-jsonl` / `export-jsonl` / `import-jsonl` | Interchange (`--filter` incl. `passthrough`) |
 
-Global: `--config /path/to/setting.toml` (default `./setting.toml` or `$ATTX_HOME/setting.toml`).
+Global: `--config /path/to/setting.toml` (default `./setting.toml` or `$ATTX_HOME/setting.toml`); `--client <name>` picks a non-default LLM client.
+
+When the model refuses or keeps failing on a unit, attx stores the original text as a
+flagged *passthrough* placeholder so the run can finish; `status` reports the count and
+`translate --retry-passthrough` re-queues exactly those units.
 
 ---
 
@@ -213,15 +248,18 @@ src/
   main.rs          CLI (clap)
   model.rs         TextUnit / Translation / control-code masking / language probes
   config.rs        setting.toml
-  store.rs         SQLite workspace (units, translations, hash cache)
-  llm.rs           OpenAI-compatible chat, batching, parallel workers, prompts per profile
+  store.rs         SQLite workspace (units, translations, hash cache, passthrough flags)
+  llm.rs           OpenAI-compatible chat, batching, parallel workers, rate limit, prompts per profile
   quality.rs       line-count / control-code sanity checks
-  pipeline.rs      orchestration (no format knowledge, no HTTP in adapters)
+  textio.rs        encoding auto-detection (UTF-8 / Shift-JIS / GBK / UTF-16)
+  profile.rs       custom format profiles (line_regex / json_keys / json_paths rules)
+  pipeline.rs      orchestration + analyze (no format knowledge, no HTTP in adapters)
   adapter/
     mod.rs         FormatAdapter trait + registry + shared helpers
-    xmllite.rs     lossless mini-XML tree (epub/docx)
-    epub.rs docx.rs plaintext.rs subtitle.rs po.rs renpy.rs jsonkv.rs
-    rmmz.rs rmmz_plugins.rs jsonl.rs
+    xmllite.rs     lossless mini-XML tree (epub/docx/xlsx)
+    epub.rs docx.rs xlsx.rs plaintext.rs subtitle.rs ass.rs csv.rs po.rs renpy.rs
+    jsonkv.rs rmmz.rs rmmz_plugins.rs jsonl.rs
+profiles/examples/ starter custom profiles (KiriKiri KAG, INI, generic JSON)
 ```
 
 Layering rule: **adapters do parsing/serialization only** — batching, LLM calls, caching, retries, and disk writes live in the pipeline. An adapter never talks to the network.
@@ -263,11 +301,11 @@ pub trait FormatAdapter: Send + Sync {
 
 ### Roadmap (grab one)
 
-- Translator++ (.trans) and XLSX adapters
-- ASS subtitle adapter
-- Shift-JIS / GBK auto-detection (encoding_rs)
+- Translator++ (.trans) adapter
 - Glossary / terminology pinning across batches
 - PDF via external tooling (as AiNiee does with BabelDOC)
+- Optional output encoding for engines that require Shift-JIS
+- MCP server wrapper over the CLI (for non-CLI agent clients)
 
 ---
 

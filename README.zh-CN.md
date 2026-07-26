@@ -16,22 +16,45 @@
 |----|------|------|------|
 | `rmmz` | 目录 | RPG Maker MV/MZ:`data/*.json` 事件/系统/数据库 + `js/plugins.js` 插件参数(不改插件源码) | 原地写回 + `*.attxbak` |
 | `epub` | `.epub` | 电子书/轻小说:段落级提取,`<rt>` 注音剔除,插图与排版保留,`dc:language` 更新 | `<名>.<目标>.epub` |
+| `html` | `.html` `.htm` `.xhtml` | 单页 HTML:块级 + `<title>` | 翻译副本 |
 | `docx` | `.docx` | Word 文档:按 `w:t` 运行块的段落级翻译 | `<名>.<目标>.docx` |
-| `txt` | `.txt` | 纯文本小说,一行一单元(需 UTF-8;旧编码先 `iconv`) | `<名>.<目标>.txt` |
+| `xlsx` | `.xlsx` `.xlsm` | Excel:翻译 sharedStrings 共享字符串表,全部工作表一致生效 | 翻译副本 |
+| `txt` | `.txt` | 纯文本小说,一行一单元 | `<名>.<目标>.txt` |
 | `md` | `.md` | Markdown:跳过代码块,保留标题/列表/引用前缀 | `<名>.<目标>.md` |
 | `srt` / `vtt` | 文件 | 字幕:时间轴与头部原样,只译台词 | 翻译副本 |
+| `ass` | `.ass` `.ssa` | ASS/SSA 字幕:`{\tag}` 特效与 `\N` 换行保留,Name 字段作角色 | 翻译副本 |
 | `lrc` | `.lrc` | 歌词:时间戳保留,`[ti:…]` 元标签跳过 | 翻译副本 |
+| `csv` | `.csv` `.tsv` | 表格(RFC4180:引号/内嵌换行;只重写有译文的记录) | 翻译副本 |
 | `po` | `.po` `.pot` | Gettext:填充 `msgstr`;复数条目与头部原样 | 翻译副本 |
 | `renpy` | `.rpy` | Ren'Py `translate` 块:对白 + `old`/`new` 字符串 | 翻译副本 |
 | `mtool` | `.json` | MTool `ManualTransFile.json`(内容嗅探) | 翻译副本 |
 | `paratranz` | `.json` | Paratranz 导出;只填空的 `translation` | 翻译副本 |
 | `vnt` | `.json` | VNTextPatch 导出(`name`/`message`) | 翻译副本 |
-| `i18next` | `.json` | 叶子全为字符串的嵌套 JSON | 翻译副本 |
+| `i18next` | `.json` | 字符串叶子占 ≥80% 的嵌套 JSON | 翻译副本 |
 | `jsonl` | 文件/目录 | 万能逃生舱:任何引擎外部导出/写回 | `translated.jsonl` |
+| `custom:<名>` | 文件/目录 | **自定义 Profile**:用 TOML 规则描述任意文本/JSON 格式(agent 可自行编写) | 副本或原地 |
 
-`attx formats` 输出机器可读清单。四种 `.json` 按内容嗅探区分,歧义时用 `--engine <id>` 强制。
+`attx formats` 输出机器可读清单(含已保存的自定义 Profile)。四种 `.json` 按内容嗅探区分,歧义时用 `--engine <id>` 强制。
 
-暂不支持(欢迎贡献适配器,见[贡献指南](#贡献指南)):Translator++ 工程、XLSX、PDF、ASS 字幕、非 UTF-8 输入。
+文本类输入**编码自动检测**(UTF-8 / Shift-JIS / GBK / UTF-16 BOM),输出一律 UTF-8。
+
+暂不支持(欢迎贡献适配器,见[贡献指南](#贡献指南)):Translator++ 工程、PDF、二进制封包(走 JSONL 逃生舱)。
+
+### 遇到不支持的格式?教会 attx 一个 Profile
+
+`detect` 失败时不必放弃——attx 内置一套给 agent 用的格式发现工具链:
+
+```bash
+attx analyze --input ./game            # 侦察:编码、结构、样本、JSON 形状
+attx profile new --output fmt.toml     # 带注释的规则模板(line_regex / json_keys / json_paths)
+attx profile test --profile fmt.toml --input ./game --roundtrip   # 迭代到单元/样本正确(不写盘)
+attx init --input ./game --profile fmt.toml --src ja --dst zh     # 之后 extract/translate/writeback 照常
+attx profile save --profile fmt.toml   # "记住这个格式"——今后 detect 自动识别
+```
+
+Profile 是一个小 TOML:行级正则(命名组 `text`/`role`)和/或 JSON 键/路径选择器。
+样例见 `profiles/examples/`(KiriKiri KAG、INI、通用 JSON),完整 agent 工作流见
+`skills/attx/references/custom-format-discovery.md`。
 
 ---
 
@@ -60,8 +83,13 @@ attx 自带一份**执行 Skill**——Agent 照协议走,而不是即兴发挥:
 
 ```text
 skills/attx/SKILL.md           # 阶段、硬停止、问答式配置向导
-skills/attx/references/        # CLI 契约、开局方式、故障恢复、JSONL、反馈迭代
+skills/attx/references/        # CLI 契约、开局方式、未知格式发现、故障恢复、JSONL、反馈迭代
 ```
+
+**为什么做成 Skill 而不是 MCP?** attx 是本地 CLI、stdout 全 JSON——这本身就是
+编码类 agent 的原生工具面,零额外基础设施。Skill 是纯 markdown,任何 agent 都能照做
+(Claude Code / Cursor / Codex / OpenCode…);MCP 只是把同一个 CLI 再包一层常驻进程。
+如果某个非 CLI 客户端确实需要 MCP,由于每条命令都输出 JSON,包一层也非常容易。
 
 ### 安装 Skill
 
@@ -126,7 +154,7 @@ timeout = 600
 
 [translation]
 worker_count = 8       # 并行 HTTP 批次数
-rpm = 60
+rpm = 60               # 全局请求限速(次/分钟),0 = 不限
 retry_count = 3
 retry_delay = 2
 batch_chars = 2500     # 每批最大源文字符数
@@ -187,18 +215,23 @@ attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --d
 
 | 命令 | 作用 |
 |------|------|
-| `doctor [--ping]` | 配置检查 / LLM 连通性 |
-| `formats` | JSON 格式的适配器能力清单 |
-| `detect --input <路径>` | 格式探测(保留 `--game` 别名) |
-| `init --input <路径> --src --dst` | 建工作区 + SQLite |
+| `doctor [--ping] [--json]` | 配置检查 / LLM 连通性 |
+| `formats` | 适配器 + 已存 Profile 能力清单(JSON) |
+| `detect --input <路径>` | 格式探测,含已存 Profile(保留 `--game` 别名) |
+| `analyze --input <路径>` | 未知输入侦察报告(编码/结构/样本) |
+| `profile new/test/save/list` | 编写、迭代、保存自定义格式 Profile |
+| `init --input <路径> --src --dst [--profile]` | 建工作区 + SQLite |
 | `extract --workspace` | 适配器 → 文本单元 |
-| `translate --workspace [--limit] [--dry-run]` | 翻译 pending,批次增量落库 |
+| `translate --workspace [--limit] [--dry-run] [--retry-passthrough]` | 翻译 pending,批次增量落库 |
 | `writeback --workspace [--dry-run]` | 产出译文文件 |
 | `run --input …` | init + extract + translate + writeback |
-| `status --workspace` | 进度统计 |
-| `translate-jsonl` / `export-jsonl` / `import-jsonl` | 数据交换 |
+| `status --workspace` | 进度统计(含 passthrough 与按 domain 细分) |
+| `translate-jsonl` / `export-jsonl` / `import-jsonl` | 数据交换(`--filter` 支持 `passthrough`) |
 
-全局:`--config /path/to/setting.toml`(默认 `./setting.toml` 或 `$ATTX_HOME/setting.toml`)。
+全局:`--config /path/to/setting.toml`(默认 `./setting.toml` 或 `$ATTX_HOME/setting.toml`);`--client <名>` 选用非默认 LLM client。
+
+模型拒答/反复失败的条目会以**passthrough 占位**(保留原文并打标)让整轮跑完;
+`status` 会报数,`translate --retry-passthrough` 可只重试这些条目。
 
 ---
 
@@ -213,15 +246,18 @@ src/
   main.rs          CLI (clap)
   model.rs         TextUnit / Translation / 控制符掩码 / 语言探测
   config.rs        setting.toml
-  store.rs         SQLite 工作区(单元、译文、hash 缓存)
-  llm.rs           OpenAI 兼容 chat、分批、并行 worker、按文体 profile 的 prompt
+  store.rs         SQLite 工作区(单元、译文、hash 缓存、passthrough 标记)
+  llm.rs           OpenAI 兼容 chat、分批、并行 worker、限速、按文体 profile 的 prompt
   quality.rs       行数 / 控制符完整性检查
-  pipeline.rs      流程编排(不含格式知识;适配器不碰网络)
+  textio.rs        编码自动检测(UTF-8 / Shift-JIS / GBK / UTF-16)
+  profile.rs       自定义格式 Profile(line_regex / json_keys / json_paths 规则)
+  pipeline.rs      流程编排 + analyze(不含格式知识;适配器不碰网络)
   adapter/
     mod.rs         FormatAdapter trait + 注册表 + 共享工具
-    xmllite.rs     无损迷你 XML 树(epub/docx 共用)
-    epub.rs docx.rs plaintext.rs subtitle.rs po.rs renpy.rs jsonkv.rs
-    rmmz.rs rmmz_plugins.rs jsonl.rs
+    xmllite.rs     无损迷你 XML 树(epub/docx/xlsx 共用)
+    epub.rs docx.rs xlsx.rs plaintext.rs subtitle.rs ass.rs csv.rs po.rs renpy.rs
+    jsonkv.rs rmmz.rs rmmz_plugins.rs jsonl.rs
+profiles/examples/ 自定义 Profile 起步样例(KiriKiri KAG、INI、通用 JSON)
 ```
 
 分层规则:**适配器只做解析/序列化**——分批、LLM 调用、缓存、重试、写盘都在 pipeline。适配器永远不发网络请求。
@@ -263,11 +299,11 @@ pub trait FormatAdapter: Send + Sync {
 
 ### Roadmap(欢迎认领)
 
-- Translator++(.trans)与 XLSX 适配器
-- ASS 字幕适配器
-- Shift-JIS / GBK 编码自动检测(encoding_rs)
+- Translator++(.trans)适配器
 - 跨批次术语表 / 译名固定
 - PDF(经外部工具,同 AiNiee 借助 BabelDOC 的方式)
+- 可选输出编码(供只认 Shift-JIS 的老引擎)
+- CLI 之上的 MCP server 封装(供非 CLI 客户端)
 
 ---
 

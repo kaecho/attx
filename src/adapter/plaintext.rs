@@ -5,12 +5,13 @@
 //! use one line per paragraph). Markdown additionally skips fenced code blocks
 //! and keeps leading syntax (`#`, `>`, list markers) out of the model's input.
 //!
-//! Input must be UTF-8; convert legacy encodings first
-//! (`iconv -f SHIFT_JIS -t UTF-8`).
+//! Input encoding is auto-detected (UTF-8 / Shift-JIS / GBK / UTF-16 BOM);
+//! output is always UTF-8.
 
 use super::{FormatAdapter, OutputFile, output_sibling};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
-use anyhow::{Context, Result};
+use crate::textio;
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -72,15 +73,7 @@ fn md_prefix(line: &str) -> usize {
 }
 
 fn read_utf8(input: &Path) -> Result<String> {
-    let bytes = std::fs::read(input).with_context(|| format!("{}", input.display()))?;
-    let s = String::from_utf8(bytes).map_err(|_| {
-        anyhow::anyhow!(
-            "{} is not UTF-8; convert first, e.g. `iconv -f SHIFT_JIS -t UTF-8`",
-            input.display()
-        )
-    })?;
-    // strip BOM
-    Ok(s.strip_prefix('\u{FEFF}').map(str::to_string).unwrap_or(s))
+    textio::read_text(input)
 }
 
 fn extract_lines(
@@ -186,6 +179,7 @@ mod tests {
                             .map(|l| format!("译:{l}"))
                             .collect(),
                         source_hash: TextUnit::source_hash(&u.original_lines),
+                        passthrough: false,
                     },
                 )
             })

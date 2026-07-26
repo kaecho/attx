@@ -17,7 +17,7 @@
 
 use super::{FormatAdapter, OutputFile, output_sibling};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -41,8 +41,7 @@ impl FormatAdapter for RenpyAdapter {
     }
 
     fn extract(&self, input: &Path, source_lang: &str) -> Result<Vec<TextUnit>> {
-        let body =
-            std::fs::read_to_string(input).with_context(|| format!("{}", input.display()))?;
+        let body = crate::textio::read_text(input)?;
         let mut units = Vec::new();
         let mut in_translate = false;
         let mut pending_old: Option<String> = None;
@@ -86,8 +85,7 @@ impl FormatAdapter for RenpyAdapter {
         units: &[TextUnit],
         translations: &BTreeMap<String, Translation>,
     ) -> Result<Vec<OutputFile>> {
-        let body =
-            std::fs::read_to_string(input).with_context(|| format!("{}", input.display()))?;
+        let body = crate::textio::read_text(input)?;
         let mut lines: Vec<String> = body
             .lines()
             .map(|l| l.trim_end_matches('\r').to_string())
@@ -243,6 +241,7 @@ translate chinese strings:
                     unit_id: u.id.clone(),
                     translation_lines: vec![text.to_string()],
                     source_hash: TextUnit::source_hash(&u.original_lines),
+                    passthrough: false,
                 },
             );
         }

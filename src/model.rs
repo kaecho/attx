@@ -58,6 +58,11 @@ pub struct Translation {
     pub translation_lines: Vec<String>,
     /// sha256 of original_lines joined — cache key fragment
     pub source_hash: String,
+    /// True when the model failed/refused and the original text was kept as a
+    /// placeholder. Tracked so `status` can report it and
+    /// `translate --retry-passthrough` can re-queue these units.
+    #[serde(default)]
+    pub passthrough: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +156,32 @@ pub fn unmask_controls(text: &str, map: &[(String, String)]) -> String {
     out
 }
 
+/// Mask all lines of a unit with a single, unit-wide `[CTRL_n]` numbering.
+///
+/// Renaming a line's per-line keys (`[CTRL_0]`, `[CTRL_1]`, …) to their
+/// unit-wide index must go highest-first: the new index is always ≥ the old
+/// one, so renaming low keys first could produce a token that collides with a
+/// key not yet renamed on the same line — the next `replacen` would then hit
+/// the freshly renamed token and the control codes would swap positions.
+pub fn mask_unit_lines(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
+    let mut unit_map: Vec<(String, String)> = Vec::new();
+    let mut masked_lines = Vec::with_capacity(lines.len());
+    for line in lines {
+        let (m, map) = mask_controls(line);
+        let base = unit_map.len();
+        let mut line_out = m;
+        let mut renamed = vec![(String::new(), String::new()); map.len()];
+        for (j, (k, v)) in map.into_iter().enumerate().rev() {
+            let nk = format!("[CTRL_{}]", base + j);
+            line_out = line_out.replacen(&k, &nk, 1);
+            renamed[j] = (nk, v);
+        }
+        unit_map.extend(renamed);
+        masked_lines.push(line_out);
+    }
+    (masked_lines, unit_map)
+}
+
 /// Rough JP/CJK source-text probe (default ja profile).
 pub fn looks_like_source_ja(text: &str) -> bool {
     text.chars().any(|c| {
@@ -184,6 +215,21 @@ mod tests {
         let (m, map) = mask_controls(s);
         assert!(m.contains("[CTRL_"));
         assert_eq!(unmask_controls(&m, &map), s);
+    }
+
+    #[test]
+    fn mask_unit_no_renumber_collision() {
+        // Line 0 contributes 1 control, line 1 contributes 2 — the naive
+        // low-first rename used to swap \C[2] and \V[7] on line 1.
+        let lines = vec![r"\C[1]おはよう".to_string(), r"\C[2]やあ\V[7]".to_string()];
+        let (masked, map) = mask_unit_lines(&lines);
+        assert_eq!(masked[0], "[CTRL_0]おはよう");
+        assert_eq!(masked[1], "[CTRL_1]やあ[CTRL_2]");
+        assert_eq!(unmask_controls(&masked[0], &map), lines[0]);
+        assert_eq!(unmask_controls(&masked[1], &map), lines[1]);
+        let m: std::collections::BTreeMap<_, _> = map.into_iter().collect();
+        assert_eq!(m["[CTRL_1]"], r"\C[2]");
+        assert_eq!(m["[CTRL_2]"], r"\V[7]");
     }
 
     #[test]

@@ -9,6 +9,8 @@
 //! [`FormatAdapter`], and register it in [`all_adapters`]. See README
 //! "Contributing" for the full checklist.
 
+pub mod ass;
+pub mod csv;
 pub mod docx;
 pub mod epub;
 pub mod jsonkv;
@@ -19,6 +21,7 @@ pub mod renpy;
 pub mod rmmz;
 pub mod rmmz_plugins;
 pub mod subtitle;
+pub mod xlsx;
 pub mod xmllite;
 
 use crate::model::{TextUnit, Translation};
@@ -95,10 +98,14 @@ pub fn all_adapters() -> Vec<Box<dyn FormatAdapter>> {
     vec![
         Box::new(rmmz::RmmzAdapter),
         Box::new(epub::EpubAdapter),
+        Box::new(epub::HtmlAdapter),
         Box::new(docx::DocxAdapter),
+        Box::new(xlsx::XlsxAdapter),
         Box::new(subtitle::SrtAdapter),
         Box::new(subtitle::VttAdapter),
+        Box::new(ass::AssAdapter),
         Box::new(subtitle::LrcAdapter),
+        Box::new(csv::CsvAdapter),
         Box::new(po::PoAdapter),
         Box::new(renpy::RenpyAdapter),
         Box::new(plaintext::MdAdapter),

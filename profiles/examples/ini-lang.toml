@@ -1,0 +1,13 @@
+# Example: INI-style language files (key=value). Values are translated, keys,
+# comments and [sections] pass through.
+name = "ini-lang"
+label = "INI key=value language file"
+extensions = ["ini", "lang", "properties"]
+min_units = 1
+overwrite = false           # writes <name>.<dst>.<ext> next to the input
+skip_lines = ['^\s*[;#]', '^\s*\[']
+notes = "value side of key=value; source-language filter drops numeric/id values"
+
+[[rules]]
+kind = "line_regex"
+pattern = '^[^=;#\[]+?=\s*(?P<text>.+)$'

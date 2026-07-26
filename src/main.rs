@@ -3,8 +3,10 @@ mod config;
 mod llm;
 mod model;
 mod pipeline;
+mod profile;
 mod quality;
 mod store;
+mod textio;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -14,12 +16,16 @@ use std::path::PathBuf;
 #[command(
     name = "attx",
     version,
-    about = "Agent Translation Toolkit eXtensible — universal AI translation framework (games, ebooks, documents, subtitles, localization files)"
+    about = "Agent Translation Toolkit eXtensible — universal AI translation framework (games, ebooks, documents, subtitles, localization files, custom formats)"
 )]
 struct Cli {
     /// Path to setting.toml (default: ./setting.toml or $ATTX_HOME/setting.toml)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+
+    /// LLM client name from setting.toml (default: [llm].default_client)
+    #[arg(long, global = true)]
+    client: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -32,14 +38,30 @@ enum Commands {
         /// Also ping the LLM with a tiny request
         #[arg(long)]
         ping: bool,
+        /// Machine-readable JSON output
+        #[arg(long)]
+        json: bool,
     },
-    /// List supported format adapters as JSON
+    /// List supported format adapters (built-in + saved profiles) as JSON
     Formats,
     /// Detect the format adapter for a file or directory
     Detect {
         /// Input file (epub/docx/txt/md/srt/…) or game directory (--game also accepted)
         #[arg(long, alias = "game")]
         input: PathBuf,
+    },
+    /// Inspect an unknown input: encoding, structure, samples (JSON report)
+    Analyze {
+        #[arg(long, alias = "game")]
+        input: PathBuf,
+        /// Source language for text-density stats: ja | en
+        #[arg(long, default_value = "ja")]
+        src: String,
+    },
+    /// Manage custom format profiles (teach attx new formats)
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
     },
     /// Register / open a workspace for an input
     Init {
@@ -49,6 +71,9 @@ enum Commands {
         /// Force format id (see `attx formats`). Auto-detect when omitted.
         #[arg(long)]
         engine: Option<String>,
+        /// Custom profile: path to a .toml file, or a saved profile name
+        #[arg(long)]
+        profile: Option<String>,
         /// Source language: ja | en
         #[arg(long, default_value = "ja")]
         src: String,
@@ -59,7 +84,7 @@ enum Commands {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
-    /// Extract texts from game into workspace DB
+    /// Extract texts from the input into the workspace DB
     Extract {
         #[arg(long)]
         workspace: PathBuf,
@@ -68,12 +93,15 @@ enum Commands {
     Translate {
         #[arg(long)]
         workspace: PathBuf,
-        /// Limit number of units (debug)
+        /// Limit number of units (debug / trial run)
         #[arg(long)]
         limit: Option<usize>,
         /// Dry-run: print batch plan only
         #[arg(long)]
         dry_run: bool,
+        /// Re-queue units whose translation was a passthrough placeholder
+        #[arg(long)]
+        retry_passthrough: bool,
     },
     /// Write translations back into the game
     Writeback {
@@ -90,6 +118,9 @@ enum Commands {
         input: PathBuf,
         #[arg(long)]
         engine: Option<String>,
+        /// Custom profile: path to a .toml file, or a saved profile name
+        #[arg(long)]
+        profile: Option<String>,
         #[arg(long, default_value = "ja")]
         src: String,
         #[arg(long, default_value = "zh")]
@@ -131,7 +162,7 @@ enum Commands {
         workspace: PathBuf,
         #[arg(long)]
         output: PathBuf,
-        /// pending | all | translated
+        /// pending | all | translated | passthrough
         #[arg(long, default_value = "pending")]
         filter: String,
     },
@@ -144,6 +175,46 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum ProfileCommands {
+    /// Write a documented profile template to a file
+    New {
+        /// Output path for the template (e.g. ./myformat.toml)
+        #[arg(long)]
+        output: PathBuf,
+        /// Profile name baked into the template
+        #[arg(long, default_value = "myformat")]
+        name: String,
+    },
+    /// Trial-extract with a profile and report matched units (JSON)
+    Test {
+        /// Profile .toml path or saved profile name
+        #[arg(long)]
+        profile: String,
+        #[arg(long, alias = "game")]
+        input: PathBuf,
+        #[arg(long, default_value = "ja")]
+        src: String,
+        /// Sample size in the report
+        #[arg(long, default_value = "10")]
+        limit: usize,
+        /// Also run an in-memory writeback with marker translations
+        #[arg(long)]
+        roundtrip: bool,
+    },
+    /// Remember a profile: copy it into the user profile directory
+    Save {
+        /// Profile .toml path
+        #[arg(long)]
+        profile: PathBuf,
+        /// Overwrite an existing saved profile with the same name
+        #[arg(long)]
+        force: bool,
+    },
+    /// List saved profiles (JSON)
+    List,
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -153,34 +224,53 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let settings = config::load(cli.config.as_deref())?;
+    let mut settings = config::load(cli.config.as_deref())?;
+    if let Some(name) = &cli.client {
+        // Global override: all downstream `settings.client(None)` lookups hit it.
+        settings.llm.default_client = name.clone();
+    }
 
     match cli.command {
-        Commands::Doctor { ping } => pipeline::doctor(&settings, ping),
+        Commands::Doctor { ping, json } => pipeline::doctor(&settings, ping, json),
         Commands::Formats => {
             println!("{}", serde_json::to_string_pretty(&pipeline::formats())?);
             Ok(())
         }
         Commands::Detect { input } => {
-            let hit = adapter::detect(&input)?;
+            let hit = pipeline::detect_any(&input)?;
             println!(
                 "{}",
                 serde_json::json!({
-                    "engine": hit.engine_id,
+                    "engine": hit.engine,
                     "content_root": hit.content_root,
                     "label": hit.label,
+                    "profile": hit.profile_path,
                 })
             );
             Ok(())
         }
+        Commands::Analyze { input, src } => {
+            let report = pipeline::analyze(&input, &src)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Commands::Profile { command } => run_profile(command),
         Commands::Init {
             input,
             engine,
+            profile,
             src,
             dst,
             workspace,
         } => {
-            let ws = pipeline::init_workspace(&input, engine.as_deref(), &src, &dst, workspace)?;
+            let ws = pipeline::init_workspace(
+                &input,
+                engine.as_deref(),
+                profile.as_deref(),
+                &src,
+                &dst,
+                workspace,
+            )?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -199,8 +289,9 @@ fn run() -> Result<()> {
             workspace,
             limit,
             dry_run,
+            retry_passthrough,
         } => {
-            let r = pipeline::translate(&workspace, &settings, limit, dry_run)?;
+            let r = pipeline::translate(&workspace, &settings, limit, dry_run, retry_passthrough)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
             Ok(())
         }
@@ -212,6 +303,7 @@ fn run() -> Result<()> {
         Commands::Run {
             input,
             engine,
+            profile,
             src,
             dst,
             workspace,
@@ -219,14 +311,21 @@ fn run() -> Result<()> {
             no_translate,
             no_writeback,
         } => {
-            let ws = pipeline::init_workspace(&input, engine.as_deref(), &src, &dst, workspace)?;
+            let ws = pipeline::init_workspace(
+                &input,
+                engine.as_deref(),
+                profile.as_deref(),
+                &src,
+                &dst,
+                workspace,
+            )?;
             let extracted = pipeline::extract(&ws, &settings)?;
             let mut out = serde_json::json!({
                 "workspace": ws,
                 "extracted": extracted,
             });
             if !no_translate {
-                let tr = pipeline::translate(&ws, &settings, limit, false)?;
+                let tr = pipeline::translate(&ws, &settings, limit, false, false)?;
                 out["translate"] = serde_json::to_value(tr)?;
             }
             if !no_writeback && !no_translate {
@@ -268,4 +367,66 @@ fn run() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_profile(command: ProfileCommands) -> Result<()> {
+    match command {
+        ProfileCommands::New { output, name } => {
+            if output.exists() {
+                anyhow::bail!("{} already exists", output.display());
+            }
+            std::fs::write(&output, profile::template(&name))?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "written": output,
+                    "next": "edit the rules, then: attx profile test --profile <file> --input <file>",
+                    "status": "ok",
+                })
+            );
+            Ok(())
+        }
+        ProfileCommands::Test {
+            profile: profile_arg,
+            input,
+            src,
+            limit,
+            roundtrip,
+        } => {
+            let path = resolve_profile_path(&profile_arg)?;
+            let report = pipeline::profile_test(&path, &input, &src, limit, roundtrip)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        ProfileCommands::Save {
+            profile: profile_path,
+            force,
+        } => {
+            let dest = profile::save(&profile_path, force)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "saved": dest,
+                    "status": "ok",
+                })
+            );
+            Ok(())
+        }
+        ProfileCommands::List => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&pipeline::profile_list())?
+            );
+            Ok(())
+        }
+    }
+}
+
+fn resolve_profile_path(arg: &str) -> Result<PathBuf> {
+    let p = PathBuf::from(arg);
+    if p.is_file() {
+        return Ok(p);
+    }
+    let (path, _) = profile::find_saved(arg)?;
+    Ok(path)
 }

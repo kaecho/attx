@@ -13,9 +13,9 @@
 
 | 症状 | 处理 |
 |------|------|
-| detect 失败 | 确认目录含 `data/System.json`；或 `--engine rmmz` 强制；或走 JSONL |
+| detect 失败 | 确认目录含 `data/System.json`；或 `--engine rmmz` 强制；或走 `custom-format-discovery.md`（写自定义 Profile） |
 | extracted = 0 | 检查是否译过已是中文、源语言是否选错（en/ja）、路径是否指到 www 子目录 |
-| 编码乱码 | 确认 JSON 为 UTF-8 |
+| 编码乱码 | 文本类已自动检测 Shift-JIS/GBK/UTF-16；仍乱码时看 `attx analyze` 的 `encoding` / `encoding_lossy` |
 
 ## 翻译
 
@@ -24,6 +24,7 @@
 | 模型返回非 JSON | 自动会重试；持续失败则换模型或减小 batch |
 | quality failed / 控制符丢失 | 导出该条 JSONL 人工修，`import-jsonl` |
 | 部分成功 partial | `status` 看 pending；再 `translate` 续跑 |
+| `status.passthrough > 0` | 模型拒答留了原文占位；`export-jsonl --filter passthrough` 审查，或 `translate --retry-passthrough` 重试 |
 | 全量太贵/太慢 | `--limit` 分批；调低 `rpm`/`worker` 相关配置 |
 
 ## 写回

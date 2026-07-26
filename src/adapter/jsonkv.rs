@@ -330,8 +330,15 @@ impl FormatAdapter for I18nextAdapter {
     }
 
     fn detect(&self, input: &Path) -> Option<DetectHit> {
+        // Real i18n files occasionally hold a stray number/bool leaf — accept
+        // when ≥80% of leaves are strings. Structured game data (rmmz maps…)
+        // stays excluded by its low string ratio.
         sniff(input, |v| {
-            v.is_object() && all_string_leaves(v) && count_string_leaves(v) > 0
+            if !v.is_object() {
+                return false;
+            }
+            let (strings, others) = leaf_counts(v);
+            strings > 0 && strings * 5 >= (strings + others) * 4
         })
         .then(|| DetectHit {
             engine_id: self.id(),
@@ -380,22 +387,19 @@ impl FormatAdapter for I18nextAdapter {
     }
 }
 
-/// True when every leaf is a string (objects/arrays may nest).
-fn all_string_leaves(v: &Value) -> bool {
+/// `(string leaves, non-string leaves)` over the whole tree.
+fn leaf_counts(v: &Value) -> (usize, usize) {
     match v {
-        Value::String(_) => true,
-        Value::Object(o) => o.values().all(all_string_leaves),
-        Value::Array(a) => a.iter().all(all_string_leaves),
-        _ => false,
-    }
-}
-
-fn count_string_leaves(v: &Value) -> usize {
-    match v {
-        Value::String(_) => 1,
-        Value::Object(o) => o.values().map(count_string_leaves).sum(),
-        Value::Array(a) => a.iter().map(count_string_leaves).sum(),
-        _ => 0,
+        Value::String(_) => (1, 0),
+        Value::Object(o) => o.values().fold((0, 0), |(s, n), c| {
+            let (cs, cn) = leaf_counts(c);
+            (s + cs, n + cn)
+        }),
+        Value::Array(a) => a.iter().fold((0, 0), |(s, n), c| {
+            let (cs, cn) = leaf_counts(c);
+            (s + cs, n + cn)
+        }),
+        _ => (0, 1),
     }
 }
 
@@ -448,6 +452,7 @@ mod tests {
                         unit_id: u.id.clone(),
                         translation_lines: vec![text.to_string()],
                         source_hash: TextUnit::source_hash(&u.original_lines),
+                        passthrough: false,
                     },
                 )
             })

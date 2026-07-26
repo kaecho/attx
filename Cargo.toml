@@ -1,6 +1,6 @@
 [package]
 name = "attx"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Agent Translation Toolkit eXtensible — universal AI translation framework: games (RPG Maker MV/MZ, MTool, Ren'Py, VNText), ebooks (EPUB), documents (DOCX/TXT/MD), subtitles (SRT/VTT/LRC), localization files (PO/Paratranz/i18next)"
 license = "MIT"
@@ -15,8 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+chardetng = "0.1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+encoding_rs = "0.8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -24,7 +26,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
-thiserror = "2"
 toml = "0.8"
 walkdir = "2"
 

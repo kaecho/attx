@@ -268,6 +268,7 @@ mod tests {
                 unit_id: units[0].id.clone(),
                 translation_lines: vec!["这是测试。".into()],
                 source_hash: TextUnit::source_hash(&units[0].original_lines),
+                passthrough: false,
             },
         );
         let outs = DocxAdapter.writeback(&input, "zh", &units, &tr).unwrap();

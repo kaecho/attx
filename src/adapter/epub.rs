@@ -13,12 +13,15 @@
 use super::xmllite::{self, Node};
 use super::{DetectHit, FormatAdapter, OutputFile, output_sibling};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
+use crate::textio;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
 
 pub struct EpubAdapter;
+/// Standalone HTML/XHTML files — same block-level extraction as EPUB chapters.
+pub struct HtmlAdapter;
 
 /// Block-level tags: a leaf occurrence of one of these is a translation unit.
 const BLOCK_TAGS: &[&str] = &[
@@ -163,6 +166,105 @@ impl FormatAdapter for EpubAdapter {
     }
 }
 
+impl FormatAdapter for HtmlAdapter {
+    fn id(&self) -> &'static str {
+        "html"
+    }
+    fn label(&self) -> &'static str {
+        "HTML page"
+    }
+    fn extensions(&self) -> &'static [&'static str] {
+        &["html", "htm", "xhtml"]
+    }
+
+    fn extract(&self, input: &Path, source_lang: &str) -> Result<Vec<TextUnit>> {
+        let body = textio::read_text(input)?;
+        let name = input
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "input.html".into());
+        let tree = xmllite::parse(&body).with_context(|| format!("parse {name}"))?;
+        let mut blocks = Vec::new();
+        collect_leaf_blocks(&tree, HTML_TAGS, &mut Vec::new(), &mut blocks);
+        let mut units = Vec::new();
+        for (idx, (_path, text)) in blocks.iter().enumerate() {
+            let lines: Vec<String> = text
+                .split('\n')
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if lines.is_empty() || !lines.iter().any(|l| needs_translation(l, source_lang)) {
+                continue;
+            }
+            let location = format!("{name}#b{idx:05}");
+            units.push(TextUnit {
+                id: TextUnit::compute_id("html", &location, &lines),
+                engine: "html".into(),
+                domain: "html".into(),
+                location,
+                item_type: ItemType::LongText,
+                role: String::new(),
+                original_lines: lines,
+                source_line_paths: vec![],
+                context: format!("s{:04}", idx / 30),
+                payload: String::new(),
+            });
+        }
+        Ok(units)
+    }
+
+    fn writeback(
+        &self,
+        input: &Path,
+        target_lang: &str,
+        units: &[TextUnit],
+        translations: &BTreeMap<String, Translation>,
+    ) -> Result<Vec<OutputFile>> {
+        let body = textio::read_text(input)?;
+        let mut blocks: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for u in units {
+            let Some(tr) = translations.get(&u.id) else {
+                continue;
+            };
+            let Some((_, idx)) = split_location(&u.location) else {
+                continue;
+            };
+            blocks.insert(idx, tr.translation_lines.clone());
+        }
+        let rewritten = rewrite_blocks(&body, "html input", HTML_TAGS, &blocks)?;
+        let ext = input
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("html")
+            .to_ascii_lowercase();
+        Ok(vec![OutputFile::text(
+            output_sibling(input, target_lang, &ext),
+            rewritten,
+        )])
+    }
+}
+
+/// HTML pages also translate `<title>`.
+const HTML_TAGS: &[&str] = &[
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "dt",
+    "dd",
+    "th",
+    "td",
+    "caption",
+    "figcaption",
+    "blockquote",
+    "div",
+    "title",
+];
+
 /// Which block tags apply to a zip entry, or None if not a text document.
 fn doc_block_tags(name: &str) -> Option<&'static [&'static str]> {
     let lower = name.to_ascii_lowercase();
@@ -243,6 +345,15 @@ fn rewrite_document(
     blocks: &BTreeMap<usize, Vec<String>>,
 ) -> Result<String> {
     let tags = doc_block_tags(name).unwrap_or(BLOCK_TAGS);
+    rewrite_blocks(body, name, tags, blocks)
+}
+
+fn rewrite_blocks(
+    body: &str,
+    name: &str,
+    tags: &[&str],
+    blocks: &BTreeMap<usize, Vec<String>>,
+) -> Result<String> {
     let mut tree = xmllite::parse(body).with_context(|| format!("reparse {name}"))?;
     let mut located = Vec::new();
     collect_leaf_blocks(&tree, tags, &mut Vec::new(), &mut located);
@@ -351,6 +462,7 @@ mod tests {
                     unit_id: u.id.clone(),
                     translation_lines: u.original_lines.iter().map(|l| format!("译:{l}")).collect(),
                     source_hash: TextUnit::source_hash(&u.original_lines),
+                    passthrough: false,
                 },
             );
         }
@@ -377,5 +489,36 @@ mod tests {
             .unwrap();
         assert!(opf.contains("<dc:language>zh</dc:language>"), "{opf}");
         assert!(opf.contains("译:負けた"), "{opf}");
+    }
+
+    #[test]
+    fn html_roundtrip() {
+        let dir = super::super::test_dir("html");
+        let input = dir.join("page.html");
+        std::fs::write(
+            &input,
+            "<html><head><title>物語</title></head><body><p>これは本文。</p><p>ascii only</p></body></html>",
+        )
+        .unwrap();
+        let units = HtmlAdapter.extract(&input, "ja").unwrap();
+        assert_eq!(units.len(), 2, "title + jp paragraph: {units:#?}");
+        let mut tr = BTreeMap::new();
+        for u in &units {
+            tr.insert(
+                u.id.clone(),
+                Translation {
+                    unit_id: u.id.clone(),
+                    translation_lines: vec![format!("译:{}", u.original_lines[0])],
+                    source_hash: TextUnit::source_hash(&u.original_lines),
+                    passthrough: false,
+                },
+            );
+        }
+        let outs = HtmlAdapter.writeback(&input, "zh", &units, &tr).unwrap();
+        let body = String::from_utf8(outs[0].bytes.clone()).unwrap();
+        assert!(body.contains("<title>译:物語</title>"), "{body}");
+        assert!(body.contains("<p>译:これは本文。</p>"), "{body}");
+        assert!(body.contains("<p>ascii only</p>"), "{body}");
+        assert!(outs[0].path.to_string_lossy().ends_with("page.zh.html"));
     }
 }
