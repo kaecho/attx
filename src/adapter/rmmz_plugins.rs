@@ -10,7 +10,7 @@
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -100,6 +100,17 @@ fn skip_key(key: &str) -> bool {
     static KEYS: LazyLock<BTreeSet<&'static str>> = LazyLock::new(|| {
         [
             "id",
+            // Identity handles: referenced verbatim by plugin commands and event
+            // scripts (e.g. `gainAchievement("実績_x")`). They are often written
+            // in Japanese, so the CJK heuristic alone would happily translate
+            // them and silently break the lookup.
+            "key",
+            "keyname",
+            "identifier",
+            "ident",
+            "uniquekey",
+            "slug",
+            "tag",
             "symbol",
             "switch",
             "switchid",
@@ -589,10 +600,25 @@ fn apply_one(plugins: &mut [Value], unit: &TextUnit, text: &str) -> Result<()> {
 }
 
 fn set_in_json_string(raw: &str, json_path: &str, text: &str) -> Result<String> {
-    let mut root: Value = serde_json::from_str(raw)
+    let mut root = decode_json_container(raw)
         .with_context(|| format!("nested param is not JSON: {}", truncate(raw, 80)))?;
     set_path(&mut root, json_path, Value::String(text.to_string()))?;
     Ok(serde_json::to_string(&root)?)
+}
+
+/// Decode a value that is *itself* a JSON-encoded container (`"[…]"` / `"{…}"`).
+///
+/// RPG Maker stores struct/array plugin params as strings holding JSON, often
+/// nested several levels deep. Extraction descends through those levels
+/// transparently, so writeback **must** use this exact same predicate — any
+/// asymmetry between the two sides re-introduces the nested-writeback bug
+/// (`expected array at 0`, or a JSON string silently flattened into an object).
+fn decode_json_container(s: &str) -> Option<Value> {
+    let t = s.trim();
+    if !(t.starts_with('[') || t.starts_with('{')) {
+        return None;
+    }
+    serde_json::from_str::<Value>(t).ok()
 }
 
 fn set_path(root: &mut Value, path: &str, value: Value) -> Result<()> {
@@ -601,37 +627,50 @@ fn set_path(root: &mut Value, path: &str, value: Value) -> Result<()> {
         return Ok(());
     }
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let mut cur = root;
-    for (i, part) in parts.iter().enumerate() {
-        let last = i + 1 == parts.len();
-        if let Ok(idx) = part.parse::<usize>() {
-            let arr = cur
-                .as_array_mut()
-                .ok_or_else(|| anyhow::anyhow!("expected array at {part}"))?;
-            if idx >= arr.len() {
-                bail!("index {idx} out of range");
-            }
-            if last {
-                arr[idx] = value;
-                return Ok(());
-            }
-            cur = &mut arr[idx];
-        } else {
-            if !cur.is_object() {
-                *cur = Value::Object(Map::new());
-            }
-            let obj = cur.as_object_mut().unwrap();
-            if last {
-                obj.insert((*part).to_string(), value);
-                return Ok(());
-            }
-            if !obj.contains_key(*part) {
-                obj.insert((*part).to_string(), Value::Object(Map::new()));
-            }
-            cur = obj.get_mut(*part).unwrap();
-        }
+    descend_set(root, &parts, value).with_context(|| format!("json path {path}"))
+}
+
+/// Walk `parts` into `cur`, re-encoding any layer that was a JSON string.
+///
+/// Never creates missing keys: a path that no longer matches the file is an
+/// error, not a licence to overwrite. Because each layer is decoded into a
+/// detached `Value` and only written back after the recursion succeeds, a
+/// failure anywhere leaves the whole param byte-identical.
+fn descend_set(cur: &mut Value, parts: &[&str], value: Value) -> Result<()> {
+    // Path exhausted → this is the leaf being translated. Checked before the
+    // decode branch so a leaf whose text merely *looks* like JSON is replaced
+    // verbatim rather than descended into.
+    let Some((part, rest)) = parts.split_first() else {
+        *cur = value;
+        return Ok(());
+    };
+
+    if let Value::String(s) = cur
+        && let Some(mut inner) = decode_json_container(s)
+    {
+        descend_set(&mut inner, parts, value)?;
+        *cur = Value::String(serde_json::to_string(&inner)?);
+        return Ok(());
     }
-    Ok(())
+
+    if let Ok(idx) = part.parse::<usize>() {
+        let arr = cur
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("expected array at {part}"))?;
+        let len = arr.len();
+        let slot = arr
+            .get_mut(idx)
+            .ok_or_else(|| anyhow::anyhow!("index {idx} out of range (len {len})"))?;
+        descend_set(slot, rest, value)
+    } else {
+        let obj = cur
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("expected object at {part}"))?;
+        let slot = obj
+            .get_mut(*part)
+            .ok_or_else(|| anyhow::anyhow!("missing key {part}"))?;
+        descend_set(slot, rest, value)
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -675,5 +714,232 @@ var $plugins =
         fs::create_dir_all(dir.join("js/plugins")).unwrap();
         fs::write(dir.join("js/plugins.js"), plugins_js).unwrap();
         dir
+    }
+
+    // ---- Nested JSON-string writeback regressions ----
+    // RPG Maker plugin params encode structs as *strings containing JSON*, often
+    // several layers deep. Extraction descends through those layers transparently,
+    // so writeback must decode/re-encode the same layers or it either errors
+    // ("expected array at 0") or silently flattens a string into an object.
+
+    use serde_json::json;
+
+    fn enc(v: &Value) -> String {
+        serde_json::to_string(v).unwrap()
+    }
+
+    /// Structural fingerprint. A JSON-encoded string renders as `s(<inner>)`, so
+    /// losing a wrapper (string -> object) changes the signature.
+    fn type_sig(v: &Value) -> String {
+        match v {
+            Value::Null => "n".into(),
+            Value::Bool(_) => "b".into(),
+            Value::Number(_) => "#".into(),
+            Value::String(s) => {
+                let t = s.trim();
+                if (t.starts_with('[') || t.starts_with('{'))
+                    && let Ok(inner) = serde_json::from_str::<Value>(t)
+                {
+                    return format!("s({})", type_sig(&inner));
+                }
+                "s".into()
+            }
+            Value::Array(a) => format!(
+                "[{}]",
+                a.iter().map(type_sig).collect::<Vec<_>>().join(",")
+            ),
+            Value::Object(m) => format!(
+                "{{{}}}",
+                m.iter()
+                    .map(|(k, x)| format!("{k}:{}", type_sig(x)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
+    }
+
+    fn test_root(name: &str, plugins_js: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("attx-pl-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("js/plugins")).unwrap();
+        fs::write(dir.join("js/plugins.js"), plugins_js).unwrap();
+        dir
+    }
+
+    /// Case A: array whose elements are JSON strings (Achievement2 style).
+    #[test]
+    fn nested_array_of_json_strings() {
+        let ach = json!({"key":"実績_a","title":"称号","description":"説明"});
+        let param = enc(&json!([enc(&ach)]));
+
+        let out = set_in_json_string(&param, "0/description", "描述译文").expect("writeback");
+
+        let root: Value = serde_json::from_str(&out).unwrap();
+        let el = root[0]
+            .as_str()
+            .expect("array element must stay a JSON string");
+        let obj: Value = serde_json::from_str(el).unwrap();
+        assert_eq!(obj["description"], json!("描述译文"));
+        assert_eq!(obj["title"], json!("称号"), "siblings must survive");
+        assert_eq!(obj["key"], json!("実績_a"), "siblings must survive");
+    }
+
+    /// Case B: object value is a JSON string (SaveFilePlus style).
+    #[test]
+    fn nested_object_value_is_json_string() {
+        let terms = json!({"gold":"所持金","mapname":"現在地"});
+        let param = enc(&json!({"terms": enc(&terms)}));
+
+        let out = set_in_json_string(&param, "terms/gold", "金钱").expect("writeback");
+
+        let root: Value = serde_json::from_str(&out).unwrap();
+        let t = root["terms"]
+            .as_str()
+            .expect("terms must stay a JSON string");
+        let obj: Value = serde_json::from_str(t).unwrap();
+        assert_eq!(obj["gold"], json!("金钱"));
+        assert_eq!(obj["mapname"], json!("現在地"));
+    }
+
+    /// Case C: three encode levels (QuestSystem style) — the reported
+    /// `expected array at 0` failure.
+    #[test]
+    fn nested_three_levels_keeps_type_signature() {
+        let reward = json!({"Name":"報酬A"});
+        let quest = json!({
+            "Title":"クエスト1",
+            "Rewards": enc(&json!([enc(&reward)])),
+        });
+        let param = enc(&json!([enc(&quest)]));
+        let before = type_sig(&Value::String(param.clone()));
+
+        let out = set_in_json_string(&param, "0/Rewards/0/Name", "奖励A").expect("writeback");
+
+        assert_eq!(
+            type_sig(&Value::String(out.clone())),
+            before,
+            "type signature must survive writeback"
+        );
+        let q: Value =
+            serde_json::from_str(serde_json::from_str::<Value>(&out).unwrap()[0].as_str().unwrap())
+                .unwrap();
+        assert_eq!(q["Title"], json!("クエスト1"));
+        let rewards: Value = serde_json::from_str(q["Rewards"].as_str().unwrap()).unwrap();
+        let r0: Value = serde_json::from_str(rewards[0].as_str().unwrap()).unwrap();
+        assert_eq!(r0["Name"], json!("奖励A"));
+    }
+
+    /// Regression: ordinary (unwrapped) nested JSON must keep working.
+    #[test]
+    fn plain_nested_json_still_works() {
+        let param = enc(&json!({"list":[{"name":"名前"}]}));
+        let out = set_in_json_string(&param, "list/0/name", "名字").expect("writeback");
+        let root: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(root["list"][0]["name"], json!("名字"));
+    }
+
+    /// A path that no longer matches the file must not abort the whole writeback.
+    #[test]
+    fn missing_path_is_reported_not_silently_created() {
+        let param = enc(&json!({"terms": enc(&json!({"gold":"所持金"}))}));
+        let err = set_in_json_string(&param, "terms/nosuch", "x")
+            .expect_err("missing key must error rather than corrupt");
+        assert!(
+            err.to_string().contains("nosuch"),
+            "error should name the segment: {err}"
+        );
+    }
+
+    /// End-to-end: extract emits the paths, writeback must consume the same
+    /// paths and hand back a structurally identical plugins.js.
+    #[test]
+    fn extract_writeback_roundtrip_preserves_nesting() {
+        let ach = json!({"key":"実績_a","title":"称号","description":"説明"});
+        let quest = json!({
+            "Title":"クエスト1",
+            "Rewards": enc(&json!([enc(&json!({"Name":"報酬A"}))])),
+        });
+        let plugins = json!([
+            {"name":"TorigoyaMZ_Achievement2","status":true,"description":"",
+             "parameters":{"baseAchievementData": enc(&json!([enc(&ach)]))}},
+            {"name":"SaveFilePlus","status":true,"description":"",
+             "parameters":{"info1": enc(&json!({"terms": enc(&json!({"gold":"所持金"}))}))}},
+            {"name":"QuestSystem","status":true,"description":"",
+             "parameters":{"QuestDatas": enc(&json!([enc(&quest)]))}}
+        ]);
+        let js = format!("var $plugins =\n{};\n", serde_json::to_string(&plugins).unwrap());
+        let dir = test_root("roundtrip", &js);
+
+        let units = extract_plugins(&dir, "ja").unwrap();
+        assert!(!units.is_empty(), "expected plugin units");
+
+        let mut trs = BTreeMap::new();
+        for u in &units {
+            trs.insert(
+                u.id.clone(),
+                Translation {
+                    unit_id: u.id.clone(),
+                    translation_lines: vec![format!("ZH:{}", u.original_lines.join(""))],
+                    source_hash: String::new(),
+                    passthrough: false,
+                },
+            );
+        }
+
+        let out = writeback_plugins(&dir, &units, &trs)
+            .expect("writeback must succeed")
+            .expect("plugins.js content");
+
+        let before = parse_plugins_js(&js).unwrap();
+        let after = parse_plugins_js(&out).unwrap();
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(after.iter()) {
+            assert_eq!(
+                type_sig(&b["parameters"]),
+                type_sig(&a["parameters"]),
+                "param type signature changed for {}",
+                b["name"]
+            );
+        }
+        assert!(out.contains("ZH:説明"), "translation must land in output");
+        assert!(out.contains("ZH:報酬A"), "deep translation must land");
+        assert!(
+            !out.contains("ZH:実績_a"),
+            "identity key must not be translated (events reference it verbatim)"
+        );
+        assert!(out.contains("実績_a"), "identity key must survive unchanged");
+    }
+
+    /// Identity fields inside nested structs address game logic, not the player.
+    /// Achievement `key`s are referenced verbatim by `gainAchievement(...)`, so
+    /// translating them silently breaks unlocking.
+    #[test]
+    fn identity_keys_are_not_extracted() {
+        let ach = json!({"key":"実績_xxx","title":"タイトル","description":"説明文"});
+        let plugins = json!([
+            {"name":"TorigoyaMZ_Achievement2","status":true,"description":"",
+             "parameters":{"baseAchievementData": enc(&json!([enc(&ach)]))}}
+        ]);
+        let js = format!(
+            "var $plugins =\n{};\n",
+            serde_json::to_string(&plugins).unwrap()
+        );
+        let dir = test_root("identity", &js);
+
+        let units = extract_plugins(&dir, "ja").unwrap();
+        let paths: Vec<&str> = units.iter().map(|u| u.location.as_str()).collect();
+
+        assert!(
+            paths.iter().any(|p| p.ends_with("#0/title")),
+            "player-visible title must still be extracted: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("#0/description")),
+            "player-visible description must still be extracted: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("#0/key")),
+            "identity key must be skipped: {paths:?}"
+        );
     }
 }
