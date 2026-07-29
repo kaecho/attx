@@ -1,5 +1,7 @@
 mod adapter;
 mod config;
+mod knowledge;
+mod learn;
 mod llm;
 mod model;
 mod pipeline;
@@ -63,6 +65,11 @@ enum Commands {
         #[command(subcommand)]
         command: ProfileCommands,
     },
+    /// Learn, review and apply extraction rules (self-improvement)
+    Learn {
+        #[command(subcommand)]
+        command: LearnCommands,
+    },
     /// Register / open a workspace for an input
     Init {
         /// Input file or game directory (--game also accepted)
@@ -88,6 +95,9 @@ enum Commands {
     Extract {
         #[arg(long)]
         workspace: PathBuf,
+        /// Ignore learned extraction rules (escape hatch: pre-knowledge behaviour)
+        #[arg(long)]
+        no_knowledge: bool,
     },
     /// Translate pending texts via LLM
     Translate {
@@ -215,6 +225,44 @@ enum ProfileCommands {
     List,
 }
 
+/// Self-improvement: learn extraction rules from evidence, review, apply.
+#[derive(Subcommand, Debug)]
+enum LearnCommands {
+    /// Scan a translated workspace for evidence and record proposals
+    Scan {
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Additionally ask the LLM to sanity-check each proposal
+        #[arg(long)]
+        llm: bool,
+    },
+    /// Show pending proposals with their evidence (JSON)
+    Pending,
+    /// Approve / reject pending proposals by 1-based index
+    Review {
+        /// Comma-separated indices to approve (e.g. 1,3)
+        #[arg(long, value_delimiter = ',')]
+        approve: Vec<usize>,
+        /// Comma-separated indices to reject
+        #[arg(long, value_delimiter = ',')]
+        reject: Vec<usize>,
+        /// Approve every pending proposal
+        #[arg(long)]
+        approve_all: bool,
+    },
+    /// List active learned rules (JSON)
+    List,
+    /// Drop an active rule by field name
+    Forget {
+        /// Field name as shown by `attx learn list`
+        #[arg(long)]
+        field: String,
+        /// Restrict to one format id
+        #[arg(long)]
+        format: Option<String>,
+    },
+}
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("error: {err:#}");
@@ -255,6 +303,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Commands::Profile { command } => run_profile(command),
+        Commands::Learn { command } => run_learn(command, &settings),
         Commands::Init {
             input,
             engine,
@@ -280,9 +329,12 @@ fn run() -> Result<()> {
             );
             Ok(())
         }
-        Commands::Extract { workspace } => {
-            let n = pipeline::extract(&workspace, &settings)?;
-            println!("{}", serde_json::json!({"extracted": n, "status": "ok"}));
+        Commands::Extract {
+            workspace,
+            no_knowledge,
+        } => {
+            let rep = pipeline::extract(&workspace, &settings, !no_knowledge)?;
+            println!("{}", serde_json::to_string(&rep)?);
             Ok(())
         }
         Commands::Translate {
@@ -319,7 +371,7 @@ fn run() -> Result<()> {
                 &dst,
                 workspace,
             )?;
-            let extracted = pipeline::extract(&ws, &settings)?;
+            let extracted = pipeline::extract(&ws, &settings, true)?.extracted;
             let mut out = serde_json::json!({
                 "workspace": ws,
                 "extracted": extracted,
@@ -429,4 +481,106 @@ fn resolve_profile_path(arg: &str) -> Result<PathBuf> {
     }
     let (path, _) = profile::find_saved(arg)?;
     Ok(path)
+}
+
+fn run_learn(command: LearnCommands, settings: &config::Settings) -> Result<()> {
+    match command {
+        LearnCommands::Scan { workspace, llm } => {
+            let report = learn::scan(&workspace, llm, settings)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.new_proposals > 0 {
+                eprintln!(
+                    "learn: {} new proposal(s). Review with `attx learn pending` \
+                     then `attx learn review --approve <n>`",
+                    report.new_proposals
+                );
+            }
+            Ok(())
+        }
+        LearnCommands::Pending => {
+            let file = learn::load_proposals();
+            // 1-based indices here are the same ones `review --approve` takes.
+            let listed: Vec<_> = file
+                .proposals
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    serde_json::json!({
+                        "index": i + 1,
+                        "format": p.format,
+                        "field": p.field,
+                        "verdict": p.verdict,
+                        "scope": p.scope,
+                        "confidence": p.confidence,
+                        "reason": p.reason,
+                        "evidence": p.evidence,
+                        "samples": p.samples,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "pending": listed.len(),
+                    "proposals": listed,
+                }))?
+            );
+            Ok(())
+        }
+        LearnCommands::Review {
+            approve,
+            reject,
+            approve_all,
+        } => {
+            let approve = if approve_all {
+                (1..=learn::load_proposals().proposals.len()).collect()
+            } else {
+                approve
+            };
+            if approve.is_empty() && reject.is_empty() {
+                anyhow::bail!(
+                    "nothing to do: pass --approve <n[,n]>, --reject <n[,n]> or --approve-all \
+                     (see `attx learn pending`)"
+                );
+            }
+            let report = learn::review(&approve, &reject)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        LearnCommands::List => {
+            let sets = knowledge::all_rules();
+            let out: Vec<_> = sets
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "format": s.format,
+                        "rules": s.rules.iter().map(|r| serde_json::json!({
+                            "field": r.field,
+                            "verdict": r.verdict,
+                            "scope": r.scope,
+                            "confidence": r.confidence,
+                            "reason": r.reason,
+                            "evidence": r.evidence,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "formats": out.len(),
+                    "knowledge": out,
+                }))?
+            );
+            Ok(())
+        }
+        LearnCommands::Forget { field, format } => {
+            let n = learn::forget(&field, format.as_deref())?;
+            println!(
+                "{}",
+                serde_json::json!({"forgotten": n, "field": field, "status": "ok"})
+            );
+            Ok(())
+        }
+    }
 }

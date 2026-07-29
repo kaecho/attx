@@ -227,11 +227,43 @@ attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --d
 | `run --input …` | init + extract + translate + writeback |
 | `status --workspace` | 进度统计(含 passthrough 与按 domain 细分) |
 | `translate-jsonl` / `export-jsonl` / `import-jsonl` | 数据交换(`--filter` 支持 `passthrough`) |
+| `learn scan/pending/review/list/forget` | 自我改进:从证据中学习提取规则 |
 
 全局:`--config /path/to/setting.toml`(默认 `./setting.toml` 或 `$ATTX_HOME/setting.toml`);`--client <名>` 选用非默认 LLM client。
 
 模型拒答/反复失败的条目会以**passthrough 占位**(保留原文并打标)让整轮跑完;
 `status` 会报数,`translate --retry-passthrough` 可只重试这些条目。
+
+### 自我改进的提取层
+
+适配器靠硬编码启发式判断该提取什么,而这些表有时是错的——像 `AchieveName`
+这种字段名看着是文本,值却是事件脚本按原文引用的标识符。翻译它,成就就永远
+解锁不了。以前每次修复只留在源码里,下一个游戏重新踩一遍。
+
+`attx learn` 把这类判断变成可跨项目积累的数据:
+
+```bash
+attx learn scan --workspace .attx        # 挖掘证据,记录提案
+attx learn scan --workspace .attx --llm  # 额外让模型复核提案
+attx learn pending                       # 查看提案(含证据与样本值)
+attx learn review --approve 1,3          # 批准;此时规则才生效
+attx learn list                          # 当前生效规则
+attx learn forget --field achievename    # 撤销某条
+attx extract --no-knowledge              # 逃生舱:忽略全部已学规则
+```
+
+证据免费且客观,来自工作区里已经发生的事:提取出来却是机器字面量的值、
+与原文完全相同的译文、以及 passthrough 聚集。统计按**字段名**聚合而非按单元——
+一条 passthrough 是噪声,同一字段名下 6/6 就是信号。
+
+规则按格式存为可读 TOML,位于 `$ATTX_HOME/knowledge/`(或
+`~/.config/attx/knowledge/`),可以直接读、改、用 git 管、删。
+
+两条值得知道的安全保障:
+
+- **未批准不生效。** `scan` 只写提案,不碰提取行为。
+- **学习可以推翻字段名启发式,但不能推翻值本身的证据。** 当值是数字、路径或
+  脚本时,`extract` 规则会被拒绝——所以一条坏规则不可能把开关 ID、文件名送去翻译。
 
 ---
 
@@ -251,6 +283,8 @@ src/
   quality.rs       行数 / 控制符完整性检查
   textio.rs        编码自动检测(UTF-8 / Shift-JIS / GBK / UTF-16)
   profile.rs       自定义格式 Profile(line_regex / json_keys / json_paths 规则)
+  knowledge.rs     已学提取规则:模型、TOML 存储、对单元的纯函数过滤
+  learn.rs         证据挖掘、提案、审核批准、可选 LLM 复核
   pipeline.rs      流程编排 + analyze(不含格式知识;适配器不碰网络)
   adapter/
     mod.rs         FormatAdapter trait + 注册表 + 共享工具

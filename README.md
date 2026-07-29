@@ -228,12 +228,49 @@ attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --d
 | `run --input …` | init + extract + translate + writeback |
 | `status --workspace` | Counts incl. passthrough + per-domain breakdown |
 | `translate-jsonl` / `export-jsonl` / `import-jsonl` | Interchange (`--filter` incl. `passthrough`) |
+| `learn scan/pending/review/list/forget` | Self-improvement: learn extraction rules from evidence |
 
 Global: `--config /path/to/setting.toml` (default `./setting.toml` or `$ATTX_HOME/setting.toml`); `--client <name>` picks a non-default LLM client.
 
 When the model refuses or keeps failing on a unit, attx stores the original text as a
 flagged *passthrough* placeholder so the run can finish; `status` reports the count and
 `translate --retry-passthrough` re-queues exactly those units.
+
+### Self-improving extraction
+
+Adapters decide what to extract with hardcoded heuristics, and those tables are
+sometimes wrong — a field like `AchieveName` looks like text but actually holds an
+identifier that event scripts reference verbatim. Translate it and the achievement
+never unlocks. Until now each such fix stayed in the source, so the next game
+re-discovered it.
+
+`attx learn` turns that judgement into data you accumulate across projects:
+
+```bash
+attx learn scan --workspace .attx        # mine evidence, record proposals
+attx learn scan --workspace .attx --llm  # also ask the model to sanity-check them
+attx learn pending                       # proposals with evidence + sample values
+attx learn review --approve 1,3          # approve; only now do rules take effect
+attx learn list                          # active rules
+attx learn forget --field achievename    # drop one
+attx extract --no-knowledge              # escape hatch: ignore all learned rules
+```
+
+Evidence is free and objective — it comes from what already happened in the
+workspace: values that are machine literals despite being extracted, translations
+identical to their source, and passthrough clusters. Statistics are aggregated per
+*field name*, never per unit: one passthrough is noise, six of six under the same
+field name is a signal.
+
+Rules are stored per format as readable TOML in `$ATTX_HOME/knowledge/` (or
+`~/.config/attx/knowledge/`), so you can read, edit, git-track or delete them.
+
+Two safeguards worth knowing:
+
+- **Nothing takes effect without approval.** `scan` only ever writes proposals.
+- **Learning may override a name heuristic, never the evidence of a value.** An
+  `extract` rule is refused when the value is a number, path or script, so a bad
+  rule cannot send switch ids or filenames to the model.
 
 ---
 
@@ -253,6 +290,8 @@ src/
   quality.rs       line-count / control-code sanity checks
   textio.rs        encoding auto-detection (UTF-8 / Shift-JIS / GBK / UTF-16)
   profile.rs       custom format profiles (line_regex / json_keys / json_paths rules)
+  knowledge.rs     learned extraction rules: model, TOML store, pure filter over units
+  learn.rs         evidence mining, proposals, review/approval, optional LLM check
   pipeline.rs      orchestration + analyze (no format knowledge, no HTTP in adapters)
   adapter/
     mod.rs         FormatAdapter trait + registry + shared helpers

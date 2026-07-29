@@ -1,5 +1,6 @@
 use crate::adapter::{self, FormatAdapter};
 use crate::config::{self, Settings};
+use crate::knowledge;
 use crate::llm::{Profile, Translator, profile_for_format};
 use crate::model::{TextUnit, Translation, WorkspaceMeta, needs_translation};
 use crate::profile::{self, CustomAdapter};
@@ -243,15 +244,55 @@ fn resolve_adapter(engine: &str, workspace: &Path) -> Result<Box<dyn FormatAdapt
     adapter::get(engine)
 }
 
-pub fn extract(workspace: &Path, _settings: &Settings) -> Result<usize> {
+/// Extraction report. `skipped_by_knowledge` is surfaced so a learned rule that
+/// silently swallows units is visible without digging through the DB.
+#[derive(Debug, Serialize)]
+pub struct ExtractReport {
+    pub extracted: usize,
+    pub skipped_by_knowledge: usize,
+    pub rules_applied: usize,
+    pub status: &'static str,
+}
+
+pub fn extract(workspace: &Path, _settings: &Settings, use_knowledge: bool) -> Result<ExtractReport> {
     let store = store::workspace_db(workspace)?;
     let meta = store.meta()?;
     let adapter = resolve_adapter(&meta.engine, workspace)?;
     let content_root = PathBuf::from(&meta.content_root);
     let units = adapter.extract(&content_root, &meta.source_lang)?;
+
+    // Learned rules are a pure filter *outside* the adapter: every format gets
+    // them for free, and --no-knowledge restores the pre-learning behaviour
+    // exactly, so a bad rule can always be bisected away.
+    let (units, applied, skipped) = if use_knowledge {
+        let rules = knowledge::load_rules(&meta.engine);
+        let n = rules.rules.len();
+        let (units, report) = knowledge::apply(units, &rules);
+        if report.skipped > 0 {
+            eprintln!(
+                "knowledge: {} unit(s) skipped by {} learned rule(s) for {}",
+                report.skipped, n, meta.engine
+            );
+        }
+        if report.extract_vetoed > 0 {
+            eprintln!(
+                "knowledge: {} extract rule hit(s) vetoed (value is machine data)",
+                report.extract_vetoed
+            );
+        }
+        (units, n, report.skipped)
+    } else {
+        (units, 0, 0)
+    };
+
     let n = units.len();
     store.replace_units(&units)?;
-    Ok(n)
+    Ok(ExtractReport {
+        extracted: n,
+        skipped_by_knowledge: skipped,
+        rules_applied: applied,
+        status: "ok",
+    })
 }
 
 pub fn translate(
