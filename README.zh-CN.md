@@ -223,47 +223,125 @@ attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --d
 | `init --input <路径> --src --dst [--profile]` | 建工作区 + SQLite |
 | `extract --workspace` | 适配器 → 文本单元 |
 | `translate --workspace [--limit] [--dry-run] [--retry-passthrough]` | 翻译 pending,批次增量落库 |
-| `writeback --workspace [--dry-run]` | 产出译文文件 |
-| `run --input …` | init + extract + translate + writeback |
+| `writeback --workspace [--dry-run] [--no-learn]` | 产出译文文件;顺带自动沉淀经验(可关) |
+| `run --input …` | init + extract +(术语表)+ translate + writeback |
 | `status --workspace` | 进度统计(含 passthrough 与按 domain 细分) |
 | `translate-jsonl` / `export-jsonl` / `import-jsonl` | 数据交换(`--filter` 支持 `passthrough`) |
-| `learn scan/pending/review/list/forget` | 自我改进:从证据中学习提取规则 |
+| `learn summarize/pending/review/list/defaults/forget` | 自我改进:积累提取经验 |
+| `glossary build/list/add/remove/import/export/check` | 术语表:全作品统一专有名词译名 |
 
 全局:`--config /path/to/setting.toml`(默认 `./setting.toml` 或 `$ATTX_HOME/setting.toml`);`--client <名>` 选用非默认 LLM client。
 
 模型拒答/反复失败的条目会以**passthrough 占位**(保留原文并打标)让整轮跑完;
 `status` 会报数,`translate --retry-passthrough` 可只重试这些条目。
 
-### 自我改进的提取层
+### 自我改进的经验层
 
 适配器靠硬编码启发式判断该提取什么,而这些表有时是错的——像 `AchieveName`
 这种字段名看着是文本,值却是事件脚本按原文引用的标识符。翻译它,成就就永远
 解锁不了。以前每次修复只留在源码里,下一个游戏重新踩一遍。
 
-`attx learn` 把这类判断变成可跨项目积累的数据:
+attx 把这类判断变成数据,并且**自动**沉淀:每次 `writeback` 成功后都会把本轮
+运行总结成经验条目,**零 API 成本**——证据本来就躺在工作区数据库里。
 
 ```bash
-attx learn scan --workspace .attx        # 挖掘证据,记录提案
-attx learn scan --workspace .attx --llm  # 额外让模型复核提案
-attx learn pending                       # 查看提案(含证据与样本值)
-attx learn review --approve 1,3          # 批准;此时规则才生效
-attx learn list                          # 当前生效规则
+attx writeback --workspace .attx         # …并自动从本轮运行中学习
+attx writeback --workspace .attx --no-learn   # 本次不学
+attx learn summarize --workspace .attx   # 或手动触发
+attx learn summarize --workspace .attx --llm  # 额外让模型复核(有费用)
+attx learn pending                       # 待批准条目(含证据与样本值)
+attx learn review --approve 1,3          # 批准;此时才会真的删东西
+attx learn list                          # 当前生效的经验
+attx learn defaults --format rmmz        # 打印内置基线(TOML)
 attx learn forget --field achievename    # 撤销某条
-attx extract --no-knowledge              # 逃生舱:忽略全部已学规则
+attx extract --no-knowledge              # 逃生舱:忽略全部经验
 ```
 
-证据免费且客观,来自工作区里已经发生的事:提取出来却是机器字面量的值、
-与原文完全相同的译文、以及 passthrough 聚集。统计按**字段名**聚合而非按单元——
-一条 passthrough 是噪声,同一字段名下 6/6 就是信号。
+**文件格式刻意是开放式的。** 每条 entry 带一个 `kind`,attx 不认识的 kind 会
+**原样往返保留**——agent 可以自创 `kind = "voice-hint"`,attx 会原封不动还给它,
+而不是静默丢弃。目前 attx 会执行的有两种:
 
-规则按格式存为可读 TOML,位于 `$ATTX_HOME/knowledge/`(或
-`~/.config/attx/knowledge/`),可以直接读、改、用 git 管、删。
+```toml
+[[entry]]
+kind = "field"          # 字段名级提取判断
+field = "key"
+verdict = "skip"        # skip | extract
+scope = "nested"        # nested | top | any
+domain = "plugins"      # 限定单元 domain;留空表示不限
+status = "pending"      # approved | pending
 
-两条值得知道的安全保障:
+[[entry]]
+kind = "note"           # 自由经验;topic="prompt" 的会进模型提示词
+topic = "prompt"
+text = "该格式的译文容易丢控制码,务必原样保留每个 [CTRL_n]。"
+```
 
-- **未批准不生效。** `scan` 只写提案,不碰提取行为。
+四层合并,后者覆盖前者:内置默认(内嵌,见 `learn defaults`)→
+`$ATTX_HOME/knowledge/<格式>.toml` → `<工作区>/experience.toml`。
+同层内,精确字段名胜过 `*后缀`,`skip` 胜过 `extract`。
+
+三条值得知道的安全保障:
+
+- **加法自动生效,减法等你点头。** note 与 `extract` 立即生效——最坏结果是提示词
+  长几句。`skip` 是唯一会删文本的判定,所以写入时为 `pending`,在
+  `learn review --approve` 之前什么也不做。漏译在 `status` 里看得见,静默丢掉的
+  那行看不见。
 - **学习可以推翻字段名启发式,但不能推翻值本身的证据。** 当值是数字、路径或
-  脚本时,`extract` 规则会被拒绝——所以一条坏规则不可能把开关 ID、文件名送去翻译。
+  脚本时,`extract` 条目会被拒绝——所以一条坏条目不可能把开关 ID、文件名送去翻译。
+- **条目受 domain 约束。** rmmz 的插件参数规则不会误伤 `Map*.json` 里的对白——
+  同一个字段名在那里是另一回事。
+
+### 术语表
+
+模型分批翻译长篇作品时,无从与自己保持一致:`アレイ` 第一章译成艾蕾,第九章
+译成埃雷,读者根本看不出是同一个人。术语表为整部作品的每个专有名词钉死一个
+译名。
+
+**默认关闭**——构建术语表会产生额外 LLM 费用。
+
+```bash
+attx glossary build --workspace .attx --dry-run   # 先看候选,不花钱
+attx glossary build --workspace .attx             # 挖掘 → 卡阈值 → 交模型命名
+attx glossary list --workspace .attx
+attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info 女性名字
+attx glossary import --workspace .attx --file terms.json
+attx glossary check --workspace .attx             # 译文里没生效的术语
+```
+
+流程是统计优先的,这正是它便宜的原因:
+
+```
+挖掘(正则,免费) → min_occurrences → max_terms → 命名(LLM) → 按批注入 → 回检
+```
+
+挖掘与卡阈值都不花钱,所以模型只会被问到足够高频、值得统一的词——
+**LLM 花费只与术语数相关,与作品体量无关**。调低 `min_occurrences` 收录更多术语、
+花更多钱,这就是唯一的杠杆。
+
+统计分不清专有名词和常见词,所以模型有一个 `keep` 标志可以否决自己的候选,
+而且否决会被记住——重建时不会为同一个非术语再付一次钱。术语按批注入,
+只注入该批真实出现的那些,所以 200 条术语表也不会把正文挤出提示词。
+
+每条术语都带一个消歧描述 `info`(「女性名字」「地点」)。这不是装饰:没有它,
+模型无从判断 `アレイさん` 该译成「艾蕾小姐」而不是「埃雷先生」。
+
+在 `setting.toml` 里开启:
+
+```toml
+[glossary]
+enabled = false        # 是否在 `attx run` 中构建
+min_occurrences = 10   # 出现次数低于此值不进术语表
+max_terms = 200        # 送给模型的候选上限
+inject_limit = 30      # 单批注入的术语上限
+
+[learn]
+auto_summarize = true  # writeback 后沉淀经验(免费)
+llm_review = false     # 额外让模型复核提案(有费用)
+```
+
+显式执行 `attx glossary build` 不受 `enabled` 限制——主动要求即同意。而一旦
+`glossary.toml` 存在,`translate` 就一律注入:注入几乎不花钱,已经建好却不用
+才是意外。
 
 ---
 
@@ -283,8 +361,10 @@ src/
   quality.rs       行数 / 控制符完整性检查
   textio.rs        编码自动检测(UTF-8 / Shift-JIS / GBK / UTF-16)
   profile.rs       自定义格式 Profile(line_regex / json_keys / json_paths 规则)
-  knowledge.rs     已学提取规则:模型、TOML 存储、对单元的纯函数过滤
-  learn.rs         证据挖掘、提案、审核批准、可选 LLM 复核
+  knowledge.rs     经验条目:可扩展模型、TOML 存储、分层合并、对单元的纯函数过滤
+  learn.rs         证据挖掘、writeback 后自动总结、审核批准
+  glossary.rs      候选挖掘、LLM 命名、按批注入、译后回检
+  defaults/        随二进制内嵌的各格式内置经验(include_str!)
   pipeline.rs      流程编排 + analyze(不含格式知识;适配器不碰网络)
   adapter/
     mod.rs         FormatAdapter trait + 注册表 + 共享工具
@@ -334,7 +414,6 @@ pub trait FormatAdapter: Send + Sync {
 ### Roadmap(欢迎认领)
 
 - Translator++(.trans)适配器
-- 跨批次术语表 / 译名固定
 - PDF(经外部工具,同 AiNiee 借助 BabelDOC 的方式)
 - 可选输出编码(供只认 Shift-JIS 的老引擎)
 - CLI 之上的 MCP server 封装(供非 CLI 客户端)

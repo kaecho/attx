@@ -138,7 +138,7 @@ attx translate --workspace <工作区> [--limit N] [--dry-run] [--retry-passthro
 ## writeback
 
 ```bash
-attx writeback --workspace <工作区> [--dry-run]
+attx writeback --workspace <工作区> [--dry-run] [--no-learn]
 ```
 
 - 输出目标由适配器决定：
@@ -146,15 +146,20 @@ attx writeback --workspace <工作区> [--dry-run]
   - 文档/字幕/JSON 类：写**翻译副本** `<名>.<目标语言>.<扩展名>`（原文件不动）
   - `jsonl`：`translated.jsonl`
 - stdout：`files`、`units_applied`、`dry_run`、`paths[]`（绝对路径）
+- 非 dry-run 且 `[learn].auto_summarize` 为真时，额外返回 `learned`（见 learn 一节）；
+  `--no-learn` 关闭本轮沉淀。经验总结失败只打 stderr，**不会**让 writeback 失败。
 
 ## run
 
 ```bash
 attx run --input <文件或目录> --src ja --dst zh \
-  [--workspace] [--engine] [--limit] [--no-translate] [--no-writeback]
+  [--workspace] [--engine] [--limit] [--no-translate] [--no-writeback] \
+  [--glossary | --no-glossary]
 ```
 
-顺序：init → extract → [translate] → [writeback]。  
+顺序：init → extract → [glossary build] → [translate] → [writeback]。  
+术语表仅在 `[glossary].enabled = true` 或显式 `--glossary` 时构建；`--no-glossary`
+可在配置已开启时单次跳过。构建失败只记入 `glossary.error`，不中断整轮。  
 **rmmz 含写回时等同需要用户写回许可；文档类无需。**
 
 ## translate-jsonl
@@ -174,6 +179,57 @@ attx import-jsonl --workspace <工作区> --input in.jsonl
 ```
 
 import 按 `id` == unit.`location` 匹配；需要非空 `translation_lines` 或 `translation`。
+
+## glossary（术语表，默认关闭）
+
+```bash
+attx glossary build  --workspace <工作区> [--min-occurrences N] [--dry-run]
+attx glossary list   --workspace <工作区> [--all]
+attx glossary add    --workspace <工作区> --src <原文> --dst <译名> [--info <消歧描述>]
+attx glossary remove --workspace <工作区> --src <原文>
+attx glossary import --workspace <工作区> --file <g.json>
+attx glossary export --workspace <工作区> --file <g.json>
+attx glossary check  --workspace <工作区>
+```
+
+`build` 输出字段：
+
+| 字段 | 含义 |
+|------|------|
+| `candidates` | 正则挖出的候选总数 |
+| `above_threshold` | 出现次数 ≥ `min_occurrences` 的数量 |
+| `truncated` | 被 `max_terms` 砍掉的数量（>0 时说明覆盖不全，需向用户报告） |
+| `asked` | 实际送给模型命名的数量 |
+| `added` / `rejected` | 模型认定为术语 / 否决的数量 |
+| `total_active` | 当前生效术语总数 |
+| `sample` | 前 10 个候选及其出现次数 |
+
+**必须先 `--dry-run`**：它不调用模型，用 `asked` 与 `sample` 向用户报告规模与预计费用，
+取得同意后再真建。`build` 显式调用时不受 `[glossary].enabled` 限制。
+
+`check` 输出 `violations[]`（`src`/`dst`/`occurrences`/`applied`），按未生效次数降序。
+子串比对，屈折语可能误报，是审阅辅助不是硬门禁。
+
+`import` 接受两种 JSON：`[{"src","dst","info"}]` 或 `{"src": "dst"}`。
+
+## learn（经验层）
+
+```bash
+attx learn summarize --workspace <工作区> [--llm]   # scan 是其别名
+attx learn pending
+attx learn review --approve 1,3 | --reject 2 | --approve-all
+attx learn list [--format <id>]
+attx learn defaults --format <id>       # 打印内置基线 TOML
+attx learn forget --field <字段名> [--format <id>]
+attx extract --no-knowledge             # 逃生舱
+attx writeback --no-learn               # 本轮不沉淀经验
+```
+
+`writeback` 成功后**自动**执行 summarize（零 API 成本），结果在
+`writeback.learned`：`entries_written` / `pending` / `notes` / `file`。
+
+`pending > 0` 表示存在会**删除文本**的 `skip` 条目待批准。
+**agent 不得自行 `--approve-all`**——报告条数与证据，交用户裁决。
 
 ## setting.toml（LLM）
 
@@ -196,6 +252,16 @@ retry_count = 3
 retry_delay = 2
 batch_chars = 2500
 max_context_items = 6
+
+[glossary]
+enabled = false        # 默认关闭：构建术语表有额外 LLM 费用
+min_occurrences = 10   # 出现次数低于此值不进术语表
+max_terms = 200        # 送模型命名的候选上限
+inject_limit = 30      # 单批注入提示词的术语上限
+
+[learn]
+auto_summarize = true  # writeback 后沉淀经验（免费）
+llm_review = false     # 额外让模型复核提案（有费用）
 ```
 
 Agent 可读 `setting.example.toml`；**禁止**在对话中回显 `api_key`。

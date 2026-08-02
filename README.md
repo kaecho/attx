@@ -224,11 +224,12 @@ attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --d
 | `init --input <path> --src --dst [--profile]` | Create workspace + SQLite |
 | `extract --workspace` | Adapter → text units |
 | `translate --workspace [--limit] [--dry-run] [--retry-passthrough]` | LLM over pending units, incremental saves |
-| `writeback --workspace [--dry-run]` | Render translated output |
-| `run --input …` | init + extract + translate + writeback |
+| `writeback --workspace [--dry-run] [--no-learn]` | Render translated output; capture experience unless opted out |
+| `run --input …` | init + extract + (glossary) + translate + writeback |
 | `status --workspace` | Counts incl. passthrough + per-domain breakdown |
 | `translate-jsonl` / `export-jsonl` / `import-jsonl` | Interchange (`--filter` incl. `passthrough`) |
-| `learn scan/pending/review/list/forget` | Self-improvement: learn extraction rules from evidence |
+| `learn summarize/pending/review/list/defaults/forget` | Self-improvement: accumulate extraction experience |
+| `glossary build/list/add/remove/import/export/check` | Consistent proper-noun names across a whole work |
 
 Global: `--config /path/to/setting.toml` (default `./setting.toml` or `$ATTX_HOME/setting.toml`); `--client <name>` picks a non-default LLM client.
 
@@ -236,7 +237,7 @@ When the model refuses or keeps failing on a unit, attx stores the original text
 flagged *passthrough* placeholder so the run can finish; `status` reports the count and
 `translate --retry-passthrough` re-queues exactly those units.
 
-### Self-improving extraction
+### Self-improving experience layer
 
 Adapters decide what to extract with hardcoded heuristics, and those tables are
 sometimes wrong — a field like `AchieveName` looks like text but actually holds an
@@ -244,33 +245,115 @@ identifier that event scripts reference verbatim. Translate it and the achieveme
 never unlocks. Until now each such fix stayed in the source, so the next game
 re-discovered it.
 
-`attx learn` turns that judgement into data you accumulate across projects:
+attx keeps that judgement as data, and captures it **automatically**: every
+successful `writeback` summarises the run into experience entries at zero API cost,
+because the evidence is already sitting in the workspace DB.
 
 ```bash
-attx learn scan --workspace .attx        # mine evidence, record proposals
-attx learn scan --workspace .attx --llm  # also ask the model to sanity-check them
-attx learn pending                       # proposals with evidence + sample values
-attx learn review --approve 1,3          # approve; only now do rules take effect
-attx learn list                          # active rules
+attx writeback --workspace .attx         # …and learn from the run, automatically
+attx writeback --workspace .attx --no-learn   # opt out for one run
+attx learn summarize --workspace .attx   # or trigger it by hand
+attx learn summarize --workspace .attx --llm  # also ask the model (costs money)
+attx learn pending                       # entries awaiting approval, with evidence
+attx learn review --approve 1,3          # approve; only now do they delete anything
+attx learn list                          # what is active
+attx learn defaults --format rmmz        # the built-in baseline, as TOML
 attx learn forget --field achievename    # drop one
-attx extract --no-knowledge              # escape hatch: ignore all learned rules
+attx extract --no-knowledge              # escape hatch: ignore all of it
 ```
 
-Evidence is free and objective — it comes from what already happened in the
-workspace: values that are machine literals despite being extracted, translations
-identical to their source, and passthrough clusters. Statistics are aggregated per
-*field name*, never per unit: one passthrough is noise, six of six under the same
-field name is a signal.
+**The file format is open-ended on purpose.** Entries carry a `kind`, and kinds attx
+does not understand round-trip verbatim — so an agent can invent
+`kind = "voice-hint"` and attx will hand it back unchanged rather than silently
+dropping it. Two kinds are acted on today:
 
-Rules are stored per format as readable TOML in `$ATTX_HOME/knowledge/` (or
-`~/.config/attx/knowledge/`), so you can read, edit, git-track or delete them.
+```toml
+[[entry]]
+kind = "field"          # a field-name extraction judgement
+field = "key"
+verdict = "skip"        # skip | extract
+scope = "nested"        # nested | top | any
+domain = "plugins"      # restrict to one unit domain; empty = any
+status = "pending"      # approved | pending
 
-Two safeguards worth knowing:
+[[entry]]
+kind = "note"           # free-form experience; topic="prompt" reaches the model
+topic = "prompt"
+text = "This format loses control codes; keep every [CTRL_n] verbatim."
+```
 
-- **Nothing takes effect without approval.** `scan` only ever writes proposals.
+Four layers merge, later winning: built-in defaults (embedded, see
+`learn defaults`) → `$ATTX_HOME/knowledge/<format>.toml` → `<workspace>/experience.toml`.
+Within a layer, an exact field name beats a `*suffix` one and `skip` beats `extract`.
+
+Three safeguards worth knowing:
+
+- **Additions apply themselves; deletions wait for you.** Notes and `extract`
+  entries take effect immediately — the worst case is a longer prompt. `skip` is the
+  only verdict that removes text, so it is written `pending` and does nothing until
+  `learn review --approve`. A missed translation is visible in `status`; a silently
+  dropped line is not.
 - **Learning may override a name heuristic, never the evidence of a value.** An
-  `extract` rule is refused when the value is a number, path or script, so a bad
-  rule cannot send switch ids or filenames to the model.
+  `extract` entry is refused when the value is a number, path or script, so a bad
+  entry cannot send switch ids or filenames to the model.
+- **Entries are domain-scoped.** An rmmz plugin-parameter rule cannot fire on
+  `Map*.json` dialogue, where the same field name means something else.
+
+### Glossary
+
+A model translating a long work in batches has no way to be consistent with itself:
+`アレイ` becomes 艾蕾 in chapter one and 埃雷 in chapter nine, and the reader cannot
+tell they are the same person. A glossary fixes one agreed translation per proper
+noun for the whole work.
+
+**Off by default** — building one spends extra LLM calls.
+
+```bash
+attx glossary build --workspace .attx --dry-run   # see the candidates, spend nothing
+attx glossary build --workspace .attx             # mine → threshold → have the model name them
+attx glossary list --workspace .attx
+attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info "female given name"
+attx glossary import --workspace .attx --file terms.json
+attx glossary check --workspace .attx             # terms the translation ignored
+```
+
+The pipeline is statistics-first, and that is what keeps it cheap:
+
+```
+mine (regex, free) → min_occurrences → max_terms → name (LLM) → inject per batch → check
+```
+
+Mining and thresholding cost nothing, so the model is only ever asked about terms
+frequent enough to matter — **LLM spend tracks the number of terms, not the size of
+the work**. Lowering `min_occurrences` collects more terms and costs more; that is
+the whole lever.
+
+Statistics cannot tell a proper noun from a common word, so the model gets a `keep`
+flag to veto its own candidates, and vetoes are remembered — a re-build does not pay
+to ask about the same non-term twice. Terms are injected per batch, only the ones a
+batch actually contains, so a 200-entry glossary never crowds out the text.
+
+Each entry carries a disambiguating `info` ("female given name", "place"). That is
+not decoration: without it the model cannot tell `アレイさん` should be 艾蕾小姐 and
+not 埃雷先生.
+
+Enable it in `setting.toml`:
+
+```toml
+[glossary]
+enabled = false        # build during `attx run`
+min_occurrences = 10   # a term must appear this often to earn a slot
+max_terms = 200        # cap on candidates sent to the model
+inject_limit = 30      # cap on terms injected into one batch
+
+[learn]
+auto_summarize = true  # capture experience after writeback (free)
+llm_review = false     # also ask the model to check proposals (costs money)
+```
+
+An explicit `attx glossary build` ignores `enabled` — asking for it is consent. And
+once a `glossary.toml` exists, `translate` always injects from it: injection is
+nearly free, so *not* using a glossary you already built would be the surprise.
 
 ---
 
@@ -290,8 +373,10 @@ src/
   quality.rs       line-count / control-code sanity checks
   textio.rs        encoding auto-detection (UTF-8 / Shift-JIS / GBK / UTF-16)
   profile.rs       custom format profiles (line_regex / json_keys / json_paths rules)
-  knowledge.rs     learned extraction rules: model, TOML store, pure filter over units
-  learn.rs         evidence mining, proposals, review/approval, optional LLM check
+  knowledge.rs     experience entries: extensible model, TOML store, layered merge, pure filter
+  learn.rs         evidence mining, automatic post-writeback summary, review/approval
+  glossary.rs      candidate mining, LLM naming, per-batch injection, compliance check
+  defaults/        built-in per-format experience, embedded via include_str!
   pipeline.rs      orchestration + analyze (no format knowledge, no HTTP in adapters)
   adapter/
     mod.rs         FormatAdapter trait + registry + shared helpers
@@ -341,7 +426,6 @@ pub trait FormatAdapter: Send + Sync {
 ### Roadmap (grab one)
 
 - Translator++ (.trans) adapter
-- Glossary / terminology pinning across batches
 - PDF via external tooling (as AiNiee does with BabelDOC)
 - Optional output encoding for engines that require Shift-JIS
 - MCP server wrapper over the CLI (for non-CLI agent clients)

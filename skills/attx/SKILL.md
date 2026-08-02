@@ -98,6 +98,14 @@ Agent 启动时必须先解析出本机真实入口，并在任务单写死。
 3. **模型名**：用户指定（如 `gpt-4.1-mini`、`deepseek-chat` 或中转站模型名）。
 4. **语向**：源语言 `ja|en`，目标语言（默认 `zh`；支持 `zh-tw`/`en`/`ko` 等）。
 5. **并发与预算**（可选，给默认值让用户确认）：`worker_count=4`、`batch_chars=2500`。
+6. **术语表**（默认关闭，必须主动问）：
+   > 是否开启自动术语表？开启后 attx 会在翻译前额外调用模型，为高频专有名词
+   > （人名/地名/组织名）统一译名，**显著提升长篇作品的一致性**，代价是增加约
+   > 5–10 次额外请求的费用。若开启，最低出现次数默认 10——调低能收录更多术语，
+   > 费用与噪音同时上升。
+
+   用户同意 → `[glossary] enabled = true`；不确定 → 保持 `false`，并告知随时可用
+   `attx glossary build` 单独构建（该命令不受开关限制）。
 
 然后生成 `<attx目录>/setting.toml`（模板见 `references/cli-command-contract.md`），执行：
 
@@ -119,10 +127,17 @@ attx doctor --ping
 | 2 初始化 | 建工作区 | `init --input ... --src ja\|en --dst zh [--workspace]` | 返回 `workspace` |
 | 3 提取 | 入库文本单元 | `extract --workspace <工作区>` | `extracted > 0` |
 | 4 状态 | 进度事实 | `status --workspace` | 记录 total / translated / pending |
+| 4.5 术语表 | 统一专有名词（仅在用户开启时） | `glossary build --workspace`（先 `--dry-run` 报候选数与费用） | `total_active > 0` |
 | 5 试译 | 小批量验模型 | `translate --limit 20` | 有成功条目；无规则性全败 |
 | 6 全量译 | 清 pending | `translate` 多轮 | pending 下降；可 `export-jsonl` 审校 |
 | 7 写回 | 产出译文文件 | `writeback`（rmmz 先 `--dry-run` 并取得许可） | files>0；文档类产出 `<名>.<语言>.<扩展名>` |
+| 7.5 回检 | 术语是否生效（建了术语表才做） | `glossary check --workspace` | violations 为空或已向用户报告 |
 | 8 反馈 | 补漏 | export/import/translate/writeback | 问题可定位并再写回 |
+
+`writeback` 成功后 attx 会**自动**把本轮经验写入知识库（零 API 成本）。若输出里
+`writeback.learned.pending > 0`，说明有会**删除文本**的规则待批准——向用户报告条数，
+让其用 `attx learn pending` / `attx learn review --approve <n>` 裁决，**agent 不得自行
+`--approve-all`**。
 
 一条龙（用户同意整包自动时）：
 
@@ -167,6 +182,8 @@ attx init --input <输入> --profile ./fmt.toml --src ja --dst zh     # 后续�
 | 试译连续失败（格式/质量） | 停止全量，先排障（`references/failure-recovery.md`） |
 | rmmz / `overwrite=true` Profile 未获写回许可 | **禁止** `writeback`（dry-run 除外） |
 | `status.passthrough > 0` 收尾时 | 报告条数；经用户同意后 `translate --retry-passthrough` |
+| `writeback.learned.pending > 0` | 报告条数并交用户裁决；**禁止** agent 自行 `learn review --approve-all` |
+| 术语表 `build` 前 pending 很大 | 先 `--dry-run` 报候选数与预计费用，取得同意再真建 |
 | 用户要求改 attx 源码 | 暂停翻译流程，单独走源码任务 |
 | 用户要求重置/删库 | 需明确确认后再删 `<工作区>` |
 
