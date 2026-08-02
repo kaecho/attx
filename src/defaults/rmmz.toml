@@ -1,0 +1,136 @@
+# attx built-in experience for RPG Maker MV/MZ plugin parameters.
+#
+# Exported from the key tables in `src/adapter/rmmz_plugins.rs` so the baseline
+# is visible and overridable instead of buried in source. Embedded in the binary
+# via `include_str!`; read it with `attx learn defaults --format rmmz`.
+#
+# To override one of these, write an entry with the same `field` into
+# `$ATTX_HOME/knowledge/rmmz.toml` (global) or `<workspace>/experience.toml`
+# (this project only). Later layers win.
+#
+# Two notes on what these actually do at runtime:
+#   * `verdict = "extract"` entries are inert — `knowledge::apply()` can only
+#     remove units, never invent them. They document the baseline and give you
+#     something concrete to flip to "skip".
+#   * `verdict = "skip"` entries duplicate a decision the adapter already made
+#     internally, so shipping them changes no behaviour. They exist so you can
+#     see the list and override it.
+#
+# Every entry is scoped to `domain = "plugins"`: the same field names mean
+# different things in Map*.json, and an unscoped rule would silently drop
+# dialogue.
+
+format = "rmmz"
+version = 2
+
+# ---- identity handles and machine data: never translate ----
+entry = [
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "id", reason = "record id" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "key", reason = "identity handle referenced verbatim by plugin commands and event scripts" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "keyname", reason = "identity handle" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "identifier", reason = "identity handle" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "ident", reason = "identity handle" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "uniquekey", reason = "identity handle" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "slug", reason = "identity handle" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "tag", reason = "identity handle" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "symbol", reason = "identity handle" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "switch", reason = "engine reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "switchid", reason = "engine reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "variable", reason = "engine reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "variableid", reason = "engine reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "commonevent", reason = "engine reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "script", reason = "executable code" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "formula", reason = "executable code" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "file", reason = "asset path" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "filename", reason = "asset path" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "picture", reason = "asset path" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "image", reason = "asset path" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "icon", reason = "asset index" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "color", reason = "style value" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "actor", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "enemy", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "state", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "skill", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "item", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "weapon", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "armor", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "class", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "troop", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "map", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "event", reason = "database reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "bgm", reason = "audio reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "bgs", reason = "audio reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "me", reason = "audio reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "se", reason = "audio reference" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "type", reason = "enum value" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "status", reason = "enum value" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "code", reason = "enum value" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "x", reason = "layout number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "y", reason = "layout number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "width", reason = "layout number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "height", reason = "layout number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "opacity", reason = "layout number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "volume", reason = "audio number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "pitch", reason = "audio number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "pan", reason = "audio number" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "scenename", reason = "JS scene class name" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "classname", reason = "JS class name" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "tagname", reason = "note-tag name matched verbatim" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "validactors", reason = "database reference list" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "invalidactors", reason = "database reference list" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "validenemies", reason = "database reference list" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "invalidenemies", reason = "database reference list" },
+  { kind = "field", verdict = "skip", scope = "any", domain = "plugins", source = "builtin", field = "note", reason = "note field holds tags parsed by plugins" },
+
+  # ---- player-visible text ----
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "name" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "text" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "label" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "title" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "description" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "message" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "help" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "helptext" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "commandname" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "commandtext" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "displayname" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "windowtitle" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "buttontext" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "caption" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "header" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "footer" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "originalname" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "anydefaultname" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "menuname" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "menulabel" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "glossary" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "term" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "terms" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "content" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "body" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "subtitle" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "hint" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "tooltip" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "prefix" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "suffix" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "format" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "template" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "leftblocklabel" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "rightblocklabel" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "emptytext" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "nonetext" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "unknowntext" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "defaultname" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "pagename" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "category" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "categoryname" },
+
+  # ---- suffix families (exact entries above override these) ----
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*name" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*text" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*label" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*title" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*message" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*help" },
+  { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*description" },
+]

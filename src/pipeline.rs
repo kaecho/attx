@@ -1,6 +1,8 @@
 use crate::adapter::{self, FormatAdapter};
 use crate::config::{self, Settings};
+use crate::glossary;
 use crate::knowledge;
+use crate::learn;
 use crate::llm::{Profile, Translator, profile_for_format};
 use crate::model::{TextUnit, Translation, WorkspaceMeta, needs_translation};
 use crate::profile::{self, CustomAdapter};
@@ -30,6 +32,9 @@ pub struct WritebackReport {
     pub units_applied: usize,
     pub dry_run: bool,
     pub paths: Vec<String>,
+    /// What the automatic post-writeback summary learned, when it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learned: Option<learn::SummaryReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -254,29 +259,33 @@ pub struct ExtractReport {
     pub status: &'static str,
 }
 
-pub fn extract(workspace: &Path, _settings: &Settings, use_knowledge: bool) -> Result<ExtractReport> {
+pub fn extract(
+    workspace: &Path,
+    _settings: &Settings,
+    use_knowledge: bool,
+) -> Result<ExtractReport> {
     let store = store::workspace_db(workspace)?;
     let meta = store.meta()?;
     let adapter = resolve_adapter(&meta.engine, workspace)?;
     let content_root = PathBuf::from(&meta.content_root);
     let units = adapter.extract(&content_root, &meta.source_lang)?;
 
-    // Learned rules are a pure filter *outside* the adapter: every format gets
-    // them for free, and --no-knowledge restores the pre-learning behaviour
-    // exactly, so a bad rule can always be bisected away.
+    // Learned experience is a pure filter *outside* the adapter: every format
+    // gets it for free, and --no-knowledge restores the pre-learning behaviour
+    // exactly, so a bad entry can always be bisected away.
     let (units, applied, skipped) = if use_knowledge {
-        let rules = knowledge::load_rules(&meta.engine);
-        let n = rules.rules.len();
-        let (units, report) = knowledge::apply(units, &rules);
+        let exp = knowledge::load_experience(&meta.engine, Some(workspace));
+        let n = exp.field_entries();
+        let (units, report) = knowledge::apply(units, &exp);
         if report.skipped > 0 {
             eprintln!(
-                "knowledge: {} unit(s) skipped by {} learned rule(s) for {}",
-                report.skipped, n, meta.engine
+                "knowledge: {} unit(s) skipped by {} field entr(ies) for {}",
+                report.skipped, n, exp.format
             );
         }
         if report.extract_vetoed > 0 {
             eprintln!(
-                "knowledge: {} extract rule hit(s) vetoed (value is machine data)",
+                "knowledge: {} extract entr(ies) vetoed (value is machine data)",
                 report.extract_vetoed
             );
         }
@@ -324,13 +333,27 @@ pub fn translate(
         });
     }
     let client = config::require_llm(settings)?;
+    // Two kinds of accumulated knowledge reach the model here: `prompt` notes
+    // (format-wide, learned from past runs) go into the system prompt once, and
+    // glossary terms (work-specific) are injected per batch.
+    let exp = knowledge::load_experience(&meta.engine, Some(workspace));
+    let notes = exp.prompt_notes();
+    let terms = glossary::load(workspace).active();
+    if !notes.is_empty() {
+        eprintln!("translate: applying {} learned prompt note(s)", notes.len());
+    }
+    if !terms.is_empty() {
+        eprintln!("translate: glossary active with {} term(s)", terms.len());
+    }
     let translator = Translator::new(
         client,
         &settings.translation,
         &meta.source_lang,
         &meta.target_lang,
         profile_for_format(&meta.engine),
-    )?;
+    )?
+    .with_notes(&notes)
+    .with_glossary(terms, settings.glossary.inject_limit);
     // Incremental save: each batch hits SQLite immediately so crashes keep progress.
     let results = translator.translate_units_with_sink(&pending, limit, &mut |batch| {
         for tr in batch {
@@ -355,7 +378,12 @@ pub fn translate(
     })
 }
 
-pub fn writeback(workspace: &Path, _settings: &Settings, dry_run: bool) -> Result<WritebackReport> {
+pub fn writeback(
+    workspace: &Path,
+    settings: &Settings,
+    dry_run: bool,
+    learn_after: bool,
+) -> Result<WritebackReport> {
     let store = store::workspace_db(workspace)?;
     let meta = store.meta()?;
     let adapter = resolve_adapter(&meta.engine, workspace)?;
@@ -378,6 +406,7 @@ pub fn writeback(workspace: &Path, _settings: &Settings, dry_run: bool) -> Resul
             units_applied: applied,
             dry_run: true,
             paths,
+            learned: None,
         });
     }
     for out in &outputs {
@@ -393,11 +422,37 @@ pub fn writeback(workspace: &Path, _settings: &Settings, dry_run: bool) -> Resul
         std::fs::write(&out.path, &out.bytes)
             .with_context(|| format!("write {}", out.path.display()))?;
     }
+
+    // The run is over and every signal it produced is sitting in the DB. This
+    // is the one moment where capturing experience is both free and complete,
+    // so it happens here rather than waiting for someone to remember a command.
+    // A failure to learn must never look like a failure to write back.
+    let learned = if learn_after && settings.learn.auto_summarize {
+        match learn::summarize(workspace, settings.learn.llm_review, settings) {
+            Ok(r) => {
+                if r.pending > 0 {
+                    eprintln!(
+                        "learn: {} entr(ies) await approval — `attx learn pending`",
+                        r.pending
+                    );
+                }
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("learn: summary skipped ({e:#})");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(WritebackReport {
         files: paths.len(),
         units_applied: applied,
         dry_run: false,
         paths,
+        learned,
     })
 }
 

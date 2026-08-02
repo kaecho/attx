@@ -1,101 +1,44 @@
-//! Evidence gathering for the extraction knowledge layer.
+//! Evidence gathering for the experience layer.
 //!
-//! Turns what already happened in a workspace into *proposals*: candidate
-//! rules with the evidence that produced them. Nothing here changes extraction
-//! — proposals must be approved (`attx learn review`) before they become rules.
+//! Turns what already happened in a workspace into *entries*: field-level
+//! judgements plus free-form notes, each carrying the evidence that produced
+//! it. This runs automatically after a successful writeback, so experience
+//! accumulates without anyone remembering to ask for it.
 //!
-//! Two evidence sources, per the design:
-//! * objective signals, free, straight out of the workspace DB (see `scan`)
-//! * optional LLM review that turns weak statistics into a reasoned proposal
+//! Two evidence sources:
+//! * objective signals, free, straight out of the workspace DB (see `summarize`)
+//! * optional LLM review that turns weak statistics into a reasoned entry
 //!
 //! Statistics are aggregated **per field name**, never per unit. One passthrough
 //! is noise; eight of eight passthroughs under the same field name is a signal
 //! that the field is not text at all.
+//!
+//! The approval asymmetry lives here: an entry that would *delete* text is
+//! written `pending` and does nothing until a human approves it, while notes
+//! and additive entries take effect on their own. A missed translation is
+//! visible in `attx status`; a silently dropped line is not.
 
 use crate::config::{LlmClient, Settings};
-use crate::knowledge::{self, Rule, RuleSet, Scope, Verdict};
-use crate::model::{TextUnit, Translation};
+use crate::knowledge::{self, Entry, FieldEntry, NoteEntry, Scope, Status, Verdict};
+use crate::model::{TextUnit, Translation, mask_controls};
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// Minimum units under a field name before it may be proposed. Below this the
 /// sample is too small to distinguish a pattern from a coincidence.
 const MIN_SAMPLE: usize = 4;
 /// Fraction of a field's units that must show the signal.
 const MIN_RATIO: f64 = 0.75;
-/// Samples embedded in a proposal so a human can judge it.
+/// Samples embedded in an entry's evidence so a human can judge it.
 const MAX_SAMPLES: usize = 3;
+/// Fraction of control-code-bearing units that must lose codes before it is
+/// worth telling the model about.
+const CTRL_LOSS_RATIO: f64 = 0.2;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Proposal {
-    pub format: String,
-    pub field: String,
-    pub verdict: Verdict,
-    #[serde(default)]
-    pub scope: Scope,
-    pub confidence: f32,
-    pub reason: String,
-    pub evidence: Vec<String>,
-    /// Example values, so approval is an informed decision rather than a
-    /// confidence number taken on faith.
-    pub samples: Vec<String>,
-}
-
-impl Proposal {
-    fn into_rule(self, approved_at: String) -> Rule {
-        Rule {
-            field: self.field,
-            verdict: self.verdict,
-            scope: self.scope,
-            confidence: self.confidence,
-            reason: self.reason,
-            evidence: self.evidence,
-            approved_at,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProposalFile {
-    #[serde(default, rename = "proposal")]
-    pub proposals: Vec<Proposal>,
-}
-
-fn proposals_path() -> Result<PathBuf> {
-    Ok(knowledge::knowledge_dir()?.join("proposals.toml"))
-}
-
-pub fn load_proposals() -> ProposalFile {
-    let Ok(p) = proposals_path() else {
-        return ProposalFile::default();
-    };
-    let Ok(raw) = std::fs::read_to_string(&p) else {
-        return ProposalFile::default();
-    };
-    match toml::from_str(&raw) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("learn: ignoring {}: {e}", p.display());
-            ProposalFile::default()
-        }
-    }
-}
-
-pub fn save_proposals(f: &ProposalFile) -> Result<PathBuf> {
-    let p = proposals_path()?;
-    let body = toml::to_string_pretty(f).context("serialize proposals")?;
-    std::fs::write(
-        &p,
-        format!(
-            "# attx learning proposals — NOT active until approved.\n\
-             # Review with `attx learn review`.\n{body}"
-        ),
-    )
-    .with_context(|| format!("write {}", p.display()))?;
-    Ok(p)
-}
+/// Provenance marker for everything this module writes.
+pub const SOURCE_AUTO: &str = "learn:auto";
 
 /// Per-field tallies collected from one workspace.
 #[derive(Debug, Default, Clone)]
@@ -109,6 +52,7 @@ struct FieldStats {
     /// Model refused / failed and the original was kept.
     passthrough: usize,
     samples: Vec<String>,
+    domains: BTreeSet<String>,
 }
 
 impl FieldStats {
@@ -119,10 +63,49 @@ impl FieldStats {
     }
 }
 
-/// Collect per-field evidence from a workspace.
-fn collect(units: &[TextUnit], translations: &BTreeMap<String, Translation>) -> BTreeMap<String, FieldStats> {
+/// Run-level tallies that become notes rather than field judgements.
+#[derive(Debug, Default, Clone)]
+struct RunStats {
+    units: usize,
+    translated: usize,
+    passthrough: usize,
+    /// Units whose source carried control codes and had a translation.
+    ctrl_units: usize,
+    /// …of those, how many lost at least one code.
+    ctrl_lost: usize,
+}
+
+fn count_controls(lines: &[String]) -> usize {
+    lines.iter().map(|l| mask_controls(l).1.len()).sum()
+}
+
+/// Collect per-field and run-level evidence from a workspace.
+fn collect(
+    units: &[TextUnit],
+    translations: &BTreeMap<String, Translation>,
+) -> (BTreeMap<String, FieldStats>, RunStats) {
     let mut stats: BTreeMap<String, FieldStats> = BTreeMap::new();
+    let mut run = RunStats {
+        units: units.len(),
+        ..Default::default()
+    };
     for u in units {
+        let tr = translations.get(&u.id);
+        if let Some(t) = tr {
+            if t.passthrough {
+                run.passthrough += 1;
+            } else {
+                run.translated += 1;
+                let before = count_controls(&u.original_lines);
+                if before > 0 {
+                    run.ctrl_units += 1;
+                    if count_controls(&t.translation_lines) < before {
+                        run.ctrl_lost += 1;
+                    }
+                }
+            }
+        }
+
         let Some(field) = knowledge::field_of(u) else {
             continue;
         };
@@ -131,31 +114,68 @@ fn collect(units: &[TextUnit], translations: &BTreeMap<String, Translation>) -> 
         if u.location.contains('#') {
             e.nested += 1;
         }
-        let joined = u.original_lines.join("\n");
-        e.note_sample(&joined);
+        e.domains.insert(u.domain.clone());
+        e.note_sample(&u.original_lines.join("\n"));
         if u.original_lines
             .iter()
             .all(|l| knowledge::is_machine_literal(l))
         {
             e.machine += 1;
         }
-        if let Some(tr) = translations.get(&u.id) {
-            if tr.passthrough {
+        if let Some(t) = tr {
+            if t.passthrough {
                 e.passthrough += 1;
-            } else if tr.translation_lines == u.original_lines {
+            } else if t.translation_lines == u.original_lines {
                 e.identical += 1;
             }
         }
     }
-    stats
+    (stats, run)
 }
 
-/// Build proposals from evidence, skipping fields an approved rule already covers.
-fn propose(format: &str, stats: &BTreeMap<String, FieldStats>, existing: &RuleSet) -> Vec<Proposal> {
-    let covered: Vec<&str> = existing.rules.iter().map(|r| r.field.as_str()).collect();
+/// A field judgement plus the sample values that justify it. Kept as a struct
+/// (rather than going straight to `Entry`) so `review_with_llm` has somewhere
+/// to hang samples that never reach disk.
+#[derive(Debug, Clone)]
+struct Candidate {
+    field: String,
+    verdict: Verdict,
+    scope: Scope,
+    domain: String,
+    confidence: f32,
+    reason: String,
+    evidence: Vec<String>,
+    samples: Vec<String>,
+}
+
+impl Candidate {
+    fn into_entry(self, now: &str) -> Entry {
+        let mut fe = FieldEntry::new(&self.field, self.verdict, self.scope);
+        // The asymmetry: deletions wait for a human, additions do not.
+        fe.status = match self.verdict {
+            Verdict::Skip => Status::Pending,
+            Verdict::Extract => Status::Approved,
+        };
+        fe.domain = self.domain;
+        fe.confidence = self.confidence;
+        fe.reason = self.reason;
+        fe.evidence = self
+            .evidence
+            .into_iter()
+            .chain(self.samples.into_iter().map(|s| format!("sample: {s}")))
+            .collect();
+        fe.source = SOURCE_AUTO.into();
+        fe.updated_at = now.to_string();
+        Entry::Field(fe)
+    }
+}
+
+/// Build candidates from evidence, skipping fields the merged experience
+/// already decides.
+fn propose(stats: &BTreeMap<String, FieldStats>, covered: &BTreeSet<String>) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (field, s) in stats {
-        if s.total < MIN_SAMPLE || covered.contains(&field.as_str()) {
+        if s.total < MIN_SAMPLE || covered.contains(field) {
             continue;
         }
         // Signals that the field is not player-visible text at all.
@@ -189,11 +209,18 @@ fn propose(format: &str, stats: &BTreeMap<String, FieldStats>, existing: &RuleSe
         } else {
             Scope::Any
         };
-        out.push(Proposal {
-            format: format.to_string(),
+        // Same caution for the domain guard: only claim one when every unit
+        // agreed, otherwise the entry would miss half its evidence.
+        let domain = if s.domains.len() == 1 {
+            s.domains.iter().next().cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        out.push(Candidate {
             field: field.clone(),
             verdict: Verdict::Skip,
             scope,
+            domain,
             confidence: ratio as f32,
             reason: reason.to_string(),
             evidence: vec![detail],
@@ -203,67 +230,139 @@ fn propose(format: &str, stats: &BTreeMap<String, FieldStats>, existing: &RuleSe
     out
 }
 
+/// Run-level notes. Only signals that are objective *and* actionable next time
+/// become notes — a per-run statistic nobody can act on is noise in a file
+/// meant to be read.
+fn notes_for(engine: &str, run: &RunStats, now: &str) -> Vec<Entry> {
+    let mut out = Vec::new();
+
+    let mut summary = NoteEntry::new(
+        "run",
+        &format!(
+            "{engine}: 上次运行 units={}, translated={}, passthrough={}",
+            run.units, run.translated, run.passthrough
+        ),
+    );
+    summary.source = SOURCE_AUTO.into();
+    summary.updated_at = now.to_string();
+    out.push(Entry::Note(summary));
+
+    // Control-code loss is the one prompt-worthy signal available for free:
+    // the codes are countable before and after, and losing them breaks colour,
+    // name substitution and message flow in-game.
+    if run.ctrl_units > 0 {
+        let ratio = run.ctrl_lost as f64 / run.ctrl_units as f64;
+        if ratio >= CTRL_LOSS_RATIO {
+            let mut n = NoteEntry::new(
+                "prompt",
+                &format!(
+                    "该格式的译文容易丢失控制码（上次 {}/{} 条含控制码的文本丢了至少一个）。\
+                     务必原样保留 [CTRL_n] 标记，数量与原文一致。",
+                    run.ctrl_lost, run.ctrl_units
+                ),
+            );
+            n.source = SOURCE_AUTO.into();
+            n.updated_at = now.to_string();
+            out.push(Entry::Note(n));
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Serialize)]
-pub struct ScanReport {
+pub struct SummaryReport {
     pub format: String,
     pub units_scanned: usize,
     pub fields_seen: usize,
-    pub new_proposals: usize,
-    pub total_pending: usize,
+    /// Entries added or refreshed in the global experience file.
+    pub entries_written: usize,
+    /// Of those, how many need `attx learn review --approve`.
+    pub pending: usize,
+    pub notes: usize,
+    pub file: String,
 }
 
-/// Scan a workspace for evidence and merge new proposals into the pending file.
-pub fn scan(workspace: &Path, use_llm: bool, settings: &Settings) -> Result<ScanReport> {
+/// Scan a workspace for evidence and merge entries into the global experience
+/// file for its format. Zero API cost unless `use_llm` is set.
+pub fn summarize(workspace: &Path, use_llm: bool, settings: &Settings) -> Result<SummaryReport> {
     let store = crate::store::workspace_db(workspace)?;
     let meta = store.meta()?;
     let units = store.all_units()?;
     let translations = store.all_translations()?;
-    let stats = collect(&units, &translations);
-    let existing = knowledge::load_rules(&meta.engine);
-    let mut fresh = propose(&meta.engine, &stats, &existing);
+    let (stats, run) = collect(&units, &translations);
 
-    if use_llm && !fresh.is_empty() {
+    // Coverage is checked against the *merged* view: the builtin defaults
+    // already decide most field names, and re-proposing them every run would
+    // bury the genuinely new signal.
+    let merged = knowledge::load_experience(&meta.engine, Some(workspace));
+    let covered = covered_fields(&merged);
+    let mut candidates = propose(&stats, &covered);
+
+    if use_llm && !candidates.is_empty() {
         match settings.client(None) {
-            Ok(client) => review_with_llm(client, &mut fresh),
+            Ok(client) => review_with_llm(client, &mut candidates),
             Err(e) => eprintln!("learn: skipping LLM review ({e})"),
         }
     }
 
-    let mut file = load_proposals();
-    let mut added = 0usize;
-    for p in fresh {
-        let dup = file
-            .proposals
-            .iter()
-            .any(|q| q.format == p.format && q.field == p.field);
-        if !dup {
-            file.proposals.push(p);
-            added += 1;
+    let now = unix_now();
+    let mut file = knowledge::load_file(&meta.engine);
+    if file.format.is_empty() {
+        file.format = meta.engine.clone();
+    }
+    let mut pending = 0usize;
+    let mut written = 0usize;
+    for c in candidates {
+        let entry = c.into_entry(&now);
+        if let Entry::Field(fe) = &entry
+            && fe.status == Status::Pending
+        {
+            pending += 1;
         }
+        file.upsert(entry);
+        written += 1;
     }
-    if added > 0 {
-        save_proposals(&file)?;
+    let notes = notes_for(&meta.engine, &run, &now);
+    let note_count = notes.len();
+    for n in notes {
+        file.upsert(n);
     }
-    Ok(ScanReport {
+    let path = knowledge::save_file(&file)?;
+
+    Ok(SummaryReport {
         format: meta.engine,
         units_scanned: units.len(),
         fields_seen: stats.len(),
-        new_proposals: added,
-        total_pending: file.proposals.len(),
+        entries_written: written + note_count,
+        pending,
+        notes: note_count,
+        file: path.display().to_string(),
     })
 }
 
-/// Ask the model to sanity-check each proposal. It may only *lower* confidence
-/// or improve the reason — it cannot promote a proposal or invent new ones, so
-/// a hallucinating model degrades to "no learning" rather than a bad rule.
-fn review_with_llm(client: &LlmClient, proposals: &mut [Proposal]) {
-    for p in proposals.iter_mut() {
+/// Field names the merged experience already has an entry for, in any status.
+/// Pending entries count as covered so a re-run does not queue a duplicate the
+/// human has not yet looked at.
+fn covered_fields(exp: &knowledge::Experience) -> BTreeSet<String> {
+    exp.entries
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Entry::Field(f) => Some(f.field.trim_start_matches('*').to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Ask the model to sanity-check each candidate. It may only *lower* confidence
+/// or improve the reason — it cannot promote a candidate or invent new ones, so
+/// a hallucinating model degrades to "no learning" rather than a bad entry.
+fn review_with_llm(client: &LlmClient, candidates: &mut [Candidate]) {
+    for p in candidates.iter_mut() {
         let prompt = format!(
-            "字段名: {}\n格式: {}\n统计证据: {}\n样本值:\n{}\n\n\
+            "字段名: {}\n统计证据: {}\n样本值:\n{}\n\n\
              这个字段是「游戏内部标识符/机器数据」还是「玩家可见文本」？\n\
              只回 JSON: {{\"identifier\": true|false, \"reason\": \"一句中文理由\"}}",
             p.field,
-            p.format,
             p.evidence.join(", "),
             p.samples
                 .iter()
@@ -273,14 +372,17 @@ fn review_with_llm(client: &LlmClient, proposals: &mut [Proposal]) {
         );
         match ask_json(client, &prompt) {
             Ok(v) => {
-                let is_id = v.get("identifier").and_then(|x| x.as_bool()).unwrap_or(false);
+                let is_id = v
+                    .get("identifier")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 if let Some(r) = v.get("reason").and_then(|x| x.as_str())
                     && !r.trim().is_empty()
                 {
                     p.reason = format!("{} (LLM: {})", p.reason, truncate(r, 80));
                 }
                 if !is_id {
-                    // Model disagrees with the statistics — keep the proposal but
+                    // Model disagrees with the statistics — keep the candidate but
                     // mark it doubtful so a human looks harder.
                     p.confidence *= 0.5;
                     p.reason.push_str("；LLM 认为可能是可见文本，需人工判断");
@@ -320,6 +422,36 @@ fn ask_json(client: &LlmClient, prompt: &str) -> Result<serde_json::Value> {
     serde_json::from_str(&content[start..end]).context("parse review json")
 }
 
+/// One pending entry, addressed by the same 1-based index `review` accepts.
+pub struct PendingItem {
+    pub format: String,
+    pub index: usize,
+    entry_index: usize,
+    pub entry: Entry,
+}
+
+/// Every pending entry across all formats, in a stable order.
+pub fn pending_items() -> Vec<PendingItem> {
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for f in knowledge::all_files() {
+        for (i, e) in f.entries.iter().enumerate() {
+            let Entry::Field(fe) = e else { continue };
+            if fe.status != Status::Pending {
+                continue;
+            }
+            n += 1;
+            out.push(PendingItem {
+                format: f.format.clone(),
+                index: n,
+                entry_index: i,
+                entry: e.clone(),
+            });
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewReport {
     pub approved: usize,
@@ -328,68 +460,76 @@ pub struct ReviewReport {
     pub files_written: Vec<String>,
 }
 
-/// Approve / reject pending proposals by 1-based index.
+/// Approve (flip to active) or reject (delete) pending entries by 1-based index.
 pub fn review(approve: &[usize], reject: &[usize]) -> Result<ReviewReport> {
-    let mut file = load_proposals();
+    let items = pending_items();
+    // (entry_index, approve?) per format.
+    let mut by_format: BTreeMap<String, Vec<(usize, bool)>> = BTreeMap::new();
+    for it in &items {
+        if approve.contains(&it.index) {
+            by_format
+                .entry(it.format.clone())
+                .or_default()
+                .push((it.entry_index, true));
+        } else if reject.contains(&it.index) {
+            by_format
+                .entry(it.format.clone())
+                .or_default()
+                .push((it.entry_index, false));
+        }
+    }
+
     let now = unix_now();
-    let mut by_format: BTreeMap<String, Vec<Rule>> = BTreeMap::new();
     let mut approved = 0usize;
     let mut rejected = 0usize;
-    let mut keep = Vec::new();
-
-    for (i, p) in file.proposals.drain(..).enumerate() {
-        let n = i + 1;
-        if approve.contains(&n) {
-            by_format
-                .entry(p.format.clone())
-                .or_default()
-                .push(p.into_rule(now.clone()));
-            approved += 1;
-        } else if reject.contains(&n) {
-            rejected += 1;
-        } else {
-            keep.push(p);
-        }
-    }
-
     let mut written = Vec::new();
-    for (format, rules) in by_format {
-        let mut set = knowledge::load_rules(&format);
-        if set.format.is_empty() {
-            set = RuleSet::new(&format);
+    for (format, mut ops) in by_format {
+        let mut file = knowledge::load_file(&format);
+        // Highest index first: removing a low index would shift the rest.
+        ops.sort_by_key(|op| std::cmp::Reverse(op.0));
+        for (idx, ok) in ops {
+            if idx >= file.entries.len() {
+                continue;
+            }
+            if ok {
+                if let Entry::Field(fe) = &mut file.entries[idx] {
+                    fe.status = Status::Approved;
+                    fe.updated_at = now.clone();
+                }
+                approved += 1;
+            } else {
+                file.entries.remove(idx);
+                rejected += 1;
+            }
         }
-        for r in rules {
-            set.rules.retain(|x| x.field != r.field);
-            set.rules.push(r);
-        }
-        let p = knowledge::save_rules(&set)?;
-        written.push(p.display().to_string());
+        written.push(knowledge::save_file(&file)?.display().to_string());
     }
 
-    file.proposals = keep;
-    save_proposals(&file)?;
     Ok(ReviewReport {
         approved,
         rejected,
-        remaining: file.proposals.len(),
+        remaining: pending_items().len(),
         files_written: written,
     })
 }
 
-/// Remove a rule by field name; returns how many were dropped.
+/// Remove entries by field name; returns how many were dropped.
 pub fn forget(field: &str, format: Option<&str>) -> Result<usize> {
     let mut n = 0;
-    for mut set in knowledge::all_rules() {
+    for mut file in knowledge::all_files() {
         if let Some(f) = format
-            && set.format != f
+            && file.format != f
         {
             continue;
         }
-        let before = set.rules.len();
-        set.rules.retain(|r| r.field != field);
-        if set.rules.len() != before {
-            n += before - set.rules.len();
-            knowledge::save_rules(&set)?;
+        let before = file.entries.len();
+        file.entries.retain(|e| match e {
+            Entry::Field(fe) => fe.field != field,
+            _ => true,
+        });
+        if file.entries.len() != before {
+            n += before - file.entries.len();
+            knowledge::save_file(&file)?;
         }
     }
     Ok(n)
@@ -442,8 +582,12 @@ mod tests {
         }
     }
 
+    fn no_coverage() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
     #[test]
-    fn passthrough_cluster_becomes_a_skip_proposal() {
+    fn passthrough_cluster_becomes_a_pending_skip_entry() {
         let mut units = Vec::new();
         let mut trs = BTreeMap::new();
         for i in 0..6 {
@@ -451,20 +595,27 @@ mod tests {
             units.push(unit(&loc, "スイッチ"));
             trs.insert(loc.clone(), tr(&loc, &["スイッチ"], true));
         }
-        let stats = collect(&units, &trs);
-        let proposals = propose("rmmz", &stats, &RuleSet::new("rmmz"));
-        assert_eq!(proposals.len(), 1, "one field, one proposal");
-        let p = &proposals[0];
-        assert_eq!(p.field, "switchname");
-        assert_eq!(p.verdict, Verdict::Skip);
-        assert_eq!(p.scope, Scope::Nested);
-        assert!(!p.samples.is_empty(), "must carry samples for review");
-        assert!(p.evidence[0].contains("passthrough"));
+        let (stats, _) = collect(&units, &trs);
+        let c = propose(&stats, &no_coverage());
+        assert_eq!(c.len(), 1, "one field, one candidate");
+        assert_eq!(c[0].field, "switchname");
+        assert_eq!(c[0].verdict, Verdict::Skip);
+        assert_eq!(c[0].scope, Scope::Nested);
+        assert_eq!(c[0].domain, "plugins");
+
+        // A deletion must never arrive pre-approved.
+        let Entry::Field(fe) = c[0].clone().into_entry("0") else {
+            panic!("expected field entry")
+        };
+        assert_eq!(fe.status, Status::Pending);
+        assert!(
+            fe.evidence.iter().any(|e| e.starts_with("sample: ")),
+            "review needs sample values, not just a confidence number"
+        );
     }
 
     #[test]
     fn small_samples_are_not_proposed() {
-        // Below MIN_SAMPLE the pattern cannot be told from coincidence.
         let mut units = Vec::new();
         let mut trs = BTreeMap::new();
         for i in 0..2 {
@@ -472,8 +623,8 @@ mod tests {
             units.push(unit(&loc, "12"));
             trs.insert(loc.clone(), tr(&loc, &["12"], true));
         }
-        let stats = collect(&units, &trs);
-        assert!(propose("rmmz", &stats, &RuleSet::new("rmmz")).is_empty());
+        let (stats, _) = collect(&units, &trs);
+        assert!(propose(&stats, &no_coverage()).is_empty());
     }
 
     #[test]
@@ -483,36 +634,26 @@ mod tests {
         for i in 0..8 {
             let loc = format!("a#{i}/title");
             units.push(unit(&loc, "タイトル"));
-            // only 2 of 8 passthrough — well under MIN_RATIO
             trs.insert(loc.clone(), tr(&loc, &["标题"], i < 2));
         }
-        let stats = collect(&units, &trs);
-        assert!(propose("rmmz", &stats, &RuleSet::new("rmmz")).is_empty());
+        let (stats, _) = collect(&units, &trs);
+        assert!(propose(&stats, &no_coverage()).is_empty());
     }
 
     #[test]
-    fn fields_already_covered_are_not_reproposed() {
+    fn covered_fields_are_not_reproposed() {
         let mut units = Vec::new();
         let mut trs = BTreeMap::new();
         for i in 0..6 {
             let loc = format!("a#{i}/key");
             units.push(unit(&loc, "実績_x"));
-            trs.insert(loc.clone(), tr(&loc, &["実績_x"], false)); // identical
+            trs.insert(loc.clone(), tr(&loc, &["実績_x"], false));
         }
-        let stats = collect(&units, &trs);
-        let mut existing = RuleSet::new("rmmz");
-        existing.rules.push(Rule {
-            field: "key".into(),
-            verdict: Verdict::Skip,
-            scope: Scope::Any,
-            confidence: 1.0,
-            reason: "already known".into(),
-            evidence: vec![],
-            approved_at: "0".into(),
-        });
+        let (stats, _) = collect(&units, &trs);
+        let covered: BTreeSet<String> = ["key".to_string()].into_iter().collect();
         assert!(
-            propose("rmmz", &stats, &existing).is_empty(),
-            "scan must not repeat known rules every run"
+            propose(&stats, &covered).is_empty(),
+            "a re-run must not queue duplicates of what is already decided"
         );
     }
 
@@ -530,47 +671,137 @@ mod tests {
             units.push(unit(&loc, "456"));
             trs.insert(loc.clone(), tr(&loc, &["456"], true));
         }
-        let stats = collect(&units, &trs);
-        let p = propose("rmmz", &stats, &RuleSet::new("rmmz"));
-        assert_eq!(p.len(), 1);
+        let (stats, _) = collect(&units, &trs);
+        let c = propose(&stats, &no_coverage());
+        assert_eq!(c.len(), 1);
         assert_eq!(
-            p[0].scope,
+            c[0].scope,
             Scope::Any,
             "mixed nested/top evidence must not claim a narrower scope"
         );
     }
 
     #[test]
-    fn machine_literals_are_detected_without_translations() {
-        // Evidence works even before anything is translated.
-        let units: Vec<TextUnit> = (0..5)
-            .map(|i| unit(&format!("a#{i}/iconIndex"), "42"))
-            .collect();
-        let stats = collect(&units, &BTreeMap::new());
-        let p = propose("rmmz", &stats, &RuleSet::new("rmmz"));
-        assert_eq!(p.len(), 1);
-        assert!(p[0].evidence[0].contains("machine"));
+    fn mixed_domains_claim_no_domain_guard() {
+        let mut units = Vec::new();
+        for i in 0..3 {
+            units.push(unit(&format!("a#{i}/code"), "123"));
+        }
+        for i in 0..3 {
+            let mut u = unit(&format!("b#{i}/code"), "456");
+            u.domain = "dialogue".into();
+            units.push(u);
+        }
+        let (stats, _) = collect(&units, &BTreeMap::new());
+        let c = propose(&stats, &no_coverage());
+        assert_eq!(c.len(), 1);
+        assert!(
+            c[0].domain.is_empty(),
+            "an entry must not claim a domain it only half covers"
+        );
     }
 
     #[test]
-    fn proposal_toml_roundtrip() {
-        let f = ProposalFile {
-            proposals: vec![Proposal {
-                format: "rmmz".into(),
-                field: "key".into(),
-                verdict: Verdict::Skip,
-                scope: Scope::Nested,
-                confidence: 0.9,
-                reason: "身份句柄".into(),
-                evidence: vec!["identical=6/6".into()],
-                samples: vec!["実績_a".into()],
-            }],
-        };
-        let s = toml::to_string_pretty(&f).unwrap();
-        let back: ProposalFile = toml::from_str(&s).unwrap();
-        assert_eq!(back.proposals.len(), 1);
-        assert_eq!(back.proposals[0].field, "key");
-        assert_eq!(back.proposals[0].verdict, Verdict::Skip);
-        assert_eq!(back.proposals[0].samples, vec!["実績_a".to_string()]);
+    fn machine_literals_are_detected_without_translations() {
+        let units: Vec<TextUnit> = (0..5)
+            .map(|i| unit(&format!("a#{i}/iconIndex"), "42"))
+            .collect();
+        let (stats, _) = collect(&units, &BTreeMap::new());
+        let c = propose(&stats, &no_coverage());
+        assert_eq!(c.len(), 1);
+        assert!(c[0].evidence[0].contains("machine"));
+    }
+
+    // ---- run-level notes ----
+
+    #[test]
+    fn control_code_loss_becomes_a_prompt_note() {
+        let mut units = Vec::new();
+        let mut trs = BTreeMap::new();
+        for i in 0..5 {
+            let loc = format!("a#{i}/text");
+            units.push(unit(&loc, r"\C[1]こんにちは"));
+            // Translation dropped the colour code.
+            trs.insert(loc.clone(), tr(&loc, &["你好"], false));
+        }
+        let (_, run) = collect(&units, &trs);
+        assert_eq!(run.ctrl_units, 5);
+        assert_eq!(run.ctrl_lost, 5);
+
+        let notes = notes_for("rmmz", &run, "0");
+        let prompt: Vec<_> = notes
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(n) if n.topic == "prompt" => Some(n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompt.len(), 1);
+        assert!(prompt[0].text.contains("CTRL_"));
+        assert_eq!(
+            prompt[0].status,
+            Status::Approved,
+            "notes apply on their own"
+        );
+    }
+
+    #[test]
+    fn intact_control_codes_produce_no_prompt_note() {
+        let mut units = Vec::new();
+        let mut trs = BTreeMap::new();
+        for i in 0..5 {
+            let loc = format!("a#{i}/text");
+            units.push(unit(&loc, r"\C[1]こんにちは"));
+            trs.insert(loc.clone(), tr(&loc, &[r"\C[1]你好"], false));
+        }
+        let (_, run) = collect(&units, &trs);
+        assert_eq!(run.ctrl_lost, 0);
+        let notes = notes_for("rmmz", &run, "0");
+        assert!(
+            !notes
+                .iter()
+                .any(|e| matches!(e, Entry::Note(n) if n.topic == "prompt")),
+            "no advice is better than advice about a problem that did not happen"
+        );
+    }
+
+    #[test]
+    fn run_note_replaces_itself_instead_of_piling_up() {
+        let mut file = knowledge::ExperienceFile::new("rmmz");
+        for i in 0..3 {
+            let run = RunStats {
+                units: i,
+                ..Default::default()
+            };
+            for n in notes_for("rmmz", &run, "0") {
+                file.upsert(n);
+            }
+        }
+        let run_notes = file
+            .entries
+            .iter()
+            .filter(|e| matches!(e, Entry::Note(n) if n.topic == "run"))
+            .count();
+        assert_eq!(run_notes, 1, "three runs must leave one run note");
+    }
+
+    #[test]
+    fn a_human_note_is_not_overwritten_by_the_automatic_one() {
+        let mut file = knowledge::ExperienceFile::new("rmmz");
+        let mut mine = NoteEntry::new("run", "手写：这个游戏的存档在 www/save");
+        mine.source = "human".into();
+        file.upsert(Entry::Note(mine));
+        for n in notes_for("rmmz", &RunStats::default(), "0") {
+            file.upsert(n);
+        }
+        let kept = file
+            .entries
+            .iter()
+            .filter(|e| matches!(e, Entry::Note(n) if n.source == "human"))
+            .count();
+        assert_eq!(
+            kept, 1,
+            "automatic summaries must not eat hand-written notes"
+        );
     }
 }

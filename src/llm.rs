@@ -1,4 +1,5 @@
 use crate::config::{LlmClient, TranslationSection};
+use crate::glossary::GlossaryTerm;
 use crate::model::{ItemType, TextUnit, Translation, mask_unit_lines, unmask_controls};
 use crate::quality;
 use anyhow::{Context, Result, bail};
@@ -206,6 +207,10 @@ pub struct Translator {
     http: reqwest::blocking::Client,
     system: String,
     rate: Option<RateLimiter>,
+    /// Active glossary, highest count first. Only the terms a batch actually
+    /// contains are injected into it — see `translate_batch`.
+    glossary: Vec<GlossaryTerm>,
+    inject_limit: usize,
 }
 
 impl Translator {
@@ -225,7 +230,36 @@ impl Translator {
             http,
             system: system_prompt(source_lang, target_lang, profile),
             rate: RateLimiter::new(section.rpm),
+            glossary: Vec::new(),
+            inject_limit: 0,
         })
+    }
+
+    /// Append learned `topic = "prompt"` notes to the system prompt.
+    pub fn with_notes(mut self, notes: &[String]) -> Self {
+        let useful: Vec<&String> = notes.iter().filter(|n| !n.trim().is_empty()).collect();
+        if useful.is_empty() {
+            return self;
+        }
+        self.system.push_str("\n# 该格式的既往经验\n");
+        for n in useful {
+            self.system.push_str(&format!("- {n}\n"));
+        }
+        self
+    }
+
+    /// Attach a glossary. Terms are selected per batch, never dumped wholesale:
+    /// a few hundred entries would crowd out the text in every request.
+    pub fn with_glossary(mut self, mut terms: Vec<GlossaryTerm>, inject_limit: usize) -> Self {
+        if terms.is_empty() || inject_limit == 0 {
+            return self;
+        }
+        terms.sort_by_key(|t| std::cmp::Reverse(t.count));
+        self.glossary = terms;
+        self.inject_limit = inject_limit;
+        self.system
+            .push_str("- 正文前若给出「术语表」，其中的译名必须严格采用，不得自行改译。\n");
+        self
     }
 
     pub fn translate_units(
@@ -425,6 +459,29 @@ impl Translator {
         {
             body.push_str(&format!("context: {c}\n"));
         }
+
+        // Glossary before the text, and only the terms this batch can use.
+        if !self.glossary.is_empty() {
+            let source: String = batch
+                .iter()
+                .flat_map(|u| u.original_lines.iter())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hits =
+                crate::glossary::select_for_batch(&self.glossary, &source, self.inject_limit);
+            if !hits.is_empty() {
+                body.push_str("\n# 术语表（必须严格遵守）\n\n");
+                for t in hits {
+                    if t.info.is_empty() {
+                        body.push_str(&format!("{} → {}\n", t.src, t.dst));
+                    } else {
+                        body.push_str(&format!("{} → {}（{}）\n", t.src, t.dst, t.info));
+                    }
+                }
+            }
+        }
+
         body.push_str("\n# 正文\n\n");
 
         for (i, u) in batch.iter().enumerate() {
@@ -613,4 +670,83 @@ fn truncate(s: &str, n: usize) -> String {
         t.push('…');
     }
     t
+}
+
+/// One-shot JSON request outside the translation pipeline (learning, glossary).
+///
+/// Kept here rather than duplicated per caller so there is one place that knows
+/// how to coax JSON out of a chat endpoint: models wrap it in prose or fences,
+/// so the first `{`/`[` to the last `}`/`]` is extracted before parsing.
+pub fn ask_json(client: &LlmClient, system: &str, user: &str) -> Result<serde_json::Value> {
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(client.timeout.max(30)))
+        .build()?;
+    let url = format!("{}/chat/completions", client.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": client.model,
+        "temperature": 0.0,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ]
+    });
+    let resp = http
+        .post(&url)
+        .bearer_auth(&client.api_key)
+        .json(&body)
+        .send()
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let text = resp.text()?;
+    if !status.is_success() {
+        bail!("LLM HTTP {status}: {}", truncate(&text, 500));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&text).context("decode chat")?;
+    let content = parsed["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no content in chat response"))?;
+    let slice = extract_json_span(content)
+        .ok_or_else(|| anyhow::anyhow!("no JSON in response: {}", truncate(content, 200)))?;
+    serde_json::from_str(slice).with_context(|| format!("parse json: {}", truncate(slice, 300)))
+}
+
+/// The widest `{…}` or `[…]` span in `s`, whichever starts first.
+fn extract_json_span(s: &str) -> Option<&str> {
+    let obj = s.find('{');
+    let arr = s.find('[');
+    let (start, close) = match (obj, arr) {
+        (Some(o), Some(a)) if a < o => (a, ']'),
+        (Some(o), _) => (o, '}'),
+        (None, Some(a)) => (a, ']'),
+        (None, None) => return None,
+    };
+    let end = s.rfind(close)? + close.len_utf8();
+    if end <= start {
+        return None;
+    }
+    Some(&s[start..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_span_survives_prose_and_fences() {
+        assert_eq!(
+            extract_json_span("Sure!\n```json\n[{\"a\":1}]\n```\n"),
+            Some("[{\"a\":1}]")
+        );
+        assert_eq!(
+            extract_json_span("here you go: {\"ok\": true} — done"),
+            Some("{\"ok\": true}")
+        );
+        assert_eq!(extract_json_span("no json here"), None);
+    }
+
+    #[test]
+    fn json_span_prefers_whichever_bracket_opens_first() {
+        // An object holding an array must not be truncated at the array's `]`.
+        assert_eq!(extract_json_span("{\"xs\":[1,2]}"), Some("{\"xs\":[1,2]}"));
+    }
 }

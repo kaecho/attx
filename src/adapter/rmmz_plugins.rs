@@ -744,10 +744,9 @@ var $plugins =
                 }
                 "s".into()
             }
-            Value::Array(a) => format!(
-                "[{}]",
-                a.iter().map(type_sig).collect::<Vec<_>>().join(",")
-            ),
+            Value::Array(a) => {
+                format!("[{}]", a.iter().map(type_sig).collect::<Vec<_>>().join(","))
+            }
             Value::Object(m) => format!(
                 "{{{}}}",
                 m.iter()
@@ -820,9 +819,12 @@ var $plugins =
             before,
             "type signature must survive writeback"
         );
-        let q: Value =
-            serde_json::from_str(serde_json::from_str::<Value>(&out).unwrap()[0].as_str().unwrap())
-                .unwrap();
+        let q: Value = serde_json::from_str(
+            serde_json::from_str::<Value>(&out).unwrap()[0]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(q["Title"], json!("クエスト1"));
         let rewards: Value = serde_json::from_str(q["Rewards"].as_str().unwrap()).unwrap();
         let r0: Value = serde_json::from_str(rewards[0].as_str().unwrap()).unwrap();
@@ -867,7 +869,10 @@ var $plugins =
             {"name":"QuestSystem","status":true,"description":"",
              "parameters":{"QuestDatas": enc(&json!([enc(&quest)]))}}
         ]);
-        let js = format!("var $plugins =\n{};\n", serde_json::to_string(&plugins).unwrap());
+        let js = format!(
+            "var $plugins =\n{};\n",
+            serde_json::to_string(&plugins).unwrap()
+        );
         let dir = test_root("roundtrip", &js);
 
         let units = extract_plugins(&dir, "ja").unwrap();
@@ -907,7 +912,10 @@ var $plugins =
             !out.contains("ZH:実績_a"),
             "identity key must not be translated (events reference it verbatim)"
         );
-        assert!(out.contains("実績_a"), "identity key must survive unchanged");
+        assert!(
+            out.contains("実績_a"),
+            "identity key must survive unchanged"
+        );
     }
 
     /// Identity fields inside nested structs address game logic, not the player.

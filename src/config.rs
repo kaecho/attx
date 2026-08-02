@@ -7,6 +7,10 @@ pub struct Settings {
     pub llm: LlmSection,
     #[serde(default)]
     pub translation: TranslationSection,
+    #[serde(default)]
+    pub glossary: GlossarySection,
+    #[serde(default)]
+    pub learn: LearnSection,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +86,74 @@ fn default_max_ctx() -> usize {
     6
 }
 
+/// Glossary generation. Off by default: building one spends extra LLM calls,
+/// and a user who did not ask for that should never be surprised by it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlossarySection {
+    /// Whether `attx run` builds a glossary between extract and translate.
+    /// Explicit `attx glossary build` ignores this — asking is consent.
+    #[serde(default)]
+    pub enabled: bool,
+    /// A candidate must appear at least this often in the source to be worth a
+    /// glossary slot. This is the cost lever: statistics prune before the model
+    /// is ever called.
+    #[serde(default = "default_min_occurrences")]
+    pub min_occurrences: usize,
+    /// Upper bound on candidates sent to the model, highest count first.
+    #[serde(default = "default_max_terms")]
+    pub max_terms: usize,
+    /// Upper bound on terms injected into any one translation batch.
+    #[serde(default = "default_inject_limit")]
+    pub inject_limit: usize,
+}
+
+impl Default for GlossarySection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_occurrences: default_min_occurrences(),
+            max_terms: default_max_terms(),
+            inject_limit: default_inject_limit(),
+        }
+    }
+}
+
+fn default_min_occurrences() -> usize {
+    10
+}
+fn default_max_terms() -> usize {
+    200
+}
+fn default_inject_limit() -> usize {
+    30
+}
+
+/// Automatic experience capture after writeback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnSection {
+    /// Summarise every successful writeback into experience entries. On by
+    /// default because it costs nothing: the evidence is already in the DB.
+    #[serde(default = "default_true")]
+    pub auto_summarize: bool,
+    /// Additionally ask the model to sanity-check proposed entries. Off by
+    /// default — this one costs money.
+    #[serde(default)]
+    pub llm_review: bool,
+}
+
+impl Default for LearnSection {
+    fn default() -> Self {
+        Self {
+            auto_summarize: true,
+            llm_review: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 impl Settings {
     pub fn client(&self, name: Option<&str>) -> Result<&LlmClient> {
         let key = name.unwrap_or(self.llm.default_client.as_str());
@@ -103,6 +175,8 @@ pub fn load(explicit: Option<&Path>) -> Result<Settings> {
                 clients: vec![],
             },
             translation: TranslationSection::default(),
+            glossary: GlossarySection::default(),
+            learn: LearnSection::default(),
         });
     }
     let raw = std::fs::read_to_string(&path)
@@ -149,6 +223,19 @@ retry_count = 3
 retry_delay = 2
 batch_chars = 2500
 max_context_items = 6
+
+[glossary]
+# Off by default: building a glossary spends extra LLM calls.
+# It keeps character/place names consistent across an entire work, which
+# matters most for novels and long games.
+enabled = false
+min_occurrences = 10   # a term must appear this often to be worth a slot
+max_terms = 200        # cap on candidates sent to the model (cost control)
+inject_limit = 30      # cap on terms injected into one translation batch
+
+[learn]
+auto_summarize = true  # capture experience after writeback (no API cost)
+llm_review = false     # also ask the model to check proposals (costs money)
 "#
 }
 
@@ -167,4 +254,53 @@ pub fn require_llm(settings: &Settings) -> Result<&LlmClient> {
         );
     }
     settings.client(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_sections_fall_back_to_defaults() {
+        // Every existing 0.5.0 setting.toml lacks these sections; loading one
+        // must not fail, and must not silently switch the paid feature on.
+        let s: Settings = toml::from_str(
+            r#"
+[llm]
+default_client = "main"
+clients = []
+"#,
+        )
+        .unwrap();
+        assert!(!s.glossary.enabled, "the paid feature stays off by default");
+        assert_eq!(s.glossary.min_occurrences, 10);
+        assert_eq!(s.glossary.max_terms, 200);
+        assert_eq!(s.glossary.inject_limit, 30);
+        assert!(s.learn.auto_summarize, "free capture is on by default");
+        assert!(!s.learn.llm_review, "the paid check stays off by default");
+    }
+
+    #[test]
+    fn partial_sections_keep_other_defaults() {
+        let s: Settings = toml::from_str(
+            r#"
+[llm]
+default_client = "main"
+clients = []
+
+[glossary]
+enabled = true
+"#,
+        )
+        .unwrap();
+        assert!(s.glossary.enabled);
+        assert_eq!(s.glossary.min_occurrences, 10);
+    }
+
+    #[test]
+    fn shipped_example_config_parses() {
+        let s: Settings = toml::from_str(example_toml()).expect("example_toml must be valid");
+        assert!(!s.glossary.enabled);
+        assert!(s.learn.auto_summarize);
+    }
 }

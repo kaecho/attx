@@ -17,3 +17,16 @@ retry_count = 3
 retry_delay = 2
 batch_chars = 2500
 max_context_items = 6
+
+[glossary]
+# Off by default: building a glossary spends extra LLM calls.
+# It keeps character/place names consistent across an entire work, which
+# matters most for novels and long games.
+enabled = false
+min_occurrences = 10   # a term must appear this often to be worth a slot
+max_terms = 200        # cap on candidates sent to the model (cost control)
+inject_limit = 30      # cap on terms injected into one translation batch
+
+[learn]
+auto_summarize = true  # capture experience after writeback (no API cost)
+llm_review = false     # also ask the model to check proposals (costs money)
