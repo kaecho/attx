@@ -375,6 +375,26 @@ fn extract_command_list(
                     let t = s.trim();
                     if !t.is_empty() {
                         role = t.to_string();
+                        // MZ namebox (parameters[4]): extract as its own unit so
+                        // writeback can translate the speaker plate. Skip \N[n]
+                        // actor refs — those resolve at runtime from Actors.json.
+                        if needs_translation(t, source_lang) && !is_actor_name_ref(t) {
+                            let loc = format!("{location}/namebox");
+                            let lines = vec![t.to_string()];
+                            let id = TextUnit::compute_id("rmmz", &loc, &lines);
+                            units.push(TextUnit {
+                                id,
+                                engine: "rmmz".into(),
+                                domain: "namebox".into(),
+                                location: loc.clone(),
+                                item_type: ItemType::ShortText,
+                                role: "namebox".into(),
+                                original_lines: lines,
+                                source_line_paths: vec![loc],
+                                context: prefix.to_string(),
+                                payload: String::new(),
+                            });
+                        }
                     }
                 }
                 pending_long = Some((location, role, Vec::new(), Vec::new()));
@@ -558,8 +578,10 @@ fn apply_unit(
 
     match unit.item_type {
         ItemType::Array => {
-            // choices: location points at command; parameters[0] is array
             write_choices(root, &unit.location, &tr.translation_lines)?;
+        }
+        ItemType::ShortText if unit.domain == "namebox" => {
+            write_namebox(root, &unit.location, &tr.translation_lines)?;
         }
         ItemType::ShortText => {
             write_short(root, &unit.location, &tr.translation_lines)?;
@@ -579,6 +601,29 @@ fn write_short(root: &mut Value, location: &str, lines: &[String]) -> Result<()>
         bail!("short path missing fields: {location}");
     }
     set_json_path(root, rest, Value::String(text))?;
+    Ok(())
+}
+
+fn write_namebox(root: &mut Value, location: &str, lines: &[String]) -> Result<()> {
+    let text = lines.first().cloned().unwrap_or_default();
+    let rest = location.split_once('/').map(|(_, r)| r).unwrap_or("");
+    let rest = rest.strip_suffix("/namebox").unwrap_or(rest);
+    if rest.is_empty() {
+        bail!("namebox path missing command: {location}");
+    }
+    let cmd = navigate_mut(root, rest)?;
+    let code = cmd.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != CODE_NAME {
+        bail!("expected namebox code 101 at {location}, got {code}");
+    }
+    let params = cmd
+        .get_mut("parameters")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| anyhow::anyhow!("namebox missing parameters at {location}"))?;
+    while params.len() < 5 {
+        params.push(Value::String(String::new()));
+    }
+    params[4] = Value::String(text);
     Ok(())
 }
 
@@ -627,22 +672,234 @@ fn write_long_text(root: &mut Value, unit: &TextUnit, lines: &[String]) -> Resul
     Ok(())
 }
 
-/// Resize translation lines to exactly `n` slots (join extras into last / pad empty).
+/// Default message window display width (half-width cells). CJK ≈ 2.
+const DEFAULT_MSG_WIDTH: usize = 44;
+
+/// Fit translation into exactly `n` 401/405 slots.
+///
+/// When the model returns one long line for a multi-slot box (or any line is
+/// wider than the window), reflow by display width so CJK text is not clipped
+/// with empty trailing slots. Control codes (`\C[n]`, `\N[n]`, …) have width 0
+/// and are never split mid-token.
 fn fit_lines(lines: &[String], n: usize) -> Vec<String> {
+    fit_lines_with_width(lines, n, DEFAULT_MSG_WIDTH)
+}
+
+fn fit_lines_with_width(lines: &[String], n: usize, max_w: usize) -> Vec<String> {
     if n == 0 {
         return vec![];
     }
-    if lines.len() == n {
-        return lines.to_vec();
-    }
-    if lines.len() > n {
-        let mut out: Vec<String> = lines[..n - 1].to_vec();
-        out.push(lines[n - 1..].join(""));
+    let needs_reflow = n >= 2
+        && (lines.iter().any(|l| display_width(l) > max_w)
+            || (lines.iter().filter(|l| !l.is_empty()).count() == 1
+                && lines.first().map(|l| display_width(l) > max_w).unwrap_or(false))
+            || (lines.len() < n
+                && lines
+                    .iter()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| display_width(l))
+                    .sum::<usize>()
+                    > max_w));
+
+    if !needs_reflow {
+        if lines.len() == n {
+            return lines.to_vec();
+        }
+        if lines.len() > n {
+            let mut out: Vec<String> = lines[..n - 1].to_vec();
+            out.push(lines[n - 1..].join(""));
+            return out;
+        }
+        let mut out = lines.to_vec();
+        out.resize(n, String::new());
         return out;
     }
-    let mut out = lines.to_vec();
-    out.resize(n, String::new());
+
+    let merged: String = lines.iter().filter(|l| !l.is_empty()).cloned().collect();
+    if merged.is_empty() {
+        return vec![String::new(); n];
+    }
+    reflow_to_n(&merged, n, max_w)
+}
+
+fn is_actor_name_ref(s: &str) -> bool {
+    let s = s.trim();
+    // \N[1] / \n[1] — party member name escape in the namebox
+    let bytes = s.as_bytes();
+    if bytes.len() < 4 || bytes[0] != b'\\' {
+        return false;
+    }
+    let rest = &s[1..];
+    let rest = rest
+        .strip_prefix('N')
+        .or_else(|| rest.strip_prefix('n'))
+        .unwrap_or("");
+    rest.starts_with('[')
+        && rest.ends_with(']')
+        && rest.len() > 2
+        && rest[1..rest.len() - 1].chars().all(|c| c.is_ascii_digit())
+}
+
+fn display_width(s: &str) -> usize {
+    let mut w = 0usize;
+    let mut i = 0;
+    let b = s.as_bytes();
+    while i < b.len() {
+        if b[i] == b'\\' {
+            if let Some(end) = control_token_end(s, i) {
+                i = end;
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        w += if spawns_half_width(ch) {
+            1
+        } else {
+            2
+        };
+        i += ch.len_utf8();
+    }
+    w
+}
+
+fn spawns_half_width(ch: char) -> bool {
+    (ch as u32) < 128
+}
+
+/// End offset of an RPG Maker control code starting at `i` (`s.as_bytes()[i]==b'\\'`),
+/// or None if it is a lone backslash.
+fn control_token_end(s: &str, i: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    if i >= b.len() || b[i] != b'\\' {
+        return None;
+    }
+    let rest = &s[i + 1..];
+    if rest.is_empty() {
+        return None;
+    }
+    // Multi-letter codes with bracket args: \C[n] \I[n] \N[n] \V[n] \S[n] ...
+    // Also short codes: \. \| \! \> \< \^ \\ \{ \} \$
+    let first = rest.chars().next()?;
+    if matches!(
+        first,
+        '.' | '|' | '!' | '>' | '<' | '^' | '\\' | '{' | '}' | '$'
+    ) {
+        return Some(i + 1 + first.len_utf8());
+    }
+    // Letter + optional [args]
+    let mut j = i + 1;
+    while j < b.len() && b[j].is_ascii_alphabetic() {
+        j += 1;
+    }
+    if j < b.len() && b[j] == b'[' {
+        if let Some(close) = s[j + 1..].find(']') {
+            return Some(j + 1 + close + 1);
+        }
+    }
+    if j > i + 1 {
+        return Some(j);
+    }
+    None
+}
+
+fn tokenize_controls(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let b = s.as_bytes();
+    while i < b.len() {
+        if b[i] == b'\\'
+            && let Some(end) = control_token_end(s, i)
+        {
+            out.push(s[i..end].to_string());
+            i = end;
+            continue;
+        }
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch.to_string());
+        i += ch.len_utf8();
+    }
     out
+}
+
+fn token_width(tok: &str) -> usize {
+    if tok.starts_with('\\') {
+        return 0;
+    }
+    tok.chars()
+        .map(|c| if spawns_half_width(c) { 1 } else { 2 })
+        .sum()
+}
+
+fn reflow_to_n(text: &str, n: usize, max_w: usize) -> Vec<String> {
+    let text = text.replace('\n', "");
+    if n <= 1 {
+        return vec![text];
+    }
+    let tokens = tokenize_controls(&text);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    let mut cur_w = 0usize;
+    let mut i = 0usize;
+
+    while i < tokens.len() {
+        let remaining_slots = n.saturating_sub(lines.len());
+        if remaining_slots <= 1 {
+            cur.extend(tokens[i..].iter().cloned());
+            lines.push(cur.join(""));
+            cur.clear();
+            break;
+        }
+        let tok = &tokens[i];
+        let tw = token_width(tok);
+        if !cur.is_empty() && cur_w + tw > max_w {
+            // Prefer break after CJK/ASCII punctuation already in `cur`.
+            let joined = cur.join("");
+            let mut break_at: Option<usize> = None;
+            for punct in [
+                '。', '！', '？', '；', '，', '、', '…', '：', '.', '!', '?', ';', ',',
+            ] {
+                if let Some(pos) = joined.rfind(punct) {
+                    let end = pos + punct.len_utf8();
+                    if display_width(&joined[..end]) >= max_w / 3 {
+                        break_at = Some(end);
+                        break;
+                    }
+                }
+            }
+            if let Some(at) = break_at {
+                lines.push(joined[..at].to_string());
+                let right = &joined[at..];
+                cur = if right.is_empty() {
+                    Vec::new()
+                } else {
+                    tokenize_controls(right)
+                };
+                cur_w = display_width(&cur.join(""));
+            } else {
+                lines.push(joined);
+                cur.clear();
+                cur_w = 0;
+            }
+            continue;
+        }
+        cur.push(tok.clone());
+        cur_w += tw;
+        i += 1;
+    }
+    if !cur.is_empty() {
+        lines.push(cur.join(""));
+    }
+    if lines.len() > n {
+        let head: Vec<String> = lines[..n - 1].to_vec();
+        let tail = lines[n - 1..].join("");
+        lines = head;
+        lines.push(tail);
+    }
+    while lines.len() < n {
+        lines.push(String::new());
+    }
+    lines.truncate(n);
+    lines
 }
 
 fn navigate_mut<'a>(root: &'a mut Value, compact_rest: &str) -> Result<&'a mut Value> {
@@ -791,4 +1048,93 @@ fn navigate_array_db<'a>(root: &'a mut Value, parts: &[&str]) -> Result<&'a mut 
         .as_object_mut()
         .and_then(|o| o.get_mut(field))
         .ok_or_else(|| anyhow::anyhow!("missing field {field}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Translation;
+    use serde_json::json;
+
+    #[test]
+    fn namebox_extracted_and_written_back() {
+        let list = json!([
+            {"code": 101, "parameters": ["Actor1", 0, 0, 2, "エレノア"]},
+            {"code": 401, "parameters": ["こんにちは。"]},
+            {"code": 101, "parameters": ["", 0, 0, 2, "\\N[1]"]},
+            {"code": 401, "parameters": ["はい。"]},
+            {"code": 0, "parameters": []}
+        ]);
+        let mut units = Vec::new();
+        extract_command_list("Map001.json/1/0", list.as_array().unwrap(), "ja", &mut units);
+
+        let nameboxes: Vec<_> = units.iter().filter(|u| u.domain == "namebox").collect();
+        assert_eq!(nameboxes.len(), 1, "units={units:?}");
+        assert_eq!(nameboxes[0].original_lines, vec!["エレノア".to_string()]);
+        assert!(
+            !units.iter().any(|u| u.original_lines.iter().any(|l| l.contains("\\N["))),
+            "\\N[n] must not become a namebox unit"
+        );
+        assert!(
+            units.iter().any(|u| u.domain == "dialogue" && u.role == "エレノア"),
+            "dialogue still carries namebox as role"
+        );
+
+        let mut root = json!({"events": [null, {
+            "id": 1,
+            "pages": [{"list": list}]
+        }]});
+        let u = nameboxes[0];
+        let tr = Translation {
+            unit_id: u.id.clone(),
+            translation_lines: vec!["埃莉诺".into()],
+            source_hash: String::new(),
+            passthrough: false,
+        };
+        write_namebox(&mut root, &u.location, &tr.translation_lines).unwrap();
+        let cmd = &root["events"][1]["pages"][0]["list"][0];
+        assert_eq!(cmd["parameters"][4], json!("埃莉诺"));
+        assert_eq!(
+            root["events"][1]["pages"][0]["list"][1]["parameters"][0],
+            json!("こんにちは。"),
+            "body untouched"
+        );
+    }
+
+    #[test]
+    fn fit_lines_reflows_long_cjk_into_slots() {
+        let long = "上午的课就先到这里。下午会进行结合实践的课程，请大家到训练场集合。".to_string();
+        let out = fit_lines_with_width(&[long.clone()], 3, 44);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().filter(|l| !l.is_empty()).count() >= 2, "out={out:?}");
+        assert!(
+            out[..2].iter().all(|l| display_width(l) <= 44),
+            "non-last lines within width: {out:?} widths={:?}",
+            out.iter().map(|l| display_width(l)).collect::<Vec<_>>()
+        );
+        assert_eq!(out.join(""), long.replace('\n', ""));
+    }
+
+    #[test]
+    fn fit_lines_keeps_equal_width_safe_lines() {
+        let lines = vec!["短い一行。".into(), "もう一行。".into(), "三行目。".into()];
+        let out = fit_lines_with_width(&lines, 3, 44);
+        assert_eq!(out, lines);
+    }
+
+    #[test]
+    fn fit_lines_does_not_split_control_codes() {
+        let s = "\\C[27]你好世界，这是一段比较长的测试文本用来检查控制符。".to_string();
+        let out = fit_lines_with_width(&[s], 2, 20);
+        assert!(out.iter().any(|l| l.contains("\\C[27]")), "out={out:?}");
+        assert!(!out.iter().any(|l| l.contains("\\C[2") && !l.contains("\\C[27]")));
+    }
+
+    #[test]
+    fn actor_name_ref_detection() {
+        assert!(is_actor_name_ref(r"\N[1]"));
+        assert!(is_actor_name_ref(r"\n[12]"));
+        assert!(!is_actor_name_ref("エレノア"));
+        assert!(!is_actor_name_ref(r"\N[1]さん"));
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "attx"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "Agent Translation Toolkit eXtensible — universal AI translation framework: games (RPG Maker MV/MZ, MTool, Ren'Py, VNText), ebooks (EPUB), documents (DOCX/TXT/MD), subtitles (SRT/VTT/LRC), localization files (PO/Paratranz/i18next)"
 license = "MIT"

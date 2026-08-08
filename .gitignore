@@ -14,3 +14,4 @@ setting.toml
 .vscode/
 *.swp
 .DS_Store
+/site/

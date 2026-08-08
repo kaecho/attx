@@ -121,9 +121,9 @@ fn skip_key(key: &str) -> bool {
             "formula",
             "file",
             "filename",
+            "filepath",
             "picture",
             "image",
-            "icon",
             "color",
             "actor",
             "enemy",
@@ -560,48 +560,98 @@ pub fn writeback_plugins(
 
 fn apply_one(plugins: &mut [Value], unit: &TextUnit, text: &str) -> Result<()> {
     // location: js/plugins.js/{idx}/{param} or .../{param}#{json_path}
-    let rest = unit
-        .location
-        .strip_prefix("js/plugins.js/")
-        .unwrap_or(unit.location.as_str());
-    let (path_part, json_path) = match rest.split_once('#') {
-        Some((p, j)) => (p, j),
-        None => (rest, ""),
-    };
-    let mut segs = path_part.split('/');
-    let idx: usize = segs
-        .next()
-        .unwrap_or("")
-        .parse()
-        .with_context(|| format!("plugin index in {}", unit.location))?;
-    let param = segs
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("param missing in {}", unit.location))?;
+    // Param names may themselves contain `/` (e.g. 行動-表示位置/味方), so we
+    // never split the param on `/`. Prefer the structured payload written at
+    // extract time; fall back to "first segment = index, rest = param".
+    let (idx, param, json_path) = parse_plugin_location(unit)?;
     if idx >= plugins.len() {
-        bail!("plugin index {idx} out of range");
+        bail!(
+            "plugin index {idx} out of range (len {}) at {}",
+            plugins.len(),
+            unit.location
+        );
     }
     let plug = &mut plugins[idx];
     let params = plug
         .get_mut("parameters")
         .and_then(|v| v.as_object_mut())
-        .ok_or_else(|| anyhow::anyhow!("plugin {idx} has no parameters object"))?;
+        .ok_or_else(|| anyhow::anyhow!("plugin {idx} has no parameters object ({})", unit.location))?;
     let cur = params
-        .get(param)
+        .get(param.as_str())
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
     let new_val = if json_path.is_empty() {
         text.to_string()
+    } else if cur.is_empty() {
+        bail!(
+            "nested param is not JSON (empty) at {} — param `{param}` missing or empty on plugin {idx}",
+            unit.location
+        );
     } else {
-        set_in_json_string(&cur, json_path, text)?
+        set_in_json_string(&cur, &json_path, text).with_context(|| {
+            format!(
+                "nested write failed at {} (plugin {idx} param `{param}` path `{json_path}`, value starts: {})",
+                unit.location,
+                truncate(&cur, 60)
+            )
+        })?
     };
-    params.insert(param.to_string(), Value::String(new_val));
+    params.insert(param, Value::String(new_val));
     Ok(())
 }
 
+/// Resolve plugin index + param name + optional nested JSON path from a unit.
+fn parse_plugin_location(unit: &TextUnit) -> Result<(usize, String, String)> {
+    // Payload is authoritative when present (survives param names with `/`).
+    if let Ok(v) = serde_json::from_str::<Value>(&unit.payload) {
+        let idx = v
+            .get("plugin_index")
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.parse::<usize>().ok());
+        let param = v
+            .get("param")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let json_path = v
+            .get("json_path")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let (Some(idx), Some(param)) = (idx, param)
+            && !param.is_empty()
+        {
+            return Ok((idx, param, json_path));
+        }
+    }
+
+    let rest = unit
+        .location
+        .strip_prefix("js/plugins.js/")
+        .unwrap_or(unit.location.as_str());
+    let (path_part, json_path) = match rest.split_once('#') {
+        Some((p, j)) => (p, j.to_string()),
+        None => (rest, String::new()),
+    };
+    let (idx_s, param) = path_part
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("param missing in {}", unit.location))?;
+    let idx: usize = idx_s
+        .parse()
+        .with_context(|| format!("plugin index in {}", unit.location))?;
+    if param.is_empty() {
+        bail!("param missing in {}", unit.location);
+    }
+    Ok((idx, param.to_string(), json_path))
+}
+
 fn set_in_json_string(raw: &str, json_path: &str, text: &str) -> Result<String> {
-    let mut root = decode_json_container(raw)
-        .with_context(|| format!("nested param is not JSON: {}", truncate(raw, 80)))?;
+    let mut root = decode_json_container(raw).ok_or_else(|| {
+        anyhow::anyhow!(
+            "nested param is not JSON: path `{json_path}`, value: {}",
+            truncate(raw, 80)
+        )
+    })?;
     set_path(&mut root, json_path, Value::String(text.to_string()))?;
     Ok(serde_json::to_string(&root)?)
 }
@@ -948,6 +998,106 @@ var $plugins =
         assert!(
             !paths.iter().any(|p| p.ends_with("#0/key")),
             "identity key must be skipped: {paths:?}"
+        );
+    }
+
+    /// Param names may contain `/` (Keke_PredictionSystem style). Writeback
+    /// must not treat the slash as a path separator.
+    #[test]
+    fn param_name_with_slash_nested_writeback() {
+        let plugins = json!([{
+            "name": "Keke_PredictionSystem",
+            "status": true,
+            "description": "",
+            "parameters": {
+                "行動-表示位置/味方": enc(&json!({"表示方向":"上","ずらしX":"","ずらしY":""})),
+                "行動-表示位置/敵": enc(&json!({"表示方向":"上","ずらしX":"","ずらしY":""})),
+            }
+        }]);
+        let js = format!(
+            "var $plugins =\n{};\n",
+            serde_json::to_string(&plugins).unwrap()
+        );
+        let dir = test_root("slash-param", &js);
+        let units = extract_plugins(&dir, "ja").unwrap();
+        assert!(
+            units.iter().any(|u| u.location.contains("行動-表示位置/味方")),
+            "expected slash-param unit: {:?}",
+            units.iter().map(|u| &u.location).collect::<Vec<_>>()
+        );
+        let mut trs = BTreeMap::new();
+        for u in &units {
+            trs.insert(
+                u.id.clone(),
+                Translation {
+                    unit_id: u.id.clone(),
+                    translation_lines: vec![if u.original_lines[0] == "上" {
+                        "上方".into()
+                    } else {
+                        format!("ZH:{}", u.original_lines[0])
+                    }],
+                    source_hash: String::new(),
+                    passthrough: false,
+                },
+            );
+        }
+        let out = writeback_plugins(&dir, &units, &trs)
+            .expect("writeback must succeed")
+            .expect("plugins.js content");
+        assert!(out.contains("上方"), "translation must land: {out}");
+        let after = parse_plugins_js(&out).unwrap();
+        let ally = after[0]["parameters"]["行動-表示位置/味方"].as_str().unwrap();
+        let obj: Value = serde_json::from_str(ally).unwrap();
+        assert_eq!(obj["表示方向"], json!("上方"));
+    }
+
+    /// MaterialBase: array elements are themselves JSON strings.
+    #[test]
+    fn materialbase_double_encoded_array_elements() {
+        let items: Vec<String> = (0..5)
+            .map(|i| {
+                enc(&json!({
+                    "Id": "",
+                    "FilePath": format!("pictures/CG/CG{i:04}-拘束-弱1"),
+                    "Label": format!("素材{i}"),
+                }))
+            })
+            .collect();
+        let param = enc(&Value::Array(
+            items.iter().cloned().map(Value::String).collect(),
+        ));
+        let out = set_in_json_string(&param, "1/Label", "素材译1").expect("writeback");
+        let root: Value = serde_json::from_str(&out).unwrap();
+        let el = root[1].as_str().expect("element must stay a JSON string");
+        let obj: Value = serde_json::from_str(el).unwrap();
+        assert_eq!(obj["Label"], json!("素材译1"));
+        assert!(
+            obj["FilePath"].as_str().unwrap().contains("拘束"),
+            "siblings survive"
+        );
+    }
+
+    #[test]
+    fn filepath_keys_are_not_extracted() {
+        let item = enc(&json!({"Id":"","FilePath":"pictures/CG/CG04-拘束-弱1","Name":"名前"}));
+        let plugins = json!([{
+            "name":"MaterialBase","status":true,"description":"",
+            "parameters":{"ImageList": enc(&json!([item]))}
+        }]);
+        let js = format!(
+            "var $plugins =\n{};\n",
+            serde_json::to_string(&plugins).unwrap()
+        );
+        let dir = test_root("filepath", &js);
+        let units = extract_plugins(&dir, "ja").unwrap();
+        let paths: Vec<&str> = units.iter().map(|u| u.location.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("FilePath")),
+            "FilePath must be skipped: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("/Name") || p.ends_with("#0/Name")),
+            "visible Name still extracted: {paths:?}"
         );
     }
 }
