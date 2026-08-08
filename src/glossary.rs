@@ -6,25 +6,25 @@
 //! person. Batching makes this structural, not accidental: no single request
 //! ever sees enough of the work to be consistent with the rest of it.
 //!
-//! The pipeline is deliberately statistics-first:
+//! Two extraction methods:
 //!
 //! ```text
-//! mine (regex, free) → threshold → cap → name (LLM) → inject per batch → check
+//! llm   (default): source batches → model emits {src,dst,info} → vote/cap → inject
+//! stats:           mine (regex) → threshold → cap → name (LLM) → inject
 //! ```
 //!
-//! Mining and thresholding cost nothing, so the model is only ever asked about
-//! terms that are frequent enough to matter. That is what makes
-//! `min_occurrences` a budget lever rather than just a noise filter: LLM spend
-//! tracks the number of *terms*, not the size of the work.
+//! `stats` keeps LLM spend proportional to *term count*. `llm` spends on text
+//! volume but catches proper nouns regex cannot see. Both write the same
+//! `glossary.toml` and share inject/check.
 //!
 //! Two failure modes shape the design:
 //! * Statistics cannot tell a proper noun from a common word — `春` appears
-//!   constantly and is not a term. The model gets a `keep` flag to veto its own
-//!   candidates, and vetoes are remembered so a re-build does not re-ask.
+//!   constantly and is not a term. The model gets a `keep` flag (stats) or a
+//!   type whitelist (llm); vetoes are remembered so a re-build does not re-ask.
 //! * A wrong `dst` is applied everywhere, which makes it *harder* to spot than a
 //!   one-off mistranslation. Hence `check`, and hence entries stay editable.
 
-use crate::config::Settings;
+use crate::config::{GlossaryMethod, Settings};
 use crate::knowledge;
 use crate::llm;
 use crate::model::TextUnit;
@@ -38,9 +38,27 @@ use std::sync::LazyLock;
 pub const GLOSSARY_VERSION: u32 = 1;
 pub const GLOSSARY_FILE: &str = "glossary.toml";
 
-/// Candidates per naming request. Small enough that one bad response costs
-/// little, large enough that the per-request overhead stays amortised.
+/// Candidates per stats-method naming request.
 const NAME_BATCH: usize = 40;
+/// Source characters per llm-method extract request.
+const EXTRACT_BATCH_CHARS: usize = 3500;
+/// Hard cap on extract batches so a huge workspace cannot open an unbounded bill.
+/// ponytail: raise or make configurable if novels routinely need deeper coverage.
+const EXTRACT_MAX_BATCHES: usize = 40;
+
+/// Allowed `info` / type labels from llm extract (LinguaGacha-style whitelist).
+const LLM_INFO_OK: &[&str] = &[
+    "男性角色",
+    "女性角色",
+    "未知性别角色",
+    "地名",
+    "家族",
+    "组织",
+    "特殊物品",
+    "特殊技能",
+    "特殊生物",
+    "其他",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -373,6 +391,7 @@ pub fn mine_candidates(units: &[TextUnit], src_lang: &str) -> Vec<(String, usize
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BuildReport {
+    pub method: String,
     pub candidates: usize,
     pub above_threshold: usize,
     /// Candidates dropped by `max_terms`. Reported rather than silently cut:
@@ -389,10 +408,13 @@ pub struct BuildReport {
     pub sample: Vec<String>,
 }
 
-/// Mine, threshold, and name proper nouns for a workspace.
+/// Build a glossary for a workspace.
+///
+/// `method` / `min_occurrences` override `[glossary]` when set (CLI flags).
 pub fn build(
     workspace: &Path,
     settings: &Settings,
+    method: Option<GlossaryMethod>,
     min_occurrences: Option<usize>,
     dry_run: bool,
 ) -> Result<BuildReport> {
@@ -406,12 +428,29 @@ pub fn build(
         );
     }
 
+    let method = method.unwrap_or(settings.glossary.method);
+    match method {
+        GlossaryMethod::Llm => build_llm(workspace, settings, &meta, &units, dry_run),
+        GlossaryMethod::Stats => {
+            build_stats(workspace, settings, &meta, &units, min_occurrences, dry_run)
+        }
+    }
+}
+
+fn build_stats(
+    workspace: &Path,
+    settings: &Settings,
+    meta: &crate::model::WorkspaceMeta,
+    units: &[TextUnit],
+    min_occurrences: Option<usize>,
+    dry_run: bool,
+) -> Result<BuildReport> {
     let min_occ = min_occurrences
         .unwrap_or(settings.glossary.min_occurrences)
         .max(1);
     let max_terms = settings.glossary.max_terms.max(1);
 
-    let mined = mine_candidates(&units, &meta.source_lang);
+    let mined = mine_candidates(units, &meta.source_lang);
     let candidates = mined.len();
 
     let mut glossary = load(workspace);
@@ -442,6 +481,7 @@ pub fn build(
 
     if dry_run {
         return Ok(BuildReport {
+            method: GlossaryMethod::Stats.as_str().into(),
             candidates,
             above_threshold,
             truncated,
@@ -476,7 +516,7 @@ pub fn build(
                                 info: n.info,
                                 count,
                                 status: TermStatus::Active,
-                                source: "auto".into(),
+                                source: "auto:stats".into(),
                             });
                             added += 1;
                         } else {
@@ -486,14 +526,12 @@ pub fn build(
                                 info: n.info,
                                 count,
                                 status: TermStatus::Rejected,
-                                source: "auto".into(),
+                                source: "auto:stats".into(),
                             });
                             rejected += 1;
                         }
                     }
                 }
-                // A failed chunk leaves its candidates undecided, so the next
-                // build retries them rather than recording a guess.
                 Err(e) => eprintln!("glossary: naming batch failed: {e:#}"),
             }
         }
@@ -501,6 +539,7 @@ pub fn build(
 
     let file = save(workspace, &glossary)?;
     Ok(BuildReport {
+        method: GlossaryMethod::Stats.as_str().into(),
         candidates,
         above_threshold,
         truncated,
@@ -513,6 +552,290 @@ pub fn build(
         file: file.display().to_string(),
         sample,
     })
+}
+
+fn build_llm(
+    workspace: &Path,
+    settings: &Settings,
+    meta: &crate::model::WorkspaceMeta,
+    units: &[TextUnit],
+    dry_run: bool,
+) -> Result<BuildReport> {
+    let max_terms = settings.glossary.max_terms.max(1);
+    let batches = source_batches(units, EXTRACT_BATCH_CHARS, EXTRACT_MAX_BATCHES);
+    let asked = batches.len();
+
+    let mut glossary = load(workspace);
+    glossary.source_lang = meta.source_lang.clone();
+    glossary.target_lang = meta.target_lang.clone();
+
+    let sample: Vec<String> = batches
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, b)| format!("batch{}:{}c", i + 1, b.chars().count()))
+        .collect();
+
+    if dry_run {
+        return Ok(BuildReport {
+            method: GlossaryMethod::Llm.as_str().into(),
+            candidates: 0,
+            above_threshold: 0,
+            truncated: 0,
+            asked,
+            added: 0,
+            rejected: 0,
+            total_active: glossary.active().len(),
+            min_occurrences: 0,
+            dry_run: true,
+            file: path(workspace).display().to_string(),
+            sample,
+        });
+    }
+
+    if batches.is_empty() {
+        let file = path(workspace);
+        return Ok(BuildReport {
+            method: GlossaryMethod::Llm.as_str().into(),
+            candidates: 0,
+            above_threshold: 0,
+            truncated: 0,
+            asked: 0,
+            added: 0,
+            rejected: 0,
+            total_active: glossary.active().len(),
+            min_occurrences: 0,
+            dry_run: false,
+            file: file.display().to_string(),
+            sample: vec![],
+        });
+    }
+
+    let client = crate::config::require_llm(settings)?;
+    // Aggregate votes across batches: same src may appear many times with
+    // slightly different dst/info; majority wins, ties keep first-seen order.
+    let mut dst_votes: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut info_votes: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut raw_hits = 0usize;
+
+    for (i, batch) in batches.iter().enumerate() {
+        match extract_terms_llm(client, batch, &meta.source_lang, &meta.target_lang) {
+            Ok(rows) => {
+                for row in rows {
+                    if !accept_llm_term(units, &row) {
+                        continue;
+                    }
+                    if glossary.find(&row.src).is_some() {
+                        continue; // already decided (incl. rejected)
+                    }
+                    raw_hits += 1;
+                    *dst_votes
+                        .entry(row.src.clone())
+                        .or_default()
+                        .entry(row.dst)
+                        .or_insert(0) += 1;
+                    *info_votes
+                        .entry(row.src)
+                        .or_default()
+                        .entry(row.info)
+                        .or_insert(0) += 1;
+                }
+            }
+            Err(e) => eprintln!("glossary: extract batch {}/{} failed: {e:#}", i + 1, asked),
+        }
+    }
+
+    // Rank by total dst votes (proxy for recurrence), then src for stability.
+    let mut ranked: Vec<(String, usize)> = dst_votes
+        .iter()
+        .map(|(src, votes)| (src.clone(), votes.values().sum()))
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let candidates = ranked.len();
+    let truncated = candidates.saturating_sub(max_terms);
+    if truncated > 0 {
+        eprintln!(
+            "glossary: {truncated} llm term(s) dropped by max_terms={max_terms}; raise it to keep more"
+        );
+    }
+
+    let mut added = 0usize;
+    let mut sample = Vec::new();
+    for (src, count) in ranked.into_iter().take(max_terms) {
+        let dst = winner(dst_votes.get(&src).unwrap());
+        let mut info = info_votes
+            .get(&src)
+            .map(winner)
+            .unwrap_or_else(|| "其他".into());
+        let info_l = info.to_ascii_lowercase();
+        if info_l == "other" || info_l == "others" {
+            info = "其他".into();
+        } else if !LLM_INFO_OK.iter().any(|ok| *ok == info) {
+            // Keep free-form short labels from the model; empty → 其他.
+            if info.trim().is_empty() {
+                info = "其他".into();
+            }
+        }
+        if dst.is_empty() || dst == src {
+            continue;
+        }
+        if sample.len() < 10 {
+            sample.push(format!("{src}→{dst} ({count})"));
+        }
+        glossary.upsert(GlossaryTerm {
+            src,
+            dst,
+            info,
+            count,
+            status: TermStatus::Active,
+            source: "auto:llm".into(),
+        });
+        added += 1;
+    }
+
+    let file = save(workspace, &glossary)?;
+    Ok(BuildReport {
+        method: GlossaryMethod::Llm.as_str().into(),
+        candidates,
+        above_threshold: candidates,
+        truncated,
+        asked,
+        added,
+        rejected: raw_hits.saturating_sub(added), // rough: filtered/duped/capped
+        total_active: glossary.active().len(),
+        min_occurrences: 0,
+        dry_run: false,
+        file: file.display().to_string(),
+        sample,
+    })
+}
+
+/// Pack unit lines into ~`budget` char batches, oldest units first, hard-capped.
+fn source_batches(units: &[TextUnit], budget: usize, max_batches: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for u in units {
+        for line in &u.original_lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let add = if cur.is_empty() {
+                line.to_string()
+            } else {
+                format!("\n{line}")
+            };
+            if !cur.is_empty() && cur.chars().count() + add.chars().count() > budget {
+                out.push(std::mem::take(&mut cur));
+                if out.len() >= max_batches {
+                    return out;
+                }
+            }
+            cur.push_str(&add);
+        }
+    }
+    if !cur.is_empty() && out.len() < max_batches {
+        out.push(cur);
+    }
+    out
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedTerm {
+    src: String,
+    dst: String,
+    info: String,
+}
+
+fn extract_terms_llm(
+    client: &crate::config::LlmClient,
+    batch: &str,
+    src_lang: &str,
+    dst_lang: &str,
+) -> Result<Vec<ExtractedTerm>> {
+    let system = "你是本地化术语工程师。只输出 JSON 数组，不要解释、不要 Markdown。";
+    let user = format!(
+        "下面是一部作品的 {src_lang} 原文片段。请提取**应当在全作品统一译名的专有名词**，\
+         并给出 {dst_lang} 译名。\n\n\
+         规则：\n\
+         - 术语必须是原文中的连续子字符串（子字符串原则）\n\
+         - 只截取核心名字，去掉修饰称谓（如「骑士艾琳」→「艾琳」）\n\
+         - info 必须且只能是：男性角色、女性角色、未知性别角色、地名、家族、组织、\
+           特殊物品、特殊技能、特殊生物、其他\n\
+         - 禁止：泛用词（剑/魔法/城堡）、泛用称谓职业（先生/战士/商人）、整句、变量名\n\
+         - 合并重复；同一概念只留一条\n\
+         - 若本段没有专有名词，输出 []\n\n\
+         只输出 JSON 数组：[{{\"src\":\"...\",\"dst\":\"...\",\"info\":\"...\"}}]\n\n\
+         原文：\n{batch}"
+    );
+    let v = llm::ask_json(client, system, &user)?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("expected a JSON array of terms"))?;
+    Ok(arr
+        .iter()
+        .filter_map(|item| {
+            let src = item.get("src")?.as_str()?.trim();
+            let dst = item
+                .get("dst")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim();
+            // accept type as alias for info (LinguaGacha JSONL uses type)
+            let info = item
+                .get("info")
+                .or_else(|| item.get("type"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("其他")
+                .trim();
+            if src.is_empty() || dst.is_empty() {
+                return None;
+            }
+            Some(ExtractedTerm {
+                src: src.to_string(),
+                dst: dst.to_string(),
+                info: info.to_string(),
+            })
+        })
+        .collect())
+}
+
+fn accept_llm_term(units: &[TextUnit], row: &ExtractedTerm) -> bool {
+    let src = row.src.trim();
+    let dst = row.dst.trim();
+    if src.chars().count() < 2 || dst.is_empty() {
+        return false;
+    }
+    if knowledge::is_machine_literal(src) {
+        return false;
+    }
+    // Must be a real substring of some unit (anti-hallucination).
+    if !units
+        .iter()
+        .any(|u| u.original_lines.iter().any(|l| l.contains(src)))
+    {
+        return false;
+    }
+    let info = row.info.trim();
+    if info.is_empty() {
+        return true; // will default later
+    }
+    let lower = info.to_ascii_lowercase();
+    if lower == "other" || lower == "others" {
+        return true; // normalize later via winner; still a valid bucket
+    }
+    // Soft check: unknown labels still accepted (model may use short forms);
+    // whitelist is guidance in the prompt, not a hard gate beyond empty.
+    let _ = LLM_INFO_OK;
+    true
+}
+
+fn winner(votes: &BTreeMap<String, usize>) -> String {
+    votes
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(k, _)| k.clone())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize)]
@@ -975,5 +1298,52 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(load(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_batches_respect_char_budget() {
+        let units = repeat("あいうえお", 20); // 5 chars each
+        let batches = source_batches(&units, 12, 10);
+        assert!(batches.len() > 1);
+        for b in &batches {
+            assert!(b.chars().count() <= 12 + 5, "batch too big: {b}");
+        }
+    }
+
+    #[test]
+    fn source_batches_hard_cap() {
+        let units = repeat("名前", 100);
+        let batches = source_batches(&units, 3, 5);
+        assert_eq!(batches.len(), 5);
+    }
+
+    #[test]
+    fn accept_llm_term_requires_substring() {
+        let units = repeat("アレイは剣を取った", 1);
+        assert!(accept_llm_term(
+            &units,
+            &ExtractedTerm {
+                src: "アレイ".into(),
+                dst: "艾蕾".into(),
+                info: "女性角色".into(),
+            }
+        ));
+        assert!(!accept_llm_term(
+            &units,
+            &ExtractedTerm {
+                src: "ベルナ".into(),
+                dst: "贝尔娜".into(),
+                info: "女性角色".into(),
+            }
+        ));
+    }
+
+    #[test]
+    fn glossary_method_parse() {
+        use crate::config::GlossaryMethod;
+        assert_eq!(GlossaryMethod::parse("llm"), Some(GlossaryMethod::Llm));
+        assert_eq!(GlossaryMethod::parse("STATS"), Some(GlossaryMethod::Stats));
+        assert_eq!(GlossaryMethod::parse("regex"), Some(GlossaryMethod::Stats));
+        assert_eq!(GlossaryMethod::parse("nope"), None);
     }
 }

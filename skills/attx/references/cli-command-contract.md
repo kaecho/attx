@@ -8,7 +8,7 @@ Agent 只依赖本文件 + 命令 stdout JSON。版本以当前二进制 `--help
 attx [--config <setting.toml>] [--client <名>] <子命令> ...
 ```
 
-- 配置缺省：`./setting.toml` → `$ATTX_HOME/setting.toml`
+- 配置缺省：`--config` → `$ATTX_HOME/setting.toml` → `./setting.toml`
 - `--client`：选用 setting.toml 中指定名字的 LLM client（缺省 `default_client`）
 - 成功：进程码 0，stdout 为 JSON 对象（部分命令 pretty）
 - 失败：进程码非 0，stderr 含 `error: ...`
@@ -183,28 +183,36 @@ import 按 `id` == unit.`location` 匹配；需要非空 `translation_lines` 或
 ## glossary（术语表，默认关闭）
 
 ```bash
-attx glossary build  --workspace <工作区> [--min-occurrences N] [--dry-run]
+attx glossary build  --workspace <工作区> [--method llm|stats] [--min-occurrences N] [--dry-run]
 attx glossary list   --workspace <工作区> [--all]
 attx glossary add    --workspace <工作区> --src <原文> --dst <译名> [--info <消歧描述>]
 attx glossary remove --workspace <工作区> --src <原文>
-attx glossary import --workspace <工作区> --file <g.json>
-attx glossary export --workspace <工作区> --file <g.json>
+attx glossary import --workspace <工作区> --file <json>
+attx glossary export --workspace <工作区> --file <json>
 attx glossary check  --workspace <工作区>
 ```
 
-`build` 输出字段：
+`build` 两种提取方式（`[glossary].method`，CLI `--method` 可覆盖；**默认 `llm`**）：
+
+| method | 做法 | 费用大致跟谁走 |
+|--------|------|----------------|
+| `llm` | 原文分批交给模型直接抽 `{src,dst,info}`，再投票/截断 | 文本量（批次数） |
+| `stats` | 正则挖候选 → `min_occurrences` 门槛 → 模型只给过线词起名 | 术语数 |
+
+`build` 报告字段：
 
 | 字段 | 含义 |
 |------|------|
-| `candidates` | 正则挖出的候选总数 |
-| `above_threshold` | 出现次数 ≥ `min_occurrences` 的数量 |
+| `method` | `llm` 或 `stats` |
+| `candidates` | stats：正则候选总数；llm：聚合后的唯一 src 数 |
+| `above_threshold` | stats：≥ `min_occurrences`；llm：同 candidates |
 | `truncated` | 被 `max_terms` 砍掉的数量（>0 时说明覆盖不全，需向用户报告） |
-| `asked` | 实际送给模型命名的数量 |
-| `added` / `rejected` | 模型认定为术语 / 否决的数量 |
+| `asked` | stats：送给模型命名的数量；llm：原文批次数 |
+| `added` / `rejected` | 写入 / 否决（或过滤）数量 |
 | `total_active` | 当前生效术语总数 |
-| `sample` | 前 10 个候选及其出现次数 |
+| `sample` | 样本（候选或已写入条目） |
 
-**必须先 `--dry-run`**：它不调用模型，用 `asked` 与 `sample` 向用户报告规模与预计费用，
+**必须先 `--dry-run`**：不调用模型。`llm` 看 `asked`（批次数）；`stats` 看 `asked` 与 `sample`，向用户报告规模与预计费用。
 取得同意后再真建。`build` 显式调用时不受 `[glossary].enabled` 限制。
 
 `check` 输出 `violations[]`（`src`/`dst`/`occurrences`/`applied`），按未生效次数降序。
@@ -255,8 +263,9 @@ max_context_items = 6
 
 [glossary]
 enabled = false        # 默认关闭：构建术语表有额外 LLM 费用
-min_occurrences = 10   # 出现次数低于此值不进术语表
-max_terms = 200        # 送模型命名的候选上限
+method = "llm"         # llm=模型抽术语；stats=正则挖掘+命名
+min_occurrences = 10   # 仅 stats：出现次数低于此值不进术语表
+max_terms = 200        # 保留术语上限
 inject_limit = 30      # 单批注入提示词的术语上限
 
 [learn]

@@ -94,12 +94,14 @@ pub struct GlossarySection {
     /// Explicit `attx glossary build` ignores this — asking is consent.
     #[serde(default)]
     pub enabled: bool,
-    /// A candidate must appear at least this often in the source to be worth a
-    /// glossary slot. This is the cost lever: statistics prune before the model
-    /// is ever called.
+    /// How candidates are found. `llm` (default) sends source batches to the
+    /// model; `stats` mines with regex then only asks the model to name hits.
+    #[serde(default)]
+    pub method: GlossaryMethod,
+    /// Stats method only: a candidate must appear at least this often.
     #[serde(default = "default_min_occurrences")]
     pub min_occurrences: usize,
-    /// Upper bound on candidates sent to the model, highest count first.
+    /// Cap on terms kept after extraction / naming (highest signal first).
     #[serde(default = "default_max_terms")]
     pub max_terms: usize,
     /// Upper bound on terms injected into any one translation batch.
@@ -107,10 +109,39 @@ pub struct GlossarySection {
     pub inject_limit: usize,
 }
 
+/// How `glossary build` discovers proper nouns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GlossaryMethod {
+    /// Model reads source batches and emits `{src,dst,info}` (LinguaGacha-style).
+    #[default]
+    Llm,
+    /// Regex mine → frequency gate → model names survivors (cheaper on huge works).
+    Stats,
+}
+
+impl GlossaryMethod {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "llm" => Some(Self::Llm),
+            "stats" | "stat" | "regex" => Some(Self::Stats),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Llm => "llm",
+            Self::Stats => "stats",
+        }
+    }
+}
+
 impl Default for GlossarySection {
     fn default() -> Self {
         Self {
             enabled: false,
+            method: GlossaryMethod::Llm,
             min_occurrences: default_min_occurrences(),
             max_terms: default_max_terms(),
             inject_limit: default_inject_limit(),
@@ -229,8 +260,9 @@ max_context_items = 6
 # It keeps character/place names consistent across an entire work, which
 # matters most for novels and long games.
 enabled = false
-min_occurrences = 10   # a term must appear this often to be worth a slot
-max_terms = 200        # cap on candidates sent to the model (cost control)
+method = "llm"         # llm = model extracts terms from text; stats = regex mine + name
+min_occurrences = 10   # stats only: a term must appear this often to be worth a slot
+max_terms = 200        # cap on terms kept (cost / noise control)
 inject_limit = 30      # cap on terms injected into one translation batch
 
 [learn]
@@ -273,6 +305,7 @@ clients = []
         )
         .unwrap();
         assert!(!s.glossary.enabled, "the paid feature stays off by default");
+        assert_eq!(s.glossary.method, GlossaryMethod::Llm);
         assert_eq!(s.glossary.min_occurrences, 10);
         assert_eq!(s.glossary.max_terms, 200);
         assert_eq!(s.glossary.inject_limit, 30);
@@ -294,6 +327,7 @@ enabled = true
         )
         .unwrap();
         assert!(s.glossary.enabled);
+        assert_eq!(s.glossary.method, GlossaryMethod::Llm);
         assert_eq!(s.glossary.min_occurrences, 10);
     }
 

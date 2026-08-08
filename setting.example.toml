@@ -23,8 +23,9 @@ max_context_items = 6
 # It keeps character/place names consistent across an entire work, which
 # matters most for novels and long games.
 enabled = false
-min_occurrences = 10   # a term must appear this often to be worth a slot
-max_terms = 200        # cap on candidates sent to the model (cost control)
+method = "llm"         # llm = model extracts terms; stats = regex mine + name
+min_occurrences = 10   # stats only: appearance floor before naming
+max_terms = 200        # cap on terms kept (cost / noise control)
 inject_limit = 30      # cap on terms injected into one translation batch
 
 [learn]
