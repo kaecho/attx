@@ -11,19 +11,20 @@ attx run --input book.epub --src ja --dst zh
 
 ```bash
 attx detect  --input book.epub
-attx init    --input book.epub --src ja --dst zh      # workspace .attx-book/
+attx init    --input book.epub --src ja --dst zh
 attx extract --workspace .attx-book
 attx status  --workspace .attx-book
-attx translate --workspace .attx-book --limit 20      # trial
-attx translate --workspace .attx-book                 # full; re-run resumes
+attx translate --workspace .attx-book --limit 20
+attx translate --workspace .attx-book
 attx writeback --workspace .attx-book
 ```
+
+Most formats write a **sibling copy**. Directory adapters that overwrite in place create `*.attxbak` — use `--dry-run` first.
 
 ## Offline / human review (JSONL)
 
 ```bash
 attx export-jsonl --workspace .attx-book --output pending.jsonl --filter pending
-# edit translation / translation_lines
 attx import-jsonl --workspace .attx-book --input pending.jsonl
 attx writeback --workspace .attx-book
 ```
@@ -45,8 +46,10 @@ inject_limit = 30
 ```
 
 ```bash
+attx glossary build --workspace .attx-book --dry-run
 attx glossary build --workspace .attx-book
 attx glossary list  --workspace .attx-book
+attx glossary check --workspace .attx-book
 ```
 
 ## Experience / learn
@@ -57,6 +60,16 @@ After writeback, attx can record skip/extract hints (no API cost by default):
 attx learn pending
 attx learn review --approve 1,3
 attx learn list
+attx writeback --workspace .attx --no-learn   # skip capture once
 ```
 
-Use `writeback --no-learn` to skip capture for one run.
+## CLI map
+
+| Command | Role |
+|---------|------|
+| `doctor [--ping]` | Config / LLM ping |
+| `formats` / `detect` / `analyze` | Formats |
+| `profile …` | Custom profiles |
+| `init` / `extract` / `translate` / `writeback` / `run` | Pipeline |
+| `status` / `export-jsonl` / `import-jsonl` | Progress & interchange |
+| `learn …` / `glossary …` | Experience & terms |

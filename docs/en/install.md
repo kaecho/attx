@@ -2,9 +2,7 @@
 
 ## Release binary
 
-Download the archive for your OS from [GitHub Releases](https://github.com/emptysuns/attx/releases) (tags `v*`).
-
-Unpack and put `attx` / `attx.exe` on your `PATH`.
+Download the archive for your OS from [GitHub Releases](https://github.com/emptysuns/attx/releases) (tags `v*`). Put `attx` / `attx.exe` on your `PATH`.
 
 ## From source
 
@@ -13,19 +11,20 @@ git clone https://github.com/emptysuns/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
-# optional
-cargo install --path .
+cargo install --path .   # optional
 ```
 
-Requires a recent stable Rust toolchain.
+## LLM config — two paths
 
-## LLM config
+### A. Agent Q&A (recommended)
+
+Install the Skill, then ask the agent to set up attx. It walks endpoint → key → model → languages and writes `setting.toml` without echoing the key. See [Agents](agents.md).
+
+### B. Manual
 
 ```bash
 cp setting.example.toml setting.toml
 ```
-
-Edit:
 
 ```toml
 [llm]
@@ -45,10 +44,8 @@ rpm = 60
 batch_chars = 2500
 ```
 
-`setting.toml` is gitignored. Check with:
-
 ```bash
 attx doctor --ping
 ```
 
-Config search order: `--config` → `./setting.toml` → `$ATTX_HOME/setting.toml`.
+Search order: `--config` → `./setting.toml` → `$ATTX_HOME/setting.toml`. Never commit API keys.

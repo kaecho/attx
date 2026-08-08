@@ -2,19 +2,14 @@
 
 | id | Input | Output |
 |----|-------|--------|
-| `rmmz` | game directory | in-place + `*.attxbak` |
 | `epub` | `.epub` | `<name>.<dst>.epub` |
-| `html` | `.html` `.htm` `.xhtml` | translated copy |
-| `docx` | `.docx` | `<name>.<dst>.docx` |
-| `xlsx` | `.xlsx` `.xlsm` | translated copy |
+| `html` / `docx` / `xlsx` | file | translated copy |
 | `txt` / `md` | text | `<name>.<dst>.*` |
 | `srt` / `vtt` / `ass` / `lrc` | subtitles | translated copy |
-| `csv` | `.csv` `.tsv` | translated copy |
-| `po` | `.po` `.pot` | fills `msgstr` |
-| `renpy` | `.rpy` | translated copy |
+| `csv` / `po` / `renpy` | file | translated copy |
+| `rmmz` | game directory | in-place + `*.attxbak` |
 | `mtool` / `paratranz` / `vnt` / `i18next` | `.json` (sniffed) | translated copy |
-| `jsonl` | file/dir | `translated.jsonl` |
-| `custom:<name>` | per profile | copy or in-place |
+| `jsonl` / `custom:<name>` | file/dir | escape hatch / profile |
 
 ```bash
 attx formats
@@ -24,10 +19,10 @@ attx detect --input <path>
 ## Unknown format
 
 ```bash
-attx analyze --input ./game
+attx analyze --input ./project
 attx profile new --output fmt.toml
-attx profile test --profile fmt.toml --input ./game --roundtrip
-attx init --input ./game --profile fmt.toml --src ja --dst zh
+attx profile test --profile fmt.toml --input ./project --roundtrip
+attx init --input ./project --profile fmt.toml --src ja --dst zh
 attx profile save --profile fmt.toml
 ```
 
