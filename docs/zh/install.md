@@ -1,30 +1,75 @@
 # 安装
 
-## 发行包
+## 发行版二进制
 
-从 [GitHub Releases](https://github.com/emptysuns/attx/releases) 下载对应系统压缩包，将 `attx` / `attx.exe` 加入 `PATH`。
+从 [GitHub Releases](https://github.com/emptysuns/attx/releases)（tag `v*`）下载适合你操作系统的压缩包。可用目标：Linux x86_64、Windows x86_64、macOS x86_64 + aarch64。把 `attx` / `attx.exe` 放进你的 `PATH`。
 
-## 源码
+## 从源码构建
 
 ```bash
 git clone https://github.com/emptysuns/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
+cargo install --path .   # optional
 ```
 
-## 配置 LLM：两条路
+需要较新的 stable Rust（edition 2024）。不使用 nightly 特性，不锁定 MSRV。
 
-### A. Agent 问答（推荐）
+## LLM 配置 —— 两条路径
 
-安装 Skill 后让 Agent 配置 attx。它会询问端点 → Key → 模型 → 语向，写入 `setting.toml` 且不回显 Key。见 [Agent](agents.md)。
+### A. Agent Q&A（推荐）
+
+安装 Skill，然后让 agent 配置 attx。它会依次走端点 → Key → 模型 → 语言，并写入 `setting.toml` 而不回显 Key。见 [Agent](agents.md)。
 
 ### B. 手动
 
 ```bash
 cp setting.example.toml setting.toml
-# 编辑 base_url / api_key / model
+```
+
+```toml
+[llm]
+default_client = "main"
+
+[[llm.clients]]
+name = "main"
+provider_type = "openai"          # OpenAI-compatible Chat Completions
+base_url = "https://api.example.com/v1"
+api_key = "YOUR_API_KEY"
+model = "your-model"
+timeout = 600                     # seconds, per request
+
+[translation]
+worker_count = 8       # parallel HTTP batches
+rpm = 60               # global rate limit per minute (0 = unlimited)
+retry_count = 3
+retry_delay = 2
+batch_chars = 2500     # max source chars per batch
+max_context_items = 6  # max units per batch
+```
+
+然后验证：
+
+```bash
 attx doctor --ping
 ```
 
-查找顺序：`--config` → `./setting.toml` → `$ATTX_HOME/setting.toml`。
+`doctor` 检查配置，列出内置适配器与已保存的 Profile；`--ping` 还会向 LLM 发送一次极小的请求。机器可读形式：`attx doctor --json`。
+
+### 配置查找顺序
+
+`--config <path>` → `$ATTX_HOME/setting.toml` → `./setting.toml`。
+
+- `ATTX_HOME` 也存放你保存的 Profile 与学到的经验：`$ATTX_HOME/profiles/`、`$ATTX_HOME/knowledge/`。
+- 未设置 `ATTX_HOME` 时使用平台配置目录（Linux 上为 `~/.config/attx/`）。
+- `setting.toml` 已被 gitignore —— **绝不提交 API Key**。
+- `--client <name>` 可在单次调用中切换到非默认的 `[[llm.clients]]` 条目。
+
+## 验证安装
+
+```bash
+attx formats                 # list of built-in adapters as JSON
+attx detect --input <file>   # which adapter claims your input
+attx --help
+```

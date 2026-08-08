@@ -1,8 +1,20 @@
 # attx
 
-**Agent Translation Toolkit eXtensible** — extract → translate (any OpenAI-compatible LLM) → writeback.
+**Agent Translation Toolkit eXtensible** — a pure-Rust, single-binary, format-agnostic AI translation framework for coding agents and humans.
 
-One Rust binary. Format-agnostic. SQLite workspace so you can stop and resume for free.
+```
+extract (format adapter) → translate (LLM core) → writeback (format adapter)
+```
+
+Translate games (RPG Maker MV/MZ, Ren'Py, MTool), ebooks (EPUB), documents (DOCX/XLSX/TXT/MD), subtitles (SRT/VTT/ASS/LRC), and localization files (PO, i18next, Paratranz, VNTextPatch) with **any OpenAI-compatible LLM**. Progress is cached in a SQLite workspace, so interrupted runs resume for free.
+
+## What makes it different
+
+- **Agent-first.** attx is a local CLI that speaks JSON on stdout — the native tool surface for coding agents. The Skill (`skills/attx/`) is the execution protocol: staged pipeline, hard stops, and a Q&A configuration wizard. No MCP server needed.
+- **19 built-in adapters** plus **custom format profiles** (`line_regex` / `json_keys` / `json_paths` TOML rules) for anything else.
+- **Resumable by design.** Every unit is checkpointed in `attx.db`. Re-run `translate` to continue; only pending units are sent to the model.
+- **Honest failure.** Units the model keeps failing become visible *passthrough* placeholders — the run finishes, and `--retry-passthrough` re-queues exactly those.
+- **Self-improving.** Successful runs leave extraction experience behind, reviewed by you before anything is ever deleted.
 
 ## Start with an agent (fastest)
 
@@ -22,7 +34,7 @@ The Skill runs a **Q&A wizard** (endpoint, API key, model, languages) when `sett
 ```bash
 cp setting.example.toml setting.toml   # fill base_url / api_key / model
 attx doctor --ping
-attx run --input novel.epub --src ja --dst zh
+attx run --input novel.epub --src ja --dst zh   # → novel.zh.epub
 ```
 
 ## What it covers
