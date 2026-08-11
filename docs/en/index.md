@@ -18,7 +18,7 @@ Translate games (RPG Maker MV/MZ, Ren'Py, MTool), ebooks (EPUB), documents (DOCX
 
 ## Start with an agent (fastest)
 
-1. Install the binary ([Releases](https://github.com/emptysuns/attx/releases) or `cargo build --release`)
+1. Install the binary ([Releases](https://github.com/kaecho/attx/releases) or `cargo build --release`)
 2. Install the Skill: `cp -a skills/attx ~/.claude/skills/`
 3. Tell the agent:
 

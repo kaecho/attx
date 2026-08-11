@@ -2,12 +2,12 @@
 
 ## リリースバイナリ
 
-[GitHub Releases](https://github.com/emptysuns/attx/releases)（タグ `v*`）からお使いの OS 向けアーカイブをダウンロードします。対応ターゲット：Linux x86_64、Windows x86_64、macOS x86_64 + aarch64。`attx` / `attx.exe` を `PATH` に通してください。
+[GitHub Releases](https://github.com/kaecho/attx/releases)（タグ `v*`）からお使いの OS 向けアーカイブをダウンロードします。対応ターゲット：Linux x86_64、Windows x86_64、macOS x86_64 + aarch64。`attx` / `attx.exe` を `PATH` に通してください。
 
 ## ソースからビルド
 
 ```bash
-git clone https://github.com/emptysuns/attx.git
+git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help

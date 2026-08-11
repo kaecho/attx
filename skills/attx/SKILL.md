@@ -13,7 +13,7 @@ description: >
 本 Skill 是 **翻译任务执行协议**，不是项目说明书。  
 主文件只做路由：触发边界、配置向导、阶段索引、硬停止。细节读 `references/`。
 
-仓库：https://github.com/emptysuns/attx  
+仓库：https://github.com/kaecho/attx  
 人类文档：`README.md`（英文） / `README.zh-CN.md`（中文）
 
 ---

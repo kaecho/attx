@@ -18,7 +18,7 @@ extract (format adapter) → translate (LLM core) → writeback (format adapter)
 
 ## エージェントから始める（最速）
 
-1. バイナリをインストール（[Releases](https://github.com/emptysuns/attx/releases) または `cargo build --release`）
+1. バイナリをインストール（[Releases](https://github.com/kaecho/attx/releases) または `cargo build --release`）
 2. Skill をインストール：`cp -a skills/attx ~/.claude/skills/`
 3. エージェントに指示：
 

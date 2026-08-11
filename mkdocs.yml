@@ -1,8 +1,8 @@
 site_name: attx
-site_url: https://emptysuns.github.io/attx/
+site_url: https://kaecho.github.io/attx/
 site_description: Agent Translation Toolkit eXtensible
-repo_url: https://github.com/emptysuns/attx
-repo_name: emptysuns/attx
+repo_url: https://github.com/kaecho/attx
+repo_name: kaecho/attx
 edit_uri: edit/main/docs/
 
 theme:

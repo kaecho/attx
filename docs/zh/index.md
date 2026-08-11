@@ -18,7 +18,7 @@ extract (format adapter) → translate (LLM core) → writeback (format adapter)
 
 ## 用 agent 开始（最快）
 
-1. 安装二进制（[Releases](https://github.com/emptysuns/attx/releases) 或 `cargo build --release`）
+1. 安装二进制（[Releases](https://github.com/kaecho/attx/releases) 或 `cargo build --release`）
 2. 安装 Skill：`cp -a skills/attx ~/.claude/skills/`
 3. 告诉 agent：
 

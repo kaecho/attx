@@ -1,6 +1,6 @@
 # attx
 
-**English** | [中文](README.zh-CN.md) | [Docs](https://emptysuns.github.io/attx/)
+**English** | [中文](README.zh-CN.md) | [Docs](https://kaecho.github.io/attx/)
 
 **Agent Translation Toolkit eXtensible** — a pure-Rust, single-binary, format-agnostic AI translation framework for agents and humans.
 
@@ -24,11 +24,11 @@ attx is designed so a coding agent can **read the Skill, ask you a few questions
 
 ### 1. Install the binary
 
-- **Release:** [Releases](https://github.com/emptysuns/attx/releases) (tags `v*`)
+- **Release:** [Releases](https://github.com/kaecho/attx/releases) (tags `v*`)
 - **From source:**
 
 ```bash
-git clone https://github.com/emptysuns/attx.git
+git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
@@ -361,7 +361,7 @@ Every command reports machine-readable JSON on stdout; errors go to stderr with 
 
 ## Docs
 
-Long-form guide (EN / 中文 / 日本語): **https://emptysuns.github.io/attx/**
+Long-form guide (EN / 中文 / 日本語): **https://kaecho.github.io/attx/**
 
 ---
 

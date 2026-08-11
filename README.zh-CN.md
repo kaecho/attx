@@ -1,6 +1,6 @@
 # attx
 
-**English** | [中文](README.zh-CN.md) | [Docs](https://emptysuns.github.io/attx/)
+**English** | [中文](README.zh-CN.md) | [Docs](https://kaecho.github.io/attx/)
 
 **Agent Translation Toolkit eXtensible** —— 一个纯 Rust、单二进制、格式无关的 AI 翻译框架，面向 agent 与人类用户。
 
@@ -24,11 +24,11 @@ attx 的设计目标是让编程 agent 能够**阅读 Skill、问你几个问题
 
 ### 1. 安装二进制
 
-- **发行版：** [Releases](https://github.com/emptysuns/attx/releases)（tag `v*`）
+- **发行版：** [Releases](https://github.com/kaecho/attx/releases)（tag `v*`）
 - **从源码构建：**
 
 ```bash
-git clone https://github.com/emptysuns/attx.git
+git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
@@ -361,7 +361,7 @@ text = "This format loses control codes; keep every [CTRL_n] verbatim."
 
 ## 文档
 
-长文档（EN / 中文 / 日本語）：**https://emptysuns.github.io/attx/**
+长文档（EN / 中文 / 日本語）：**https://kaecho.github.io/attx/**
 
 ---
 

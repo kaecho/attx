@@ -2,12 +2,12 @@
 
 ## Release binary
 
-Download the archive for your OS from [GitHub Releases](https://github.com/emptysuns/attx/releases) (tags `v*`). Available targets: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64. Put `attx` / `attx.exe` on your `PATH`.
+Download the archive for your OS from [GitHub Releases](https://github.com/kaecho/attx/releases) (tags `v*`). Available targets: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64. Put `attx` / `attx.exe` on your `PATH`.
 
 ## From source
 
 ```bash
-git clone https://github.com/emptysuns/attx.git
+git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help

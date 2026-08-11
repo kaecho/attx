@@ -2,12 +2,12 @@
 
 ## 发行版二进制
 
-从 [GitHub Releases](https://github.com/emptysuns/attx/releases)（tag `v*`）下载适合你操作系统的压缩包。可用目标：Linux x86_64、Windows x86_64、macOS x86_64 + aarch64。把 `attx` / `attx.exe` 放进你的 `PATH`。
+从 [GitHub Releases](https://github.com/kaecho/attx/releases)（tag `v*`）下载适合你操作系统的压缩包。可用目标：Linux x86_64、Windows x86_64、macOS x86_64 + aarch64。把 `attx` / `attx.exe` 放进你的 `PATH`。
 
 ## 从源码构建
 
 ```bash
-git clone https://github.com/emptysuns/attx.git
+git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
