@@ -21,7 +21,7 @@
 use crate::config::{LlmClient, Settings};
 use crate::knowledge::{self, Entry, FieldEntry, NoteEntry, Scope, Status, Verdict};
 use crate::model::{TextUnit, Translation, mask_controls};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -370,7 +370,11 @@ fn review_with_llm(client: &LlmClient, candidates: &mut [Candidate]) {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        match ask_json(client, &prompt) {
+        match crate::llm::ask_json(
+            client,
+            "你是本地化工程助手。只输出 JSON，不要解释。",
+            &prompt,
+        ) {
             Ok(v) => {
                 let is_id = v
                     .get("identifier")
@@ -393,34 +397,6 @@ fn review_with_llm(client: &LlmClient, candidates: &mut [Candidate]) {
     }
 }
 
-fn ask_json(client: &LlmClient, prompt: &str) -> Result<serde_json::Value> {
-    let http = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(client.timeout.max(30)))
-        .build()?;
-    let url = format!("{}/chat/completions", client.base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": client.model,
-        "temperature": 0.0,
-        "messages": [
-            {"role": "system", "content": "你是本地化工程助手。只输出 JSON，不要解释。"},
-            {"role": "user", "content": prompt}
-        ]
-    });
-    let resp = http
-        .post(&url)
-        .bearer_auth(&client.api_key)
-        .json(&body)
-        .send()
-        .with_context(|| format!("POST {url}"))?;
-    let text = resp.text()?;
-    let parsed: serde_json::Value = serde_json::from_str(&text).context("decode chat")?;
-    let content = parsed["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("no content"))?;
-    let start = content.find('{').unwrap_or(0);
-    let end = content.rfind('}').map(|i| i + 1).unwrap_or(content.len());
-    serde_json::from_str(&content[start..end]).context("parse review json")
-}
 
 /// One pending entry, addressed by the same 1-based index `review` accepts.
 pub struct PendingItem {

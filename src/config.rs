@@ -29,6 +29,22 @@ pub struct LlmClient {
     pub model: String,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Omit to keep call-site defaults (translate 0.3, ask_json 0.0).
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// OpenAI o-series / Grok-style effort. Omit = not sent.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Omit = not sent. Newer OpenAI models want `max_completion_tokens` in `extra`.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// When true, request `stream: true` and parse SSE `delta.content` chunks.
+    #[serde(default)]
+    pub stream: bool,
+    /// Merged last into the chat/completions JSON. Adds or overrides keys.
+    /// `messages` is ignored so the prompt cannot be replaced.
+    #[serde(default)]
+    pub extra: toml::Table,
 }
 
 fn default_provider() -> String {
@@ -246,6 +262,11 @@ base_url = "https://api.example.com/v1"
 api_key = "YOUR_API_KEY"
 model = "example-model"
 timeout = 600
+# temperature = 0.3            # omit: translate 0.3, glossary/learn JSON 0.0
+# reasoning_effort = "medium"  # omit: not sent
+# max_tokens = 8192            # omit: not sent
+# stream = true                # omit: false; SSE delta.content
+# extra = { top_p = 0.9 }      # merged last; cannot replace messages
 
 [translation]
 worker_count = 8
@@ -336,5 +357,53 @@ enabled = true
         let s: Settings = toml::from_str(example_toml()).expect("example_toml must be valid");
         assert!(!s.glossary.enabled);
         assert!(s.learn.auto_summarize);
+    }
+
+    #[test]
+    fn client_optional_fields_default_absent() {
+        let s: Settings = toml::from_str(
+            r#"
+[llm]
+default_client = "main"
+[[llm.clients]]
+name = "main"
+base_url = "http://x"
+api_key = "k"
+model = "m"
+"#,
+        )
+        .unwrap();
+        let c = &s.llm.clients[0];
+        assert!(c.temperature.is_none());
+        assert!(c.reasoning_effort.is_none());
+        assert!(c.max_tokens.is_none());
+        assert!(!c.stream);
+        assert!(c.extra.is_empty());
+    }
+
+    #[test]
+    fn client_named_fields_and_extra_parse() {
+        let s: Settings = toml::from_str(
+            r#"
+[llm]
+default_client = "main"
+[[llm.clients]]
+name = "main"
+base_url = "http://x"
+api_key = "k"
+model = "m"
+temperature = 0.2
+reasoning_effort = "high"
+max_tokens = 4096
+extra = { top_p = 0.8, max_completion_tokens = 2048 }
+"#,
+        )
+        .unwrap();
+        let c = &s.llm.clients[0];
+        assert_eq!(c.temperature, Some(0.2));
+        assert_eq!(c.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(c.max_tokens, Some(4096));
+        assert_eq!(c.extra["top_p"].as_float(), Some(0.8));
+        assert_eq!(c.extra["max_completion_tokens"].as_integer(), Some(2048));
     }
 }

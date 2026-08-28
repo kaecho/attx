@@ -122,6 +122,11 @@ base_url = "https://your-provider.example/v1"
 api_key = "YOUR_API_KEY"
 model = "your-model-name"
 timeout = 600                     # seconds
+# temperature = 0.3               # omit: translate 0.3, JSON helpers 0.0
+# reasoning_effort = "medium"     # omit: not sent
+# max_tokens = 8192               # omit: not sent
+# stream = true                   # omit: false; SSE delta.content
+# extra = { top_p = 0.9 }         # merged last; cannot replace messages
 
 [translation]
 worker_count = 8       # parallel HTTP batches

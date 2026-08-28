@@ -39,6 +39,11 @@ base_url = "https://api.example.com/v1"
 api_key = "YOUR_API_KEY"
 model = "your-model"
 timeout = 600                     # 秒、リクエストごと
+# temperature = 0.3               # 省略時: 翻訳 0.3、JSON ヘルパー 0.0
+# reasoning_effort = "medium"     # 省略時は送らない
+# max_tokens = 8192               # 省略時は送らない
+# stream = true                   # 省略時は false。SSE delta.content を連結
+# extra = { top_p = 0.9 }         # 最後にマージ。messages は上書き不可
 
 [translation]
 worker_count = 8       # 並列 HTTP バッチ数

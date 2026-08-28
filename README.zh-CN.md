@@ -122,6 +122,11 @@ base_url = "https://your-provider.example/v1"
 api_key = "YOUR_API_KEY"
 model = "your-model-name"
 timeout = 600                     # seconds
+# temperature = 0.3               # 省略则翻译 0.3，glossary/learn JSON 0.0
+# reasoning_effort = "medium"     # 省略则不发送
+# max_tokens = 8192               # 省略则不发送
+# stream = true                   # 省略则 false；按 SSE delta.content 拼接
+# extra = { top_p = 0.9 }         # 最后合并进请求体；不能替换 messages
 
 [translation]
 worker_count = 8       # parallel HTTP batches

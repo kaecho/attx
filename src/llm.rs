@@ -9,13 +9,6 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    temperature: f32,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ChatMessage {
     role: String,
@@ -551,20 +544,7 @@ impl Translator {
             "{}/chat/completions",
             self.client.base_url.trim_end_matches('/')
         );
-        let req = ChatRequest {
-            model: self.client.model.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: Some(system.into()),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: Some(user.into()),
-                },
-            ],
-            temperature: 0.3,
-        };
+        let req = chat_body(&self.client, system, user, 0.3);
         if let Some(rate) = &self.rate {
             rate.wait();
         }
@@ -575,29 +555,7 @@ impl Translator {
             .json(&req)
             .send()
             .with_context(|| format!("POST {url}"))?;
-        let status = resp.status();
-        let text = resp.text()?;
-        if !status.is_success() {
-            bail!("LLM HTTP {status}: {}", truncate(&text, 500));
-        }
-        let parsed: ChatResponse = serde_json::from_str(&text)
-            .with_context(|| format!("decode chat: {}", truncate(&text, 300)))?;
-        let choice = parsed
-            .choices
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("empty choices"))?;
-        let content = choice
-            .message
-            .content
-            .clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "empty content finish={:?}",
-                    choice.finish_reason.as_deref().unwrap_or("?")
-                )
-            })?;
-        Ok(content)
+        read_chat_text(resp, wants_stream(&req))
     }
 
     pub fn ping(&self) -> Result<String> {
@@ -672,6 +630,124 @@ fn truncate(s: &str, n: usize) -> String {
     t
 }
 
+/// `temperature` is the call-site default (translate 0.3, ask_json 0.0).
+/// Client named fields overlay it; `extra` merges last. `messages` in extra
+/// is ignored. `stream` is sent only when true.
+fn chat_body(client: &LlmClient, system: &str, user: &str, temperature: f64) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": client.model,
+        "temperature": client.temperature.unwrap_or(temperature),
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ]
+    });
+    if let Some(effort) = client
+        .reasoning_effort
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        body["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+    }
+    if let Some(max_tokens) = client.max_tokens {
+        body["max_tokens"] = serde_json::json!(max_tokens);
+    }
+    if client.stream {
+        body["stream"] = serde_json::json!(true);
+    }
+    apply_extra(&mut body, &client.extra);
+    if body.get("stream").and_then(|v| v.as_bool()) != Some(true) {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("stream");
+        }
+    }
+    body
+}
+
+fn apply_extra(body: &mut serde_json::Value, extra: &toml::Table) {
+    if extra.is_empty() {
+        return;
+    }
+    let Ok(serde_json::Value::Object(map)) = serde_json::to_value(extra) else {
+        return;
+    };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    for (k, v) in map {
+        if k == "messages" {
+            continue;
+        }
+        obj.insert(k, v);
+    }
+}
+
+fn wants_stream(body: &serde_json::Value) -> bool {
+    body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn read_chat_text(resp: reqwest::blocking::Response, stream: bool) -> Result<String> {
+    let status = resp.status();
+    let text = resp.text()?;
+    if !status.is_success() {
+        bail!("LLM HTTP {status}: {}", truncate(&text, 500));
+    }
+    decode_chat_content(&text, stream)
+}
+
+fn decode_chat_content(text: &str, stream: bool) -> Result<String> {
+    // Some gateways ignore stream=true and still return a JSON object.
+    if stream && !text.trim_start().starts_with('{') {
+        content_from_sse(text)
+    } else {
+        content_from_json(text)
+    }
+}
+
+fn content_from_json(text: &str) -> Result<String> {
+    let parsed: ChatResponse = serde_json::from_str(text)
+        .with_context(|| format!("decode chat: {}", truncate(text, 300)))?;
+    let choice = parsed
+        .choices
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("empty choices"))?;
+    choice
+        .message
+        .content
+        .clone()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "empty content finish={:?}",
+                choice.finish_reason.as_deref().unwrap_or("?")
+            )
+        })
+}
+
+fn content_from_sse(text: &str) -> Result<String> {
+    let mut out = String::new();
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if let Some(s) = v["choices"][0]["delta"]["content"].as_str() {
+            out.push_str(s);
+        }
+    }
+    if out.is_empty() {
+        bail!("empty SSE content: {}", truncate(text, 300));
+    }
+    Ok(out)
+}
+
+
 /// One-shot JSON request outside the translation pipeline (learning, glossary).
 ///
 /// Kept here rather than duplicated per caller so there is one place that knows
@@ -682,31 +758,16 @@ pub fn ask_json(client: &LlmClient, system: &str, user: &str) -> Result<serde_js
         .timeout(Duration::from_secs(client.timeout.max(30)))
         .build()?;
     let url = format!("{}/chat/completions", client.base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": client.model,
-        "temperature": 0.0,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ]
-    });
+    let body = chat_body(client, system, user, 0.0);
     let resp = http
         .post(&url)
         .bearer_auth(&client.api_key)
         .json(&body)
         .send()
         .with_context(|| format!("POST {url}"))?;
-    let status = resp.status();
-    let text = resp.text()?;
-    if !status.is_success() {
-        bail!("LLM HTTP {status}: {}", truncate(&text, 500));
-    }
-    let parsed: serde_json::Value = serde_json::from_str(&text).context("decode chat")?;
-    let content = parsed["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("no content in chat response"))?;
-    let slice = extract_json_span(content)
-        .ok_or_else(|| anyhow::anyhow!("no JSON in response: {}", truncate(content, 200)))?;
+    let content = read_chat_text(resp, wants_stream(&body))?;
+    let slice = extract_json_span(&content)
+        .ok_or_else(|| anyhow::anyhow!("no JSON in response: {}", truncate(&content, 200)))?;
     serde_json::from_str(slice).with_context(|| format!("parse json: {}", truncate(slice, 300)))
 }
 
@@ -748,5 +809,90 @@ mod tests {
     fn json_span_prefers_whichever_bracket_opens_first() {
         // An object holding an array must not be truncated at the array's `]`.
         assert_eq!(extract_json_span("{\"xs\":[1,2]}"), Some("{\"xs\":[1,2]}"));
+    }
+
+    fn client() -> LlmClient {
+        LlmClient {
+            name: "t".into(),
+            provider_type: "openai".into(),
+            base_url: "http://x".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            timeout: 30,
+            temperature: None,
+            reasoning_effort: None,
+            max_tokens: None,
+            stream: false,
+            extra: toml::Table::new(),
+        }
+    }
+
+    #[test]
+    fn chat_body_omits_optional_keys_by_default() {
+        let v = chat_body(&client(), "s", "u", 0.3);
+        assert_eq!(v["model"], "m");
+        assert_eq!(v["temperature"], 0.3);
+        assert!(v.get("reasoning_effort").is_none());
+        assert!(v.get("max_tokens").is_none());
+        assert!(v.get("stream").is_none());
+        assert_eq!(v["messages"][0]["content"], "s");
+    }
+
+    #[test]
+    fn named_fields_then_extra_overrides_and_adds() {
+        let mut c = client();
+        c.temperature = Some(0.1);
+        c.reasoning_effort = Some("low".into());
+        c.max_tokens = Some(100);
+        c.extra = toml::from_str(
+            r#"
+temperature = 0.9
+top_p = 0.5
+stream = true
+messages = []
+"#,
+        )
+        .unwrap();
+        let v = chat_body(&c, "s", "u", 0.3);
+        assert_eq!(v["temperature"], 0.9);
+        assert_eq!(v["reasoning_effort"], "low");
+        assert_eq!(v["max_tokens"], 100);
+        assert_eq!(v["top_p"], 0.5);
+        assert_eq!(v["stream"], true);
+        assert_eq!(v["messages"][0]["role"], "system");
+        assert_eq!(v["messages"].as_array().map(|a| a.len()), Some(2));
+    }
+
+    #[test]
+    fn empty_reasoning_effort_is_not_sent() {
+        let mut c = client();
+        c.reasoning_effort = Some(String::new());
+        let v = chat_body(&c, "s", "u", 0.0);
+        assert!(v.get("reasoning_effort").is_none());
+        assert_eq!(v["temperature"], 0.0);
+    }
+
+    #[test]
+    fn named_stream_is_sent() {
+        let mut c = client();
+        c.stream = true;
+        let v = chat_body(&c, "s", "u", 0.3);
+        assert_eq!(v["stream"], true);
+    }
+
+    #[test]
+    fn sse_concatenates_delta_content() {
+        let raw = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: [DONE]\n",
+        );
+        assert_eq!(decode_chat_content(raw, true).unwrap(), "hello");
+    }
+    #[test]
+    fn stream_flag_still_accepts_json_object() {
+        let raw = r#"{"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
+        assert_eq!(decode_chat_content(raw, true).unwrap(), "hi");
     }
 }
