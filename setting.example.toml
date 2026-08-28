@@ -1,38 +1,102 @@
-# attx setting.toml
+# attx 配置文件（setting.toml）
+#
+# 用法：
+#   1. 复制本文件为 setting.toml（`cp setting.example.toml setting.toml`）
+#   2. 填入真实的 base_url / api_key / model
+#   3. `attx doctor --ping` 验证配置与 LLM 连通性
+#
+# 配置文件查找顺序（resolve_config_path）：
+#   1. `--config <path>` 显式指定
+#   2. `$ATTX_HOME/setting.toml`（仅当该文件存在）
+#   3. 当前目录 `./setting.toml`（不存在也返回，非 LLM 命令可无配置运行）
+# 删除 [llm] 之外的整个小节是安全的：缺失小节自动回退默认值（见下方各键）。
+
+# ---------------------------------------------------------------------------
+# [llm]  LLM 服务配置
+# ---------------------------------------------------------------------------
 [llm]
+# 默认使用的客户端名，对应下方 [[llm.clients]] 里的 name。
+# 可用 `--client <name>` 在命令行临时切换。
 default_client = "main"
 
+# 可配置多个客户端（复制整个 [[llm.clients]] 块即可），按 name 区分。
 [[llm.clients]]
 name = "main"
+# 供应商类型。目前仅作记录，未参与请求构造：
+# 所有客户端统一请求 {base_url}/chat/completions（OpenAI 兼容协议）。
 provider_type = "openai"
+# API 地址，末尾不要带 /chat/completions，程序会自行拼接。
 base_url = "https://api.example.com/v1"
+# API 密钥。仅保存在本文件，不写入工作区数据库。
 api_key = "YOUR_API_KEY"
+# 模型名，按供应商实际可用模型填写（如 gpt-4o、deepseek-chat、qwen-max 等）。
 model = "example-model"
+# 单次 HTTP 请求超时（秒）。实际生效值 = max(本值, 30)。
+# 长文本大批次时模型响应慢，默认 600 秒足够；小模型可调小以快速失败。
 timeout = 600
-# temperature = 0.3            # omit: translate 0.3, glossary/learn JSON 0.0
-# reasoning_effort = "medium"  # omit: not sent
-# max_tokens = 8192            # omit: not sent
-# stream = true                # omit: false; SSE delta.content
-# extra = { top_p = 0.9 }      # merged last; cannot replace messages
+# 以下均为可选项，默认省略时不发送对应字段：
+# temperature = 0.3            # 省略时：翻译用 0.3，术语/学习等 JSON 请求用 0.0
+# reasoning_effort = "medium"  # OpenAI o 系列 / Grok 风格的思考档位；省略则不发送
+# max_tokens = 8192            # 输出上限；省略则不发送（新 OpenAI 模型请在 extra 里用 max_completion_tokens）
+# stream = true                # 流式输出；省略为 false。开启后解析 SSE 的 delta.content 增量拼接
+# extra = { top_p = 0.9 }      # 额外字段，最后合并进 chat/completions 请求体，可新增或覆盖任意键
+                              # （唯一例外：messages 会被忽略，防止覆盖提示词本身）
 
+# ---------------------------------------------------------------------------
+# [translation]  翻译管线参数
+# ---------------------------------------------------------------------------
 [translation]
+# 并发工作线程数。每个线程独立发 HTTP 请求，实际吞吐还受 rpm 限制。
+# 大语言模型服务通常按并发限流，8 是经验值；遇到 429 可调小。
 worker_count = 8
-rpm = 60          # global request rate limit per minute (0 = unlimited)
+# 全局速率限制：每分钟最多请求次数（跨线程共享计数）。0 = 不限速。
+rpm = 60          # 按供应商免费额度/付费档位调整；慢模型可以调低避免积压
+# 批次失败后的重试次数（重试之间 sleep retry_delay 秒）。
+# 重试耗尽后仍失败：批次减半拆分 → 单条重试 → 仍失败则原文透传（passthrough），
+# 不会中断整个翻译任务。
 retry_count = 3
+# 每次重试前的等待秒数。
 retry_delay = 2
+# 单个 HTTP 批次的最大源字符数。达到任一上限即切分新批次。
+# 注意：这是"每批多少原文"的预算，不是模型上下文窗口。
 batch_chars = 2500
+# 单个批次的最大条数（与 batch_chars 同时生效，先到先切）。
+# 批量请求中每条带独立编号，模型按编号返回，超出的编号会被丢弃并重试。
 max_context_items = 6
 
+# ---------------------------------------------------------------------------
+# [glossary]  术语表（专有名词统一译名）
+# ---------------------------------------------------------------------------
+# 作用：保证整部作品里同一人名/地名译法一致（长篇小说、RPG 尤甚）。
+# 默认关闭：构建术语表会额外消耗 LLM 调用，未经要求不应产生费用。
+# `attx run` 仅在 enabled = true 或显式传 --glossary（且未传 --no-glossary）时构建；
+# 显式执行 `attx glossary build` 则无视本开关，执行即视为同意。
 [glossary]
-# Off by default: building a glossary spends extra LLM calls.
-# It keeps character/place names consistent across an entire work, which
-# matters most for novels and long games.
 enabled = false
-method = "llm"         # llm = model extracts terms; stats = regex mine + name
-min_occurrences = 10   # stats only: appearance floor before naming
-max_terms = 200        # cap on terms kept (cost / noise control)
-inject_limit = 30      # cap on terms injected into one translation batch
+# 提取方法：
+#   "llm"   （默认）原文分批直接交给模型，让它提取专有名词并给出译名（{src,dst,info}）。
+#           能识别正则看不到的专有名词，花费与文本量成正比。
+#   "stats" 先用正则挖掘候选（日文：片假名串/汉字串；英文：大写词），
+#           达到 min_occurrences 门槛后再让模型命名（keep 否决），花费与术语数量成正比。
+# 解析时 "stat"/"regex" 也视为 "stats"。
+method = "llm"
+# 仅 stats 方法：候选出现次数达到该值才值得占用术语表名额。
+min_occurrences = 10
+# 保留术语数量上限（按出现次数/票数从高到低截断）。
+# 超出的候选会被丢弃并在日志中报告；调大本值或调高 min_occurrences 可扩大覆盖。
+max_terms = 200
+# 单个翻译批次最多注入的术语条数。
+# 注入前会先过滤：只注入本批原文中实际出现的术语（子串匹配），
+# 避免几百条术语挤占正文的上下文空间。
+inject_limit = 30
 
+# ---------------------------------------------------------------------------
+# [learn]  经验学习（跨运行沉淀翻译风格/规则）
+# ---------------------------------------------------------------------------
 [learn]
-auto_summarize = true  # capture experience after writeback (no API cost)
-llm_review = false     # also ask the model to check proposals (costs money)
+# 每次成功 writeback 后自动总结为经验条目（experience.toml）。
+# 默认开启且不花钱：证据（原文+译文）已存在工作区数据库里，总结不调 LLM。
+auto_summarize = true
+# 额外让模型审查待入库的经验条目（增加一次 LLM 调用，花钱）。
+# 默认关闭；需要更严格的积累质量时再开。
+llm_review = false
