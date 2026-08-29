@@ -2,16 +2,20 @@
 //!
 //! Turns what already happened in a workspace into *entries*: field-level
 //! judgements plus free-form notes, each carrying the evidence that produced
-//! it. This runs automatically after a successful writeback, so experience
-//! accumulates without anyone remembering to ask for it.
+//! it. This runs automatically after a successful writeback, so extraction
+//! experience accumulates without anyone remembering to ask for it.
 //!
-//! Two evidence sources:
-//! * objective signals, free, straight out of the workspace DB (see `summarize`)
+//! Two evidence sources for `summarize`:
+//! * objective signals, free, straight out of the workspace DB
 //! * optional LLM review that turns weak statistics into a reasoned entry
 //!
 //! Statistics are aggregated **per field name**, never per unit. One passthrough
 //! is noise; eight of eight passthroughs under the same field name is a signal
 //! that the field is not text at all.
+//!
+//! Translation style is not in those signals. An agent (or human) writes
+//! `topic = "prompt"` notes via `attx learn note`; those reach the next
+//! translate call. Auto-summarize never invents them.
 //!
 //! The approval asymmetry lives here: an entry that would *delete* text is
 //! written `pending` and does nothing until a human approves it, while notes
@@ -22,7 +26,7 @@ use crate::config::{LlmClient, Settings};
 use crate::knowledge::{self, Entry, FieldEntry, NoteEntry, Scope, Status, Verdict};
 use crate::model::{TextUnit, Translation};
 use crate::preserve;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -40,6 +44,18 @@ const CTRL_LOSS_RATIO: f64 = 0.2;
 
 /// Provenance marker for everything this module writes.
 pub const SOURCE_AUTO: &str = "learn:auto";
+/// Provenance marker for notes written through `attx learn note`.
+pub const SOURCE_AGENT: &str = "learn:agent";
+
+pub fn agent_source(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        SOURCE_AGENT.to_string()
+    } else {
+        format!("{SOURCE_AGENT}:{name}")
+    }
+}
+
 
 /// Per-field tallies collected from one workspace.
 #[derive(Debug, Default, Clone)]
@@ -512,6 +528,133 @@ pub fn forget(field: &str, format: Option<&str>) -> Result<usize> {
     Ok(n)
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteReport {
+    pub format: String,
+    pub topic: String,
+    pub name: String,
+    pub source: String,
+    pub text: String,
+    pub file: String,
+    pub layer: &'static str,
+    pub reaches_prompt: bool,
+}
+
+/// Write a free-form note. `topic = "prompt"` is injected into the next
+/// translate call; any other topic is stored for humans and agents to read.
+///
+/// `--workspace` writes `<workspace>/experience.toml` (this work). `--format`
+/// without a workspace writes the global knowledge file. Same `--name` replaces
+/// the previous note; different names stack. Auto-summarize never touches
+/// these: they are keyed by `(topic, source)` and `source` is `learn:agent`.
+pub fn add_note(
+    text: &str,
+    topic: &str,
+    name: &str,
+    format: Option<&str>,
+    workspace: Option<&Path>,
+) -> Result<NoteReport> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("--text is empty");
+    }
+    let topic = topic.trim();
+    let topic = if topic.is_empty() { "prompt" } else { topic };
+    let name = name.trim();
+
+    let format_owned = match (format, workspace) {
+        (Some(f), _) => f.to_string(),
+        (None, Some(ws)) => crate::store::workspace_db(ws)?.meta()?.engine,
+        (None, None) => {
+            bail!("pass --workspace (this work) or --format (all works of this format)")
+        }
+    };
+
+    let source = agent_source(name);
+    let mut note = NoteEntry::new(topic, text);
+    note.source = source.clone();
+    note.updated_at = unix_now();
+
+    let (path, layer) = if let Some(ws) = workspace {
+        let mut file = knowledge::load_workspace_file(ws, &format_owned)?;
+        if !file.format.is_empty() && file.format != format_owned {
+            bail!(
+                "workspace experience is for `{}`, not `{format_owned}`",
+                file.format
+            );
+        }
+        file.format = format_owned.clone();
+        file.upsert(Entry::Note(note));
+        (knowledge::save_workspace_file(ws, &file)?, "workspace")
+    } else {
+        let mut file = knowledge::load_file(&format_owned);
+        if file.format.is_empty() {
+            file.format = format_owned.clone();
+        }
+        file.upsert(Entry::Note(note));
+        (knowledge::save_file(&file)?, "global")
+    };
+
+    Ok(NoteReport {
+        format: format_owned,
+        topic: topic.to_string(),
+        name: name.to_string(),
+        source,
+        text: text.to_string(),
+        file: path.display().to_string(),
+        layer,
+        reaches_prompt: topic == "prompt",
+    })
+}
+
+fn note_source_matches(source: &str, name: &str) -> bool {
+    source == agent_source(name) || source == name.trim()
+}
+
+/// Drop notes written by `learn note`, keyed by `--name`.
+pub fn forget_note(
+    name: &str,
+    format: Option<&str>,
+    workspace: Option<&Path>,
+) -> Result<usize> {
+    let keep = |e: &Entry| match e {
+        Entry::Note(n) => !note_source_matches(&n.source, name),
+        _ => true,
+    };
+    if let Some(ws) = workspace {
+        let mut file = knowledge::load_workspace_file(ws, format.unwrap_or(""))?;
+        if let Some(f) = format
+            && !file.format.is_empty()
+            && file.format != f
+        {
+            return Ok(0);
+        }
+        let before = file.entries.len();
+        file.entries.retain(keep);
+        let n = before - file.entries.len();
+        if n > 0 {
+            knowledge::save_workspace_file(ws, &file)?;
+        }
+        return Ok(n);
+    }
+    let mut n = 0;
+    for mut file in knowledge::all_files() {
+        if let Some(f) = format
+            && file.format != f
+        {
+            continue;
+        }
+        let before = file.entries.len();
+        file.entries.retain(keep);
+        if file.entries.len() != before {
+            n += before - file.entries.len();
+            knowledge::save_file(&file)?;
+        }
+    }
+    Ok(n)
+}
+
+
 fn truncate(s: &str, n: usize) -> String {
     let one_line = s.replace('\n', " ");
     let mut t: String = one_line.chars().take(n).collect();
@@ -780,5 +923,107 @@ mod tests {
             kept, 1,
             "automatic summaries must not eat hand-written notes"
         );
+    }
+
+    fn note_ws(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "attx-learn-note-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn empty_text_is_rejected() {
+        let err = add_note("  ", "prompt", "x", Some("epub"), None).unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn workspace_prompt_note_reaches_translate() {
+        let ws = note_ws("prompt");
+        add_note(
+            "角色名后的さん/くん保留不译",
+            "prompt",
+            "honorifics",
+            Some("epub"),
+            Some(&ws),
+        )
+        .unwrap();
+        let exp = knowledge::load_experience("epub", Some(&ws));
+        assert_eq!(
+            exp.prompt_notes(),
+            vec!["角色名后的さん/くん保留不译".to_string()]
+        );
+    }
+
+    #[test]
+    fn same_name_replaces_different_names_stack() {
+        let ws = note_ws("stack");
+        add_note("first", "prompt", "voice", Some("txt"), Some(&ws)).unwrap();
+        add_note("second", "prompt", "voice", Some("txt"), Some(&ws)).unwrap();
+        add_note("honorifics stay", "prompt", "honorifics", Some("txt"), Some(&ws))
+            .unwrap();
+        let exp = knowledge::load_experience("txt", Some(&ws));
+        let mut notes = exp.prompt_notes();
+        notes.sort();
+        assert_eq!(
+            notes,
+            vec![
+                "honorifics stay".to_string(),
+                "second".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_prompt_topic_is_stored_but_not_injected() {
+        let ws = note_ws("extraction");
+        let r = add_note(
+            "plugins.js 的 key 是成就 id",
+            "extraction",
+            "keys",
+            Some("rmmz"),
+            Some(&ws),
+        )
+        .unwrap();
+        assert!(!r.reaches_prompt);
+        let exp = knowledge::load_experience("rmmz", Some(&ws));
+        assert!(exp.prompt_notes().is_empty());
+    }
+
+    #[test]
+    fn auto_summarize_does_not_eat_agent_prompt_notes() {
+        let ws = note_ws("keep-agent");
+        add_note("keep さん", "prompt", "honorifics", Some("rmmz"), Some(&ws)).unwrap();
+        let mut file = knowledge::load_workspace_file(&ws, "rmmz").unwrap();
+        for n in notes_for("rmmz", &RunStats::default(), "0") {
+            file.upsert(n);
+        }
+        knowledge::save_workspace_file(&ws, &file).unwrap();
+        let exp = knowledge::load_experience("rmmz", Some(&ws));
+        assert!(
+            exp.prompt_notes().iter().any(|t| t == "keep さん"),
+            "learn:auto notes must not replace learn:agent notes"
+        );
+    }
+
+    #[test]
+    fn forget_note_drops_by_name() {
+        let ws = note_ws("forget");
+        add_note("keep さん", "prompt", "honorifics", Some("txt"), Some(&ws)).unwrap();
+        add_note("soft voice", "prompt", "voice", Some("txt"), Some(&ws)).unwrap();
+        let n = forget_note("honorifics", Some("txt"), Some(&ws)).unwrap();
+        assert_eq!(n, 1);
+        let exp = knowledge::load_experience("txt", Some(&ws));
+        assert_eq!(exp.prompt_notes(), vec!["soft voice".to_string()]);
+    }
+
+    #[test]
+    fn destination_requires_workspace_or_format() {
+        let err = add_note("x", "prompt", "n", None, None).unwrap_err();
+        assert!(err.to_string().contains("--workspace"));
     }
 }

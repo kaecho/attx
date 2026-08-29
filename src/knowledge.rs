@@ -565,6 +565,44 @@ pub fn save_file(f: &ExperienceFile) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn workspace_file_path(workspace: &Path) -> PathBuf {
+    workspace.join(WORKSPACE_EXPERIENCE)
+}
+
+/// Load `<workspace>/experience.toml`. Missing file → empty set with `format`
+/// filled in. Malformed file is an error: writers must not clobber a broken
+/// file the way extract degrades to "no learning".
+pub fn load_workspace_file(workspace: &Path, format: &str) -> Result<ExperienceFile> {
+    let p = workspace_file_path(workspace);
+    if !p.is_file() {
+        return Ok(ExperienceFile::new(format));
+    }
+    let raw = std::fs::read_to_string(&p)
+        .with_context(|| format!("read {}", p.display()))?;
+    let mut f = parse_file(&raw).with_context(|| format!("parse {}", p.display()))?;
+    if f.format.is_empty() {
+        f.format = format.to_string();
+    }
+    Ok(f)
+}
+
+pub fn save_workspace_file(workspace: &Path, f: &ExperienceFile) -> Result<PathBuf> {
+    std::fs::create_dir_all(workspace)
+        .with_context(|| format!("create workspace {}", workspace.display()))?;
+    let path = workspace_file_path(workspace);
+    let body = serialize_file(f)?;
+    let header = format!(
+        "# attx experience for this workspace (format `{}`).\n\
+         # Overrides the global knowledge file for this work only.\n\
+         # `topic = \"prompt\"` notes are injected into the next translate call.\n\
+         # Edit or delete freely; `attx extract --no-knowledge` ignores this file.\n",
+        f.format
+    );
+    std::fs::write(&path, format!("{header}{body}"))
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
 /// All formats that currently have a global experience file.
 pub fn all_files() -> Vec<ExperienceFile> {
     let mut seen: BTreeMap<String, ExperienceFile> = BTreeMap::new();

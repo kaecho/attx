@@ -302,17 +302,21 @@ Adapters decide what to extract with hardcoded heuristics, and those tables are 
 attx keeps that judgement as data, and captures it **automatically**: every successful `writeback` summarises the run into experience entries at zero API cost, because the evidence is already sitting in the workspace DB.
 
 ```bash
-attx writeback --workspace .attx         # …and learn from the run, automatically
+attx writeback --workspace .attx         # …and learn skip-fields from the run, automatically
 attx writeback --workspace .attx --no-learn   # opt out for one run
 attx learn summarize --workspace .attx   # or trigger it by hand
 attx learn summarize --workspace .attx --llm  # also ask the model (costs money)
+attx learn note --workspace .attx --name honorifics --text "Keep さん/くん after names"
 attx learn pending                       # entries awaiting approval, with evidence
 attx learn review --approve 1,3          # approve; only now do they delete anything
-attx learn list                          # what is active
+attx learn list --workspace .attx        # this work's notes
 attx learn defaults --format rmmz        # example: built-in baseline for one format
-attx learn forget --field achievename    # drop one
-attx extract --no-knowledge              # escape hatch: ignore all of it
+attx learn forget --field achievename    # drop a skip/extract entry
+attx learn forget --name honorifics --workspace .attx
+attx extract --no-knowledge              # escape hatch: ignore this file entirely
 ```
+
+`summarize` only captures extraction judgements (fields that should not be translated) plus objective signals such as dropped control codes. Translation voice, honorifics, and address terms are not in those statistics. Write them with `learn note`: `topic = "prompt"` (the default) is injected into the next `translate` call. Proper nouns still go in the glossary.
 
 **The file format is open-ended on purpose.** Entries carry a `kind`, and kinds attx does not understand round-trip verbatim — so an agent can invent `kind = "voice-hint"` and attx will hand it back unchanged rather than silently dropping it. Two kinds are acted on today:
 
@@ -357,7 +361,7 @@ Three safeguards worth knowing:
 | `run --input …` | init + extract + (glossary) + translate + writeback |
 | `status --workspace` | Counts incl. passthrough + per-domain breakdown |
 | `translate-jsonl` / `export-jsonl` / `import-jsonl` | Interchange (`--filter` incl. `passthrough`) |
-| `learn summarize/pending/review/list/defaults/forget` | Self-improvement: accumulate extraction experience |
+| `learn summarize/note/pending/review/list/defaults/forget` | Self-improvement: skip-fields from evidence, style notes from agents |
 | `glossary build/list/add/remove/import/export/check` | Consistent proper-noun names across a whole work |
 
 Global: `--config /path/to/setting.toml` (default `./setting.toml` or `$ATTX_HOME/setting.toml`); `--client <name>` picks a non-default LLM client.

@@ -67,7 +67,7 @@ enum Commands {
         #[command(subcommand)]
         command: ProfileCommands,
     },
-    /// Learn, review and apply extraction experience (self-improvement)
+    /// Learn extraction rules and translation notes (self-improvement)
     Learn {
         #[command(subcommand)]
         command: LearnCommands,
@@ -263,6 +263,24 @@ enum LearnCommands {
         #[arg(long)]
         llm: bool,
     },
+    /// Write a translation-style note. `topic=prompt` (default) is injected into the next translate call
+    Note {
+        /// One concrete instruction, e.g. "角色名后的さん/くん保留不译"
+        #[arg(long)]
+        text: String,
+        /// `prompt` reaches the model; any other topic is for humans reading `learn list`
+        #[arg(long, default_value = "prompt")]
+        topic: String,
+        /// Upsert key. Same name replaces the previous note; different names stack
+        #[arg(long, default_value = "")]
+        name: String,
+        /// This work only (`<workspace>/experience.toml`)
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// All future works of this format (`$ATTX_HOME/knowledge/<format>.toml`)
+        #[arg(long)]
+        format: Option<String>,
+    },
     /// Show entries awaiting approval, with their evidence (JSON)
     Pending,
     /// Approve / reject pending entries by 1-based index
@@ -282,6 +300,9 @@ enum LearnCommands {
         /// Restrict to one format id
         #[arg(long)]
         format: Option<String>,
+        /// List `<workspace>/experience.toml` instead of the global knowledge files
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Print the built-in default experience for a format (TOML)
     Defaults {
@@ -289,14 +310,20 @@ enum LearnCommands {
         #[arg(long)]
         format: String,
     },
-    /// Drop entries by field name
+    /// Drop a field entry or a named note
     Forget {
         /// Field name as shown by `attx learn list`
         #[arg(long)]
-        field: String,
+        field: Option<String>,
+        /// Note `--name` as passed to `attx learn note`
+        #[arg(long)]
+        name: Option<String>,
         /// Restrict to one format id
         #[arg(long)]
         format: Option<String>,
+        /// Drop a note from `<workspace>/experience.toml`
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
 }
 
@@ -768,6 +795,23 @@ fn run_glossary(command: GlossaryCommands, settings: &config::Settings) -> Resul
     }
 }
 
+fn learn_file_json(f: &knowledge::ExperienceFile, layer: Option<&str>) -> serde_json::Value {
+    let mut kinds: std::collections::BTreeMap<&str, usize> = Default::default();
+    for e in &f.entries {
+        *kinds.entry(e.kind()).or_insert(0) += 1;
+    }
+    let mut v = serde_json::json!({
+        "format": f.format,
+        "version": f.version,
+        "kinds": kinds,
+        "entries": f.entries.iter().map(|e| e.to_json()).collect::<Vec<_>>(),
+    });
+    if let Some(layer) = layer {
+        v["layer"] = serde_json::json!(layer);
+    }
+    v
+}
+
 fn run_learn(command: LearnCommands, settings: &config::Settings) -> Result<()> {
     match command {
         LearnCommands::Summarize { workspace, llm } => {
@@ -778,6 +822,30 @@ fn run_learn(command: LearnCommands, settings: &config::Settings) -> Result<()> 
                     "learn: {} entr(ies) need approval before they take effect. \
                      Review with `attx learn pending` then `attx learn review --approve <n>`",
                     report.pending
+                );
+            }
+            Ok(())
+        }
+        LearnCommands::Note {
+            text,
+            topic,
+            name,
+            workspace,
+            format,
+        } => {
+            let report = learn::add_note(
+                &text,
+                &topic,
+                &name,
+                format.as_deref(),
+                workspace.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.reaches_prompt {
+                eprintln!(
+                    "learn: topic `{}` is stored but will not reach the translator; \
+                     use --topic prompt for that",
+                    report.topic
                 );
             }
             Ok(())
@@ -823,26 +891,26 @@ fn run_learn(command: LearnCommands, settings: &config::Settings) -> Result<()> 
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        LearnCommands::List { format } => {
-            let files = knowledge::all_files();
-            let out: Vec<_> = files
-                .iter()
-                .filter(|f| format.as_ref().is_none_or(|want| &f.format == want))
-                .map(|f| {
-                    // Kind counts first: an agent scanning this wants to know
-                    // what vocabulary is in the file before reading entries.
-                    let mut kinds: std::collections::BTreeMap<&str, usize> = Default::default();
-                    for e in &f.entries {
-                        *kinds.entry(e.kind()).or_insert(0) += 1;
+        LearnCommands::List { format, workspace } => {
+            let out: Vec<_> = if let Some(ws) = workspace {
+                let path = knowledge::workspace_file_path(&ws);
+                if !path.is_file() {
+                    Vec::new()
+                } else {
+                    let f = knowledge::load_workspace_file(&ws, "")?;
+                    if format.as_ref().is_some_and(|want| &f.format != want) {
+                        Vec::new()
+                    } else {
+                        vec![learn_file_json(&f, Some("workspace"))]
                     }
-                    serde_json::json!({
-                        "format": f.format,
-                        "version": f.version,
-                        "kinds": kinds,
-                        "entries": f.entries.iter().map(|e| e.to_json()).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
+                }
+            } else {
+                knowledge::all_files()
+                    .iter()
+                    .filter(|f| format.as_ref().is_none_or(|want| &f.format == want))
+                    .map(|f| learn_file_json(f, None))
+                    .collect()
+            };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -863,14 +931,37 @@ fn run_learn(command: LearnCommands, settings: &config::Settings) -> Result<()> 
                 knowledge::embedded_formats().join(", ")
             ),
         },
-        LearnCommands::Forget { field, format } => {
-            let n = learn::forget(&field, format.as_deref())?;
-            println!(
-                "{}",
-                serde_json::json!({"forgotten": n, "field": field, "status": "ok"})
-            );
-            Ok(())
-        }
+        LearnCommands::Forget {
+            field,
+            name,
+            format,
+            workspace,
+        } => match (field.as_deref(), name.as_deref()) {
+            (Some(f), None) => {
+                if workspace.is_some() {
+                    anyhow::bail!(
+                        "--workspace applies to --name notes; field entries live in the global knowledge file"
+                    );
+                }
+                let n = learn::forget(f, format.as_deref())?;
+                println!(
+                    "{}",
+                    serde_json::json!({"forgotten": n, "field": f, "status": "ok"})
+                );
+                Ok(())
+            }
+            (None, Some(n)) => {
+                let dropped = learn::forget_note(n, format.as_deref(), workspace.as_deref())?;
+                println!(
+                    "{}",
+                    serde_json::json!({"forgotten": dropped, "name": n, "status": "ok"})
+                );
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "pass exactly one of --field (extraction entry) or --name (note)"
+            ),
+        },
     }
 }
 

@@ -259,20 +259,36 @@ attx glossary check  --workspace <工作区>
 
 ```bash
 attx learn summarize --workspace <工作区> [--llm]   # scan 是其别名
+attx learn note --text "…" [--name <短名>] [--topic prompt] --workspace <工作区>
+attx learn note --text "…" [--name <短名>] --format <id>   # 写入全局知识库
 attx learn pending
 attx learn review --approve 1,3 | --reject 2 | --approve-all
-attx learn list [--format <id>]
+attx learn list [--format <id>] [--workspace <工作区>]
 attx learn defaults --format <id>       # 打印内置基线 TOML
 attx learn forget --field <字段名> [--format <id>]
+attx learn forget --name <短名> [--workspace <工作区> | --format <id>]
 attx extract --no-knowledge             # 逃生舱
-attx writeback --no-learn               # 本轮不沉淀经验
+attx writeback --no-learn               # 本轮不沉淀提取经验
 ```
 
 `writeback` 成功后**自动**执行 summarize（零 API 成本），结果在
 `writeback.learned`：`entries_written` / `pending` / `notes` / `file`。
+这只沉淀**提取**判断（哪些字段不该译）和客观信号（控制码丢失）。
 
 `pending > 0` 表示存在会**删除文本**的 `skip` 条目待批准。
 **agent 不得自行 `--approve-all`**——报告条数与证据，交用户裁决。
+
+翻译文风用 `learn note`，不要用 `summarize --llm`：
+
+- `--text`：一条具体指令。`--topic` 默认 `prompt`，会注入下一轮 `translate` 的系统提示词。
+- `--name`：upsert 键（source = `learn:agent:<name>`）。同名覆盖，异名并存。自动 summarize 不会改这些条目。
+- `--workspace`：写入 `<工作区>/experience.toml`（本作品）。`--format` 且无 workspace：写入 `$ATTX_HOME/knowledge/<format>.toml`。
+- 必须给 `--workspace` 或 `--format` 之一。两者都给时写入工作区，format 用参数值。
+- stdout：`format` / `topic` / `name` / `source` / `text` / `file` / `layer`（`workspace`|`global`）/ `reaches_prompt`。
+- `topic` 不是 `prompt` 时 stderr 警告：已存储但不会进翻译。
+- 专有名词走 `glossary add`，不走 note。
+
+`learn list --workspace` 只列出该工作区的 `experience.toml`（带 `"layer": "workspace"`）。不加则列出全局知识文件。
 
 ## setting.toml（LLM）
 

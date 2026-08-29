@@ -38,7 +38,7 @@ A directory input gets `<dir>/.attx`; a file input gets `<parent>/.attx-<stem>`.
 | `attx.db` | SQLite: units, translations, workspace meta |
 | `workspace.json` | Readable snapshot of the workspace meta |
 | `glossary.toml` | Terms, when a glossary was built |
-| `experience.toml` | Learned extraction rules for this workspace |
+| `experience.toml` | Learned skip-fields and `topic=prompt` notes for this workspace |
 | `profile.toml` | Copy of the custom profile, when one was used |
 
 ### Reading `status`

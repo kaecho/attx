@@ -108,12 +108,15 @@ $ATTX extract --workspace "$WS"
 $ATTX status --workspace "$WS"
 $ATTX translate --workspace "$WS" --limit 20
 $ATTX status --workspace "$WS"
+# 试译里若有可复用习惯（敬称、人称、文风）：
+$ATTX learn note --workspace "$WS" --name honorifics --text "角色名后的さん/くん保留不译"
 # 用户确认后：
 $ATTX translate --workspace "$WS"
 $ATTX review --workspace "$WS"
 $ATTX writeback --workspace "$WS" --dry-run
 # 文档类直接写（产出翻译副本）；rmmz 需用户明确允许后：
 $ATTX writeback --workspace "$WS"
+# 用户纠正或 review 暴露规律后，再 learn note；需要时重译受影响部分
 ```
 
 **rmmz 强烈建议**：先 `cp -a "$INPUT" /tmp/game-copy` 再对副本写回。

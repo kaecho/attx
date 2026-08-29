@@ -43,7 +43,7 @@ skills/attx/references/feedback-iteration.md            # post-playtest feedback
 
 ## 分阶段流水线
 
-`detect` → `init` → `extract` → `status` → 试译 `translate --limit 20` → 全量 `translate` → `review` → `writeback`（原地写回的格式先试运行）。每个阶段之后，汇报计数与下一步。
+`detect` → `init` → `extract` → `status` → 试译 `translate --limit 20` → `learn note`（试译里有可复用习惯才写）→ 全量 `translate` → `review` → `writeback`（原地写回的格式先试运行）。每个阶段之后，汇报计数与下一步。
 
 Skill 强制执行的硬停止：`doctor --ping` 401（不要反复重试刷 Key）、找不到适配器（切换到 Profile 工具链）、系统性试译失败（停止，别烧钱），以及**覆盖游戏目录的写回必须获得用户的明确许可**。
 

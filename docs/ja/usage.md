@@ -38,7 +38,7 @@ attx writeback --workspace .attx-book                 # → book.zh.epub
 | `attx.db` | SQLite：ユニット、翻訳、ワークスペースメタ |
 | `workspace.json` | ワークスペースメタの可読スナップショット |
 | `glossary.toml` | 用語集が構築されたときの用語 |
-| `experience.toml` | このワークスペース用に学習された抽出ルール |
+| `experience.toml` | このワークスペースの skip フィールド規則と `topic=prompt` 文体ノート |
 | `profile.toml` | カスタムプロファイルが使われたときのそのコピー |
 
 ### `status` の読み方

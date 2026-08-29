@@ -92,12 +92,14 @@ init → extract →（启用或强制时构建术语表）→ translate → wri
 
 | 子命令 | 作用 |
 |------------|------|
-| `summarize --workspace <dir> [--llm]` | 把运行证据转化为经验条目（`scan` 是别名）；`--llm` 增加模型审阅（有费用） |
+| `summarize --workspace <dir> [--llm]` | 把运行证据转化为 skip 字段条目（`scan` 是别名）；`--llm` 复核这些提案（有费用） |
+| `note --text "…" [--name <id>] [--workspace <dir> \| --format <id>]` | 写一条文风 note。默认 `topic=prompt`，下一轮 translate 会注入系统提示词 |
 | `pending` | 待批准的条目，带证据（JSON） |
 | `review --approve 1,3 [--reject 2] [--approve-all]` | 按 1 起始的索引批准/拒绝 |
-| `list [--format <id>]` | 生效中的条目（JSON） |
+| `list [--format <id>] [--workspace <dir>]` | 生效中的条目（JSON）。`--workspace` 列出本作品的 `experience.toml` |
 | `defaults --format <id>` | 打印某格式的内置基线（TOML） |
-| `forget --field <name> [--format <id>]` | 按字段名删除条目 |
+| `forget --field <name> [--format <id>]` | 按字段名删除 skip/extract 条目 |
+| `forget --name <id> [--workspace <dir>]` | 删除 `learn note` 写的 note |
 
 ### `glossary`
 

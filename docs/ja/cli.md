@@ -92,12 +92,14 @@ init → extract →（用語集が有効または強制なら）→ translate �
 
 | サブコマンド | 役割 |
 |------------|------|
-| `summarize --workspace <dir> [--llm]` | 実行の証拠を経験エントリに変換（`scan` はエイリアス）；`--llm` はモデルレビューを追加（費用がかかります） |
+| `summarize --workspace <dir> [--llm]` | 実行の証拠を skip フィールドエントリに変換（`scan` はエイリアス）；`--llm` はそれらの提案をレビュー（費用がかかります） |
+| `note --text "…" [--name <id>] [--workspace <dir> \| --format <id>]` | 文体ノートを書く。デフォルト `topic=prompt` は次の translate のシステムプロンプトに注入される |
 | `pending` | 承認待ちのエントリ（証拠付き、JSON） |
 | `review --approve 1,3 [--reject 2] [--approve-all]` | 1 ベースのインデックスで承認 / 却下 |
-| `list [--format <id>]` | アクティブなエントリ（JSON） |
+| `list [--format <id>] [--workspace <dir>]` | アクティブなエントリ（JSON）。`--workspace` はこの作品の `experience.toml` を出す |
 | `defaults --format <id>` | フォーマットの組み込みベースラインを出力（TOML） |
-| `forget --field <name> [--format <id>]` | フィールド名でエントリを削除 |
+| `forget --field <name> [--format <id>]` | フィールド名で skip/extract エントリを削除 |
+| `forget --name <id> [--workspace <dir>]` | `learn note` で書いたノートを削除 |
 
 ### `glossary`
 

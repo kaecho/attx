@@ -40,4 +40,10 @@ attx writeback --workspace <WS> --dry-run
 attx writeback --workspace <WS>
 ```
 
+若这次修正是**可复用的规则**（敬称、人称、某类 UI 不译），立刻写成 note，免得下一章再犯：
+
+```bash
+attx learn note --workspace <WS> --name <短名> --text "<一条具体指令>"
+```
+
 请用户再玩同一场景确认。

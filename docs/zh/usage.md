@@ -38,7 +38,7 @@ attx writeback --workspace .attx-book                 # → book.zh.epub
 | `attx.db` | SQLite：单元、译文、工作区元数据 |
 | `workspace.json` | 工作区元数据的可读快照 |
 | `glossary.toml` | 术语表构建后的术语 |
-| `experience.toml` | 本工作区学到的提取规则 |
+| `experience.toml` | 本工作区的 skip 字段规则和 `topic=prompt` 文风 note |
 | `profile.toml` | 使用自定义 Profile 时它的副本 |
 
 ### 阅读 `status`

@@ -132,12 +132,16 @@ attx doctor --ping
 | 6 全量译 | 清 pending | `translate` 多轮 | pending 下降；可 `export-jsonl` 审校 |
 | 7 写回 | 产出译文文件 | `writeback`（rmmz 先 `--dry-run` 并取得许可） | files>0；文档类产出 `<名>.<语言>.<扩展名>` |
 | 7.5 回检 | 机械审校（无 LLM） | `review --workspace` | 向用户报告 residual_source / identical / control_loss / namebox_mismatch / glossary.violations；有命中则 export-jsonl 修 |
+| 7.6 沉淀 | 把本轮**可复用的翻译习惯**写成 prompt note | `learn note --workspace --name <短名> --text "…"` | 1–5 条具体指令；空话不写 |
 | 8 反馈 | 补漏 | export/import/translate/writeback | 问题可定位并再写回 |
 
-`writeback` 成功后 attx 会**自动**把本轮经验写入知识库（零 API 成本）。若输出里
+`writeback` 成功后 attx 会**自动**把本轮**提取**经验写入知识库（零 API 成本）：哪些字段不该译。这学不到文风。若输出里
 `writeback.learned.pending > 0`，说明有会**删除文本**的规则待批准——向用户报告条数，
 让其用 `attx learn pending` / `attx learn review --approve <n>` 裁决，**agent 不得自行
 `--approve-all`**。
+
+翻译腔调、敬称、人称、namebox 习惯不在数据库的统计里。agent 用 `attx learn note` 写
+`topic=prompt` 的 note，下一轮 `translate` 会注入系统提示词。已经译完的条目不会重跑；要对齐文风，只译还 pending 的，或经用户同意后重译。专有名词走 `glossary`，不走 note。
 
 一条龙（用户同意整包自动时）：
 
@@ -169,6 +173,25 @@ attx init --input <输入> --profile ./fmt.toml --src ja --dst zh     # 后续�
 
 `status` 的 pending 很大时（>2000），向用户报告条数与费用/时长风险，问是否全量或先部分。
 
+
+### 阶段 5 之后：先沉淀再全量
+
+试译里若看出可复用的习惯（敬称保留、女主软口语、namebox 与对白人称一致），**先写 note 再全量**：
+
+```bash
+attx learn note --workspace <工作区> --name honorifics --text "角色名后的さん/くん/ちゃん保留不译"
+attx learn note --workspace <工作区> --name voice --text "女主用软口语，反派短句、少语气词"
+```
+
+- 一条一个事实，总共 1–5 条。禁止空话（「保持一致」「流畅自然」）。
+- 本作品 → `--workspace`（写入 `<工作区>/experience.toml`）。该格式以后都这样 → `--format rmmz`（不要 workspace）。
+- `--name` 是 upsert 键，同名覆盖，异名并存。
+- 禁止手改 `experience.toml`。
+- **不要**指望 `learn summarize --llm` 写出文风：它只复核「这个字段是不是标识符」。
+- 写完用 `attx learn list --workspace <工作区>` 确认；下一轮 `translate` 的 stderr 会出现 `applying N learned prompt note(s)`。
+
+没有具体观察就跳过，不要为写而写。
+
 ---
 
 ## 硬停止
@@ -191,11 +214,12 @@ attx init --input <输入> --profile ./fmt.toml --src ja --dst zh     # 后续�
 
 ## 禁止做法
 
-- 手改输入文件 / `attx.db` 冒充翻译完成
+- 手改输入文件 / `attx.db` / `experience.toml` 冒充翻译完成或经验沉淀（note 走 `learn note`）
 - 把 API Key 写进 prompt、JSONL、日志、git、总结
 - 未试译直接对上万条全量硬刚且不告知费用风险
 - 把 dry-run 成功说成已经写出文件
 - 修改 attx 源码"顺便修 bug"而不经用户同意
+- 写空话 prompt note（「保持一致」「流畅自然」）污染下一轮翻译
 
 ---
 
@@ -223,7 +247,7 @@ attx init --input <输入> --profile ./fmt.toml --src ja --dst zh     # 后续�
 约束：
 1. 只通过 attx CLI 操作；禁止手改输入文件、attx.db、工具源码。
 2. 若未配置模型，先用问答向导帮我配置 setting.toml；不要把 API Key 打进对话记录。
-3. 先 doctor --ping、detect、init、extract、status；再 limit 20 试译；通过后全量 translate；写回前跑 review。
+3. 先 doctor --ping、detect、init、extract、status；再 limit 20 试译；有可复用习惯则 learn note，再全量 translate；写回前跑 review。
 4. RPG Maker 游戏写回前必须得到我明确允许；文档类直接产出翻译副本即可。
 5. 每阶段结束用中文汇报：做了什么、status 数字、下一步、是否需要我决策。
 ```

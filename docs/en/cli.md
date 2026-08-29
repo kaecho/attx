@@ -92,12 +92,14 @@ Builtins always apply: RMMZ control codes, `{ident}`, `%s`/`%d`. Engine `renpy` 
 
 | Subcommand | Role |
 |------------|------|
-| `summarize --workspace <dir> [--llm]` | Turn run evidence into experience entries (`scan` is an alias); `--llm` adds model review (costs money) |
+| `summarize --workspace <dir> [--llm]` | Turn run evidence into skip-field entries (`scan` is an alias); `--llm` reviews those proposals (costs money) |
+| `note --text "…" [--name <id>] [--workspace <dir> \| --format <id>]` | Write a style note. Default `topic=prompt` is injected into the next translate call |
 | `pending` | Entries awaiting approval, with evidence (JSON) |
 | `review --approve 1,3 [--reject 2] [--approve-all]` | Approve/reject by 1-based index |
-| `list [--format <id>]` | Active entries (JSON) |
+| `list [--format <id>] [--workspace <dir>]` | Active entries (JSON). `--workspace` lists this work's `experience.toml` |
 | `defaults --format <id>` | Print the built-in baseline for a format (TOML) |
-| `forget --field <name> [--format <id>]` | Drop entries by field name |
+| `forget --field <name> [--format <id>]` | Drop skip/extract entries by field name |
+| `forget --name <id> [--workspace <dir>]` | Drop a note written by `learn note` |
 
 ### `glossary`
 

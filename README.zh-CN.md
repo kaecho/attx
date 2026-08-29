@@ -302,17 +302,21 @@ inject_limit = 30      # cap on terms injected into one batch
 attx 把这种判断作为数据保存，并**自动**捕获：每次成功的 `writeback` 都会把运行总结为经验条目，零 API 成本，因为证据已经躺在工作区数据库里。
 
 ```bash
-attx writeback --workspace .attx         # …and learn from the run, automatically
+attx writeback --workspace .attx         # …and learn skip-fields from the run, automatically
 attx writeback --workspace .attx --no-learn   # opt out for one run
 attx learn summarize --workspace .attx   # or trigger it by hand
 attx learn summarize --workspace .attx --llm  # also ask the model (costs money)
+attx learn note --workspace .attx --name honorifics --text "角色名后的さん/くん保留不译"
 attx learn pending                       # entries awaiting approval, with evidence
 attx learn review --approve 1,3          # approve; only now do they delete anything
-attx learn list                          # what is active
+attx learn list --workspace .attx        # this work's notes
 attx learn defaults --format rmmz        # example: built-in baseline for one format
-attx learn forget --field achievename    # drop one
+attx learn forget --field achievename    # drop a skip/extract entry
+attx learn forget --name honorifics --workspace .attx
 attx extract --no-knowledge              # escape hatch: ignore all of it
 ```
+
+`summarize` 只沉淀提取判断（哪些字段不该译）和客观信号（例如控制码丢失）。翻译腔调、敬称、人称不在那些统计里。用 `learn note` 写：默认 `topic = "prompt"`，下一轮 `translate` 会注入系统提示词。专有名词仍然走术语表。
 
 **文件格式刻意保持开放。** 条目带 `kind`，attx 不认识的 kind 会原样往返 —— 所以 agent 可以发明 `kind = "voice-hint"`，attx 会原封不动地交还，而不是悄悄丢弃。目前有两种 kind 会被处理：
 
@@ -357,7 +361,7 @@ text = "This format loses control codes; keep every [CTRL_n] verbatim."
 | `run --input …` | init + extract +（术语表）+ translate + writeback |
 | `status --workspace` | 计数（含 passthrough）+ 按域细分 |
 | `translate-jsonl` / `export-jsonl` / `import-jsonl` | 交换（`--filter` 含 `passthrough`） |
-| `learn summarize/pending/review/list/defaults/forget` | 自我改进：积累提取经验 |
+| `learn summarize/note/pending/review/list/defaults/forget` | 自我改进：从证据学 skip 字段，从 agent 学文风 note |
 | `glossary build/list/add/remove/import/export/check` | 整部作品一致的专有名词译名 |
 
 全局：`--config /path/to/setting.toml`（默认 `./setting.toml` 或 `$ATTX_HOME/setting.toml`）；`--client <name>` 选择非默认的 LLM 客户端。
