@@ -66,6 +66,20 @@ init → extract → (glossary if enabled or forced) → translate → writeback
 
 `{"engine","game_path","source_lang","target_lang","total","translated","pending","passthrough","domains":{…}}`. `passthrough > 0` → consider `translate --retry-passthrough`.
 
+### `review --workspace <dir>`
+
+Mechanical post-translate scan (no LLM). JSON: `total` / `translated` / `pending` / `passthrough`, plus `glossary` (same shape as `glossary check`) and buckets `residual_source`, `identical`, `control_loss`, `namebox_mismatch` (`count` + `sample` up to 40). `attx run` attaches this after translate.
+
+### `preserve`
+
+| Subcommand | Role |
+|------------|------|
+| `list --workspace <dir>` | Builtin + workspace regexes (JSON) |
+| `add --workspace --pattern <re> [--info]` | Append a workspace rule; hits become `[CTRL_n]` |
+| `remove --workspace --pattern <re>` | Drop a workspace rule by exact pattern |
+
+Builtins always apply: RMMZ control codes, `{ident}`, `%s`/`%d`. Engine `renpy` also keeps `[ident]`. Workspace file: `preserve.toml`.
+
 ### JSONL interchange
 
 | Command | Role |

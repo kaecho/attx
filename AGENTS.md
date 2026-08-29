@@ -6,7 +6,7 @@ Guidelines for AI assistants working in the `attx` repository.
 
 **attx** (Agent Translation Toolkit eXtensible) is a pure-Rust, single-binary, format-agnostic AI translation framework. It extracts text units from games, ebooks, documents, subtitles, and localization files (or a custom TOML profile), translates them with any OpenAI-compatible LLM, and writes them back. Progress is cached in a SQLite workspace so interrupted runs resume.
 
-Crate **0.7.2**, edition **2024**, one binary (`src/main.rs`). No lib target, no feature flags, no `[dev-dependencies]`. Distribution is GitHub Releases (`tag v*` or `workflow_dispatch`); do not `cargo publish`. `Cargo.toml` does not set `publish = false`.
+Crate **0.8.0**, edition **2024**, one binary (`src/main.rs`). No lib target, no feature flags, no `[dev-dependencies]`. Distribution is GitHub Releases (`tag v*` or `workflow_dispatch`); do not `cargo publish`. `Cargo.toml` does not set `publish = false`.
 
 Core pipeline: `extract (format adapter) → translate (LLM core) → writeback (format adapter)`.
 
@@ -28,6 +28,7 @@ CLI (src/main.rs, clap derive)
        store.pending_units → Translator::translate_units_with_sink (std::thread::scope)
        → on_batch: store.save_translation (caller thread; incremental)
        → batch fail → split → single fail → passthrough (original kept, flagged)
+  → pipeline::review (mechanical; also attached to `attx run`)
   → pipeline::writeback
        adapter.writeback → OutputFile bytes
        → first existing dest copied to `{path}.attxbak` once
@@ -38,7 +39,7 @@ Key facts:
 
 - **Central type**: `model::TextUnit` (`id`, `engine`, `domain`, `location`, `item_type` (`long_text|array|short_text`), `role`, `original_lines`, `source_line_paths`, `context`, `payload`). `TextUnit::compute_id` = first 24 hex of `sha256(engine\0location\0 + each line + \n)`. `source_hash` is the full sha256 of lines+`\n` and is the cache key.
 - **Adapters are pure I/O**, no network. Trait `FormatAdapter: Send + Sync` (`src/adapter/mod.rs`) with `id/label/extensions/input_kind/detect/extract/writeback`. Registry `all_adapters()` order = detect priority (first hit wins). `--engine` uses `detect_or_force` and still claims if detect soft-fails.
-- **Workspace**: directory input → `<dir>/.attx/`; file input → sibling `.attx-<stem>/`. Contains `attx.db` (tables `meta`, `units`, `translations`; WAL), `workspace.json`, optional `glossary.toml`, `experience.toml`, `profile.toml` (custom only).
+- **Workspace**: directory input → `<dir>/.attx/`; file input → sibling `.attx-<stem>/`. Contains `attx.db` (tables `meta`, `units`, `translations`; WAL), `workspace.json`, optional `glossary.toml`, `preserve.toml`, `experience.toml`, `profile.toml` (custom only).
 - **No async runtime**: `std::thread::scope` workers + `reqwest::blocking` + a `Mutex`-based `RateLimiter` (`llm.rs`). `Store` is `!Sync` (owns `rusqlite::Connection`); workers send `Vec<Translation>` over `mpsc`; `on_batch` / `save_translation` run on the caller thread.
 - **Output**: document / subtitle / json adapters write sibling `<stem>.<dst>.<ext>` via `adapter::output_sibling` (`book v1.epub` + `zh` → `book v1.zh.epub`). jsonl directory mode writes `<dir>/translated.jsonl`. Only `rmmz` (and custom profiles with `overwrite = true`) write in place; pipeline creates a one-time `{path}.attxbak` if the dest already exists (`Map001.json.attxbak`, not an extension replace). Ren'Py is sibling, not in-place.
 - **JSONL import gotcha**: `import-jsonl` matches `JsonlRecord.id` against `unit.location`, **not** `unit.id` (`pipeline.rs`). `export-jsonl` writes `"id": location`, so attx export→import roundtrips. External JSONL using hash ids is silently skipped.
@@ -113,8 +114,8 @@ Releases: tag `v*` (or `workflow_dispatch`) → `cargo build --release --target`
 
 | File | Why it matters |
 |---|---|
-| `src/main.rs` | Entire CLI surface: `Cli` / `Commands` / `ProfileCommands` / `LearnCommands` / `GlossaryCommands`; global `--config` / `--client`; JSON dispatch |
-| `src/pipeline.rs` | `init_workspace`, `extract`, `translate`, `writeback`, `run`, `status`, JSONL, `analyze`, `formats`, `doctor`, workspace paths |
+| `src/main.rs` | Entire CLI surface: `Cli` / `Commands` / `ProfileCommands` / `LearnCommands` / `GlossaryCommands` / `PreserveCommands`; global `--config` / `--client`; JSON dispatch |
+| `src/pipeline.rs` | `init_workspace`, `extract`, `translate`, `writeback`, `run`, `status`, `review`, JSONL, `analyze`, `formats`, `doctor`, workspace paths |
 | `src/adapter/mod.rs` | `FormatAdapter` + `all_adapters()` + `output_sibling` |
 | `src/adapter/rmmz.rs` | In-place game writeback, `data_origin` vs `data/`, `fit_lines`, domains |
 | `src/adapter/rmmz_plugins.rs` | Plugin extract/writeback claimed only via `rmmz` |
@@ -126,13 +127,15 @@ Releases: tag `v*` (or `workflow_dispatch`) → `cargo build --release --target`
 | `src/config.rs` | `Settings` + `resolve_config_path` + `example_toml()` (source of `setting.example.toml`) |
 | `src/knowledge.rs` / `src/learn.rs` | Experience layers, `apply`, post-writeback summarize |
 | `src/glossary.rs` | Optional pre-translate terms + batch inject |
+| `src/preserve.rs` | Regex preserve rules → `[CTRL_n]` mask (`preserve.toml` + builtins) |
+| `src/review.rs` | Mechanical post-translate scan (residual source, identical, preserve loss, namebox) |
 | `src/profile.rs` | `custom:<name>`, `FormatProfile` (`overwrite`, `line_regex` / `json_keys` / `json_paths`) |
 | `src/quality.rs` | sanitize vs reject contract |
 | `src/textio.rs` | Encoding contract for all text adapters |
 | `skills/attx/SKILL.md` | Authoritative agent workflow |
 | `Cargo.toml` | Crate metadata, deps, release profile |
 
-CLI surface (kebab-case): `doctor [--ping|--json]`, `formats`, `detect`, `analyze`, `profile {new,test,save,list}`, `learn {summarize(scan),pending,review,list,defaults,forget}`, `glossary {build,list,add,remove,import,export,check}`, `init`, `extract [--no-knowledge]`, `translate [--limit|--dry-run|--retry-passthrough]`, `writeback [--dry-run|--no-learn]`, `run [--no-translate|--no-writeback|--glossary|--no-glossary]`, `status`, `translate-jsonl`, `export-jsonl`, `import-jsonl`. `--input` aliases `--game` on detect / analyze / init / run / `profile test`. Defaults: `src=ja`, `dst=zh`, export filter `pending`.
+CLI surface (kebab-case): `doctor [--ping|--json]`, `formats`, `detect`, `analyze`, `profile {new,test,save,list}`, `learn {summarize(scan),pending,review,list,defaults,forget}`, `glossary {build,list,add,remove,import,export,check}`, `preserve {list,add,remove}`, `init`, `extract [--no-knowledge]`, `translate [--limit|--dry-run|--retry-passthrough]`, `writeback [--dry-run|--no-learn]`, `run [--no-translate|--no-writeback|--glossary|--no-glossary]`, `status`, `review`, `translate-jsonl`, `export-jsonl`, `import-jsonl`. `--input` aliases `--game` on detect / analyze / init / run / `profile test`. Defaults: `src=ja`, `dst=zh`, export filter `pending`.
 
 Custom profile workflow: `analyze` → `profile new` → `profile test --roundtrip` (in-memory, no disk) → `init --profile` → extract/translate/writeback → ask, then `profile save`. Save dir: `$ATTX_HOME/profiles` else `dirs::config_dir()/attx/profiles/` (Linux `~/.config/attx/profiles/`). Neither → error asking to set `$ATTX_HOME`. `kirikiri-kag.toml` is `overwrite = true`.
 
@@ -151,13 +154,13 @@ Custom profile workflow: `analyze` → `profile new` → `profile test --roundtr
 - **gitignore**: never commit `setting.toml` (API keys), `.attx/`, `.attx-*/`, `*.db`, `*.attxbak`, `*.epub`, `*.zh.txt`, `*.zh.json`, `/site/`, `/target`. Commit `setting.example.toml` only. `profiles/examples/*.toml` are templates, not compiled in.
 - **Docs**: MkDocs Material, folder i18n `docs/{en,zh,ja}/` (en default). Build must pass `--strict`. Do not edit `site/`.
 
-Skill-doc drift to ignore when coding: Skill wizard text still says `worker_count=4` and a "v0.4+" banner; **shipped default is 8**, crate is **0.7.2**. Skill pending-size warning is `>2000`; `agent-usage.md` says `>5000` (prefer 2000). Skill principle 7 says only rmmz writes in place; `overwrite=true` profiles do too. `docs/*/agents.md` lists only a 4-item hard-stop subset. `cli-command-contract.md` extract JSON is stale (`ExtractReport` also has `skipped_by_knowledge`, `rules_applied`). Skill file-workspace ".文件名" is imprecise; code uses `.attx-<stem>/`.
+Skill-doc drift to ignore when coding: Skill wizard text still says `worker_count=4` and a "v0.4+" banner; **shipped default is 8**, crate is **0.8.0**. Skill pending-size warning is `>2000`; `agent-usage.md` says `>5000` (prefer 2000). Skill principle 7 says only rmmz writes in place; `overwrite=true` profiles do too. `docs/*/agents.md` lists only a 4-item hard-stop subset. Skill file-workspace ".文件名" is imprecise; code uses `.attx-<stem>/`.
 
 ## Testing & QA
 
-- **All tests are inline `#[cfg(test)] mod tests` at file bottom** in `src/`: no `tests/` directory, no `[[test]]`, no integration crate. 113 `#[test]`s across 22 files.
+- **All tests are inline `#[cfg(test)] mod tests` at file bottom** in `src/`: no `tests/` directory, no `[[test]]`, no integration crate. 135 `#[test]`s across 24 files.
 - **Style**: snake_case behavior names (often `*_roundtrip`); `assert` / `assert_eq`; std + production deps. Shared fixture `adapter::test_dir` → `temp_dir()/attx-test-{pid}-{name}` (`create_dir_all`, no cleanup). Zip adapters build fixtures with `zip::ZipWriter` (EPUB must keep `mimetype` stored/first). Some glossary / knowledge / rmmz_plugins tests use `attx-gl-{pid}`, `attx-kn-{pid}`, `attx-pl-{pid}` and `remove_dir_all`.
-- **Coverage that exists**: adapters dominate (extract → fake `Translation` map → writeback). `glossary.rs` (19, mine/select/toml; not `build`/`check` LLM), `knowledge.rs` (25, including every embedded default parses), `learn.rs` (11, in-memory propose/upsert only), `profile.rs` (6, including `repo_example_profiles_compile` walking `profiles/examples/`), `textio.rs` (3, `decode_bytes` only), `config.rs` (3, TOML parse, not `load`/`resolve_config_path`), `model.rs` (3, mask + ja detect), `llm.rs` (2, `extract_json_span` only).
+- **Coverage that exists**: adapters dominate (extract → fake `Translation` map → writeback). `glossary.rs` (mine/select/toml/info/namebox; not `build` LLM), `knowledge.rs` (including every embedded default parses), `learn.rs` (in-memory propose/upsert only), `preserve.rs` (mask/roundtrip), `review.rs` (residual/identical/namebox), `profile.rs` (including `repo_example_profiles_compile` walking `profiles/examples/`), `textio.rs` (`decode_bytes` only), `config.rs` (TOML parse, not `load`/`resolve_config_path`), `model.rs` (mask + ja detect), `llm.rs` (`extract_json_span` + neighbor map).
 - **Untested modules** (regressions show only via CLI smoke): `pipeline.rs`, `store.rs`, `quality.rs`, `main.rs`, `adapter/jsonl.rs`. When changing those, run `doctor` / `--help` and ideally a tiny extract → fake-translate → writeback fixture. `cargo test` will stay green while they regress. `Translator`, `RateLimiter`, HTTP, `learn::{summarize,review,forget}`, and ATTX_HOME profile I/O are also untested. New logic in those files belongs in the same file's `#[cfg(test)] mod tests`.
 - **Parallelism hazard**: `knowledge::file_missing_or_broken_degrades_to_empty` does `unsafe { set_var("ATTX_HOME", ...) }`. Pid-keyed shared temp dirs collide if two tests in the same process share them. Use `-- --test-threads=1` when touching ATTX_HOME or those dirs. CI does **not** serialize (`cargo test` default threads).
 - **QA expectation**: no coverage thresholds, no doctests. Keep new logic in the same style (inline unit test, temp-dir fixture). Do not add a `tests/` crate unless asked. Do not hit the network in unit tests.

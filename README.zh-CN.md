@@ -15,6 +15,7 @@ extract (format adapter) → translate (LLM core) → writeback (format adapter)
 - **设计上可续跑** —— 每次运行都在 `attx.db` 中打点存档；随时可停，随时可续。失败的单元会变成可见的 *passthrough* 占位，而不是终止整个运行。
 - **自我改进** —— 成功的运行会留下提取经验（`skip`/`extract` 字段判断），由你审阅，绝不会悄悄应用而删除文本。
 - **术语表** —— 为整部作品的每个专有名词约定一个译名，按批次注入。
+- **回检** —— 翻译后免费机械扫描：残留假名、原文照抄、丢失保护码、姓名栏与对白不一致。
 
 ---
 
@@ -262,6 +263,7 @@ attx glossary list --workspace .attx
 attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info "female given name"
 attx glossary import --workspace .attx --file terms.json
 attx glossary check --workspace .attx             # terms the translation ignored
+attx review --workspace .attx                     # 残留假名、原文照抄、丢失保护码、姓名栏漂移
 ```
 
 两种方式：

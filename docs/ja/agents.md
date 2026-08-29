@@ -43,7 +43,7 @@ skills/attx/references/feedback-iteration.md            # プレイテスト後�
 
 ## 段階的パイプライン
 
-`detect` → `init` → `extract` → `status` → 試し `translate --limit 20` → 本番 `translate` → `writeback`（インプレースフォーマットでは最初にドライラン）。各段階の後、件数と次のステップを報告します。
+`detect` → `init` → `extract` → `status` → 試し `translate --limit 20` → 本番 `translate` → `review` → `writeback`（インプレースフォーマットでは最初にドライラン）。各段階の後、件数と次のステップを報告します。
 
 Skill が強制するハードストップ：`doctor --ping` の 401（キー再試行のスパムはしない）、アダプターが見つからない（プロファイルツールチェーンに切り替え）、系統的な試し失敗（止まる、お金を燃やさない）、そして**ゲームディレクトリを上書きする writeback はユーザーの明示的な許可を必要とする**。
 

@@ -1,10 +1,11 @@
 use crate::config::{LlmClient, TranslationSection};
 use crate::glossary::GlossaryTerm;
-use crate::model::{ItemType, TextUnit, Translation, mask_unit_lines, unmask_controls};
+use crate::model::{ItemType, TextUnit, Translation, unmask_controls};
+use crate::preserve::{self, PreserveSet};
 use crate::quality;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -135,8 +136,11 @@ fn system_prompt(source_lang: &str, target_lang: &str, profile: Profile) -> Stri
 {profile_line}
 规则：
 - 忠实保留原意、语气和内容尺度，不净化、不扩写、不遗漏。
-- 形如 [CTRL_n] 的标记必须原样保留，数量一致，不翻译。
+- 形如 [CTRL_n] 的标记必须原样保留，数量与相对位置一致，不翻译。
 - 文中的占位符与标记（如 {{tag}}、[var]、<tag>、%s、%d、\n）原样保留，不翻译其内部。
+- 姓名栏（role/namebox）与正文对同一实体必须使用同一译名。
+- 译文中不得残留源语假名或韩文；专有名词按术语表翻译，不要夹注原文。
+- 条目前的 prev/next 邻句只供消歧，不要输出它们的译文。
 - long_text 可按目标语言语感调整断句；array 必须输出 line_count 行；short_text 的 translation_lines 只有 1 个字符串。
 - 顶层输出严格 JSON 数组，不要 Markdown、解释或额外文本。
 - 每个元素：{{"id":"<id>","role":"<角色>","translation_lines":["..."]}}
@@ -150,8 +154,11 @@ fn system_prompt(source_lang: &str, target_lang: &str, profile: Profile) -> Stri
 {profile_line}
 Rules:
 - Keep meaning, tone, and content rating. Do not censor, expand, or omit.
-- Tokens like [CTRL_n] must be kept verbatim with the same count.
+- Tokens like [CTRL_n] must be kept verbatim, same count and relative position.
 - Placeholders and markup ({{tag}}, [var], <tag>, %s, %d, \n) stay verbatim; never translate inside them.
+- A namebox/role label and body text for the same entity must share one translation.
+- Do not leave source-script kana or hangul in the output; use the glossary for names.
+- prev/next neighbor lines are context only; do not translate them.
 - long_text may reflow lines; array must return exactly line_count lines; short_text has exactly 1 string in translation_lines.
 - Output a strict JSON array only. No markdown.
 - Each element: {{"id":"<id>","role":"<role>","translation_lines":["..."]}}
@@ -193,6 +200,13 @@ impl RateLimiter {
         }
     }
 }
+#[derive(Clone)]
+struct Neighbor {
+    id: String,
+    role: String,
+    original: String,
+    translation: Option<String>,
+}
 
 pub struct Translator {
     client: LlmClient,
@@ -204,6 +218,8 @@ pub struct Translator {
     /// contains are injected into it — see `translate_batch`.
     glossary: Vec<GlossaryTerm>,
     inject_limit: usize,
+    preserve: PreserveSet,
+    neighbors: BTreeMap<String, (Option<Neighbor>, Option<Neighbor>)>,
 }
 
 impl Translator {
@@ -225,6 +241,8 @@ impl Translator {
             rate: RateLimiter::new(section.rpm),
             glossary: Vec::new(),
             inject_limit: 0,
+            preserve: PreserveSet::core().clone(),
+            neighbors: BTreeMap::new(),
         })
     }
 
@@ -252,6 +270,20 @@ impl Translator {
         self.inject_limit = inject_limit;
         self.system
             .push_str("- 正文前若给出「术语表」，其中的译名必须严格采用，不得自行改译。\n");
+        self
+    }
+
+    pub fn with_preserve(mut self, set: PreserveSet) -> Self {
+        self.preserve = set;
+        self
+    }
+
+    pub fn with_neighbors(
+        mut self,
+        units: &[TextUnit],
+        translations: &BTreeMap<String, Translation>,
+    ) -> Self {
+        self.neighbors = build_neighbor_map(units, translations);
         self
     }
 
@@ -444,7 +476,8 @@ impl Translator {
 
     fn translate_batch(&self, batch: &[&TextUnit]) -> Result<Vec<Translation>> {
         let mut masks: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-        let mut id_map: BTreeMap<String, &TextUnit> = BTreeMap::new(); // prompt id -> unit
+        let mut id_map: BTreeMap<String, &TextUnit> = BTreeMap::new();
+        let batch_ids: BTreeSet<&str> = batch.iter().map(|u| u.id.as_str()).collect();
 
         let mut body = String::from("# 场景\n\n");
         if let Some(c) = batch.first().map(|u| u.context.as_str())
@@ -453,7 +486,6 @@ impl Translator {
             body.push_str(&format!("context: {c}\n"));
         }
 
-        // Glossary before the text, and only the terms this batch can use.
         if !self.glossary.is_empty() {
             let source: String = batch
                 .iter()
@@ -480,7 +512,7 @@ impl Translator {
         for (i, u) in batch.iter().enumerate() {
             let pid = (i + 1).to_string();
             id_map.insert(pid.clone(), *u);
-            let (masked_lines, unit_map) = mask_unit_lines(&u.original_lines);
+            let (masked_lines, unit_map) = self.preserve.mask_unit_lines(&u.original_lines);
             masks.insert(u.id.clone(), unit_map);
 
             body.push_str(&format!("## {pid}\n"));
@@ -489,6 +521,14 @@ impl Translator {
             body.push_str(&format!("role: {}\n", u.role));
             if u.item_type == ItemType::Array {
                 body.push_str(&format!("line_count: {}\n", u.original_lines.len()));
+            }
+            if let Some((prev, next)) = self.neighbors.get(&u.id) {
+                if let Some(p) = prev.as_ref().filter(|n| !batch_ids.contains(n.id.as_str())) {
+                    body.push_str(&format!("prev: {}\n", format_neighbor(p)));
+                }
+                if let Some(n) = next.as_ref().filter(|n| !batch_ids.contains(n.id.as_str())) {
+                    body.push_str(&format!("next: {}\n", format_neighbor(n)));
+                }
             }
             body.push('\n');
             for line in &masked_lines {
@@ -502,8 +542,6 @@ impl Translator {
         let items = parse_model_json(&raw)?;
         let mut translations = Vec::new();
         for item in items {
-            // Unknown id: the model hallucinated — drop that item, keep the rest.
-            // Missing units are retried as singles by translate_batch_resilient.
             let Some(unit) = id_map.get(&item.id) else {
                 eprintln!("  drop item with unknown id {:?}", item.id);
                 continue;
@@ -517,6 +555,15 @@ impl Translator {
             lines = quality::sanitize_lines(unit, lines);
             if let Err(e) = quality::check_unit(unit, &lines) {
                 eprintln!("  drop unit {}: {e}", unit.location);
+                continue;
+            }
+            let lost = preserve::lost_token_count(&lines, &map);
+            if !map.is_empty() && lost * 2 >= map.len() {
+                eprintln!(
+                    "  drop unit {}: preserved tokens lost {lost}/{}",
+                    unit.location,
+                    map.len()
+                );
                 continue;
             }
             translations.push(Translation {
@@ -628,6 +675,50 @@ fn truncate(s: &str, n: usize) -> String {
         t.push('…');
     }
     t
+}
+
+fn snap_neighbor(u: &TextUnit, tr: &BTreeMap<String, Translation>) -> Neighbor {
+    Neighbor {
+        id: u.id.clone(),
+        role: u.role.clone(),
+        original: u.joined_text(),
+        translation: tr
+            .get(&u.id)
+            .filter(|t| !t.passthrough)
+            .map(|t| t.translation_lines.join("\n")),
+    }
+}
+
+fn build_neighbor_map(
+    units: &[TextUnit],
+    tr: &BTreeMap<String, Translation>,
+) -> BTreeMap<String, (Option<Neighbor>, Option<Neighbor>)> {
+    let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, u) in units.iter().enumerate() {
+        groups.entry(u.context.as_str()).or_default().push(i);
+    }
+    let mut out = BTreeMap::new();
+    for idxs in groups.values() {
+        for (k, &i) in idxs.iter().enumerate() {
+            let prev = k.checked_sub(1).map(|j| snap_neighbor(&units[idxs[j]], tr));
+            let next = idxs.get(k + 1).map(|&j| snap_neighbor(&units[j], tr));
+            out.insert(units[i].id.clone(), (prev, next));
+        }
+    }
+    out
+}
+
+fn format_neighbor(n: &Neighbor) -> String {
+    let orig = truncate(&n.original.replace('\n', " / "), 120);
+    let role = if n.role.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", n.role)
+    };
+    match &n.translation {
+        Some(t) => format!("{role}「{orig}」→「{}」", truncate(t, 80)),
+        None => format!("{role}「{orig}」"),
+    }
 }
 
 /// `temperature` is the call-site default (translate 0.3, ask_json 0.0).
@@ -894,5 +985,45 @@ messages = []
     fn stream_flag_still_accepts_json_object() {
         let raw = r#"{"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
         assert_eq!(decode_chat_content(raw, true).unwrap(), "hi");
+    }
+
+    #[test]
+    fn neighbors_follow_context_order() {
+        fn u(id: &str, ctx: &str, text: &str) -> TextUnit {
+            TextUnit {
+                id: id.into(),
+                engine: "txt".into(),
+                domain: "body".into(),
+                location: id.into(),
+                item_type: ItemType::ShortText,
+                role: String::new(),
+                original_lines: vec![text.into()],
+                source_line_paths: vec![],
+                context: ctx.into(),
+                payload: String::new(),
+            }
+        }
+        let units = vec![
+            u("a", "ch1", "one"),
+            u("b", "ch1", "two"),
+            u("c", "ch2", "other"),
+        ];
+        let mut tr = BTreeMap::new();
+        tr.insert(
+            "a".into(),
+            Translation {
+                unit_id: "a".into(),
+                translation_lines: vec!["一".into()],
+                source_hash: String::new(),
+                passthrough: false,
+            },
+        );
+        let map = build_neighbor_map(&units, &tr);
+        let (prev, next) = map.get("b").unwrap();
+        assert_eq!(prev.as_ref().unwrap().original, "one");
+        assert_eq!(prev.as_ref().unwrap().translation.as_deref(), Some("一"));
+        assert!(next.is_none());
+        assert!(map.get("c").unwrap().0.is_none());
+        assert!(map.get("c").unwrap().1.is_none());
     }
 }

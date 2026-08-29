@@ -66,6 +66,20 @@ init → extract →（启用或强制时构建术语表）→ translate → wri
 
 `{"engine","game_path","source_lang","target_lang","total","translated","pending","passthrough","domains":{…}}`。`passthrough > 0` → 考虑 `translate --retry-passthrough`。
 
+### `review --workspace <dir>`
+
+机械审校，不调模型。JSON：`total` / `translated` / `pending` / `passthrough`，以及 `glossary`（同 `glossary check`）和分桶 `residual_source`、`identical`、`control_loss`、`namebox_mismatch`（`count` + 最多 40 条 `sample`）。`attx run` 在 translate 之后附带这份报告。
+
+### `preserve`
+
+| 子命令 | 作用 |
+|------------|------|
+| `list --workspace <dir>` | 内置 + 工作区正则（JSON） |
+| `add --workspace --pattern <re> [--info]` | 追加工作区规则；命中变成 `[CTRL_n]` |
+| `remove --workspace --pattern <re>` | 按精确 pattern 删除工作区规则 |
+
+内置始终生效：RMMZ 控制符、`{ident}`、`%s`/`%d`。引擎 `renpy` 额外保护 `[ident]`。工作区文件：`preserve.toml`。
+
 ### JSONL 交换
 
 | 命令 | 作用 |

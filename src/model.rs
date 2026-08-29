@@ -119,35 +119,6 @@ impl TextUnit {
     }
 }
 
-/// RMMZ control codes → semantic placeholders for the model.
-pub fn mask_controls(text: &str) -> (String, Vec<(String, String)>) {
-    // Match \ followed by letter/symbol forms used by RMMV/MZ: \C[1], \n[1], \., \!, \>, \G, \\
-    let re = regex::Regex::new(
-        r"(?x)
-        \\{2}                                   # escaped backslash
-        | \\[VvNnCcGg]\[\d+\]                   # \V[n] \N[n] \C[n] \G[n] (case variants)
-        | \\[VvNnCcGg]                          # bare
-        | \\[!.>|{\}\\\$\^]                     # single-char controls
-        | \\[A-Za-z]\[\d+\]                     # other letter[n]
-        | \\[A-Za-z]                            # other letter
-        ",
-    )
-    .expect("control regex");
-
-    let mut map = Vec::new();
-    let mut out = String::with_capacity(text.len());
-    let mut last = 0;
-    for (i, m) in re.find_iter(text).enumerate() {
-        out.push_str(&text[last..m.start()]);
-        let key = format!("[CTRL_{i}]");
-        map.push((key.clone(), m.as_str().to_string()));
-        out.push_str(&key);
-        last = m.end();
-    }
-    out.push_str(&text[last..]);
-    (out, map)
-}
-
 pub fn unmask_controls(text: &str, map: &[(String, String)]) -> String {
     let mut out = text.to_string();
     for (k, v) in map {
@@ -156,30 +127,15 @@ pub fn unmask_controls(text: &str, map: &[(String, String)]) -> String {
     out
 }
 
-/// Mask all lines of a unit with a single, unit-wide `[CTRL_n]` numbering.
-///
-/// Renaming a line's per-line keys (`[CTRL_0]`, `[CTRL_1]`, …) to their
-/// unit-wide index must go highest-first: the new index is always ≥ the old
-/// one, so renaming low keys first could produce a token that collides with a
-/// key not yet renamed on the same line — the next `replacen` would then hit
-/// the freshly renamed token and the control codes would swap positions.
-pub fn mask_unit_lines(lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
-    let mut unit_map: Vec<(String, String)> = Vec::new();
-    let mut masked_lines = Vec::with_capacity(lines.len());
-    for line in lines {
-        let (m, map) = mask_controls(line);
-        let base = unit_map.len();
-        let mut line_out = m;
-        let mut renamed = vec![(String::new(), String::new()); map.len()];
-        for (j, (k, v)) in map.into_iter().enumerate().rev() {
-            let nk = format!("[CTRL_{}]", base + j);
-            line_out = line_out.replacen(&k, &nk, 1);
-            renamed[j] = (nk, v);
-        }
-        unit_map.extend(renamed);
-        masked_lines.push(line_out);
-    }
-    (masked_lines, unit_map)
+
+/// Hiragana / katakana only — CJK ideographs are valid in Chinese output.
+pub fn has_kana(text: &str) -> bool {
+    text.chars().any(|c| matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}'))
+}
+
+pub fn has_hangul(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}'))
 }
 
 /// Rough JP/CJK source-text probe (default ja profile).
@@ -212,29 +168,19 @@ mod tests {
     #[test]
     fn mask_roundtrip() {
         let s = r"\C[1]こんにちは\n[1]";
-        let (m, map) = mask_controls(s);
+        let (m, map) = crate::preserve::PreserveSet::core().mask_line(s);
         assert!(m.contains("[CTRL_"));
         assert_eq!(unmask_controls(&m, &map), s);
     }
 
-    #[test]
-    fn mask_unit_no_renumber_collision() {
-        // Line 0 contributes 1 control, line 1 contributes 2 — the naive
-        // low-first rename used to swap \C[2] and \V[7] on line 1.
-        let lines = vec![r"\C[1]おはよう".to_string(), r"\C[2]やあ\V[7]".to_string()];
-        let (masked, map) = mask_unit_lines(&lines);
-        assert_eq!(masked[0], "[CTRL_0]おはよう");
-        assert_eq!(masked[1], "[CTRL_1]やあ[CTRL_2]");
-        assert_eq!(unmask_controls(&masked[0], &map), lines[0]);
-        assert_eq!(unmask_controls(&masked[1], &map), lines[1]);
-        let m: std::collections::BTreeMap<_, _> = map.into_iter().collect();
-        assert_eq!(m["[CTRL_1]"], r"\C[2]");
-        assert_eq!(m["[CTRL_2]"], r"\V[7]");
-    }
 
     #[test]
     fn ja_detect() {
         assert!(looks_like_source_ja("村を出る"));
         assert!(!looks_like_source_ja("ABC"));
+        assert!(has_kana("アレイ离开了"));
+        assert!(!has_kana("艾蕾离开了"));
+        assert!(has_hangul("안녕"));
+        assert!(!has_hangul("你好"));
     }
 }

@@ -6,11 +6,12 @@ mod learn;
 mod llm;
 mod model;
 mod pipeline;
+mod preserve;
 mod profile;
 mod quality;
+mod review;
 mod store;
 mod textio;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -165,6 +166,16 @@ enum Commands {
     Status {
         #[arg(long)]
         workspace: PathBuf,
+    },
+    /// Mechanical post-translate review (no LLM): residual source, identical copies, preserve loss, namebox drift, glossary
+    Review {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+    /// Workspace text-preserve regexes (hits become [CTRL_n] before translate)
+    Preserve {
+        #[command(subcommand)]
+        command: PreserveCommands,
     },
     /// Generic JSONL translate (no engine). Issue #11 surface.
     /// Input line: {"id","text","context"?,"role"?,"item_type"?}
@@ -325,6 +336,9 @@ enum GlossaryCommands {
         /// Disambiguating description, e.g. "女性名字" / "地点"
         #[arg(long, default_value = "")]
         info: String,
+        /// Match src case-sensitively (English May vs may)
+        #[arg(long)]
+        case_sensitive: bool,
     },
     /// Remove one term
     Remove {
@@ -351,6 +365,31 @@ enum GlossaryCommands {
     Check {
         #[arg(long)]
         workspace: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PreserveCommands {
+    /// List builtin + workspace preserve rules
+    List {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+    /// Add a workspace regex (hits become [CTRL_n])
+    Add {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        pattern: String,
+        #[arg(long, default_value = "")]
+        info: String,
+    },
+    /// Remove a workspace regex by exact pattern string
+    Remove {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        pattern: String,
     },
 }
 
@@ -490,6 +529,13 @@ fn run() -> Result<()> {
             if !no_translate {
                 let tr = pipeline::translate(&ws, &settings, limit, false, false)?;
                 out["translate"] = serde_json::to_value(tr)?;
+                match pipeline::review(&ws) {
+                    Ok(r) => out["review"] = serde_json::to_value(r)?,
+                    Err(e) => {
+                        eprintln!("review: skipped ({e:#})");
+                        out["review"] = serde_json::json!({"error": format!("{e:#}")});
+                    }
+                }
             }
             if !no_writeback && !no_translate {
                 let wb = pipeline::writeback(&ws, &settings, false, true)?;
@@ -504,6 +550,12 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&s)?);
             Ok(())
         }
+        Commands::Review { workspace } => {
+            let r = pipeline::review(&workspace)?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            Ok(())
+        }
+        Commands::Preserve { command } => run_preserve(command),
         Commands::TranslateJsonl {
             input,
             output,
@@ -650,6 +702,7 @@ fn run_glossary(command: GlossaryCommands, settings: &config::Settings) -> Resul
             src,
             dst,
             info,
+            case_sensitive,
         } => {
             let mut g = glossary::load(&workspace);
             g.upsert(glossary::GlossaryTerm {
@@ -659,6 +712,7 @@ fn run_glossary(command: GlossaryCommands, settings: &config::Settings) -> Resul
                 count: 0,
                 status: glossary::TermStatus::Active,
                 source: "human".into(),
+                case_sensitive,
             });
             glossary::ensure_langs(&workspace, &mut g);
             let p = glossary::save(&workspace, &g)?;
@@ -814,6 +868,52 @@ fn run_learn(command: LearnCommands, settings: &config::Settings) -> Result<()> 
             println!(
                 "{}",
                 serde_json::json!({"forgotten": n, "field": field, "status": "ok"})
+            );
+            Ok(())
+        }
+    }
+}
+
+fn run_preserve(command: PreserveCommands) -> Result<()> {
+    match command {
+        PreserveCommands::List { workspace } => {
+            let engine = store::workspace_db(&workspace)
+                .ok()
+                .and_then(|s| s.meta().ok())
+                .map(|m| m.engine)
+                .unwrap_or_else(|| "txt".into());
+            let rules = preserve::list(&workspace, &engine);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "engine": engine,
+                    "count": rules.len(),
+                    "rules": rules,
+                }))?
+            );
+            Ok(())
+        }
+        PreserveCommands::Add {
+            workspace,
+            pattern,
+            info,
+        } => {
+            let p = preserve::add(&workspace, &pattern, &info)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "added": pattern,
+                    "file": p.display().to_string(),
+                    "status": "ok",
+                })
+            );
+            Ok(())
+        }
+        PreserveCommands::Remove { workspace, pattern } => {
+            let removed = preserve::remove(&workspace, &pattern)?;
+            println!(
+                "{}",
+                serde_json::json!({"removed": removed, "pattern": pattern, "status": "ok"})
             );
             Ok(())
         }

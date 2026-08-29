@@ -5,7 +5,9 @@ use crate::knowledge;
 use crate::learn;
 use crate::llm::{Profile, Translator, profile_for_format};
 use crate::model::{TextUnit, Translation, WorkspaceMeta, needs_translation};
+use crate::preserve;
 use crate::profile::{self, CustomAdapter};
+use crate::review;
 use crate::store::{self, Store};
 use crate::textio;
 use anyhow::{Context, Result, bail};
@@ -353,7 +355,9 @@ pub fn translate(
         profile_for_format(&meta.engine),
     )?
     .with_notes(&notes)
-    .with_glossary(terms, settings.glossary.inject_limit);
+    .with_glossary(terms, settings.glossary.inject_limit)
+    .with_preserve(preserve::load(workspace, &meta.engine))
+    .with_neighbors(&store.all_units()?, &store.all_translations()?);
     // Incremental save: each batch hits SQLite immediately so crashes keep progress.
     let results = translator.translate_units_with_sink(&pending, limit, &mut |batch| {
         for tr in batch {
@@ -476,6 +480,10 @@ pub fn status(workspace: &Path) -> Result<StatusReport> {
         passthrough: counts.passthrough,
         domains,
     })
+}
+
+pub fn review(workspace: &Path) -> Result<review::Report> {
+    review::review(workspace)
 }
 
 pub fn translate_jsonl(

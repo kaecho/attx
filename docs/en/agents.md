@@ -43,7 +43,7 @@ Then: `attx doctor --ping` → stage 0 of the pipeline.
 
 ## The staged pipeline
 
-`detect` → `init` → `extract` → `status` → trial `translate --limit 20` → full `translate` → `writeback` (dry-run first for in-place formats). After each stage, report counts and the next step.
+`detect` → `init` → `extract` → `status` → trial `translate --limit 20` → full `translate` → `review` → `writeback` (dry-run first for in-place formats). After each stage, report counts and the next step.
 
 Hard stops the Skill enforces: `doctor --ping` 401 (no key-retry spam), no adapter found (switch to the profile toolchain), systematic trial failures (stop, don't burn money), and **writeback that overwrites a game directory requires explicit user permission**.
 

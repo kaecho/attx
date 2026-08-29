@@ -27,11 +27,11 @@
 use crate::config::{GlossaryMethod, Settings};
 use crate::knowledge;
 use crate::llm;
-use crate::model::TextUnit;
+use crate::model::{TextUnit, Translation};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -85,6 +85,9 @@ pub struct GlossaryTerm {
     pub status: TermStatus,
     #[serde(default)]
     pub source: String,
+    /// English `May` vs `may`. CJK is unaffected. Default off.
+    #[serde(default)]
+    pub case_sensitive: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -450,7 +453,16 @@ fn build_stats(
         .max(1);
     let max_terms = settings.glossary.max_terms.max(1);
 
-    let mined = mine_candidates(units, &meta.source_lang);
+    let mut mined = mine_candidates(units, &meta.source_lang);
+    let nameboxes = namebox_terms(units);
+    let namebox_set: BTreeSet<String> = nameboxes.iter().map(|(s, _)| s.clone()).collect();
+    for (src, c) in &nameboxes {
+        if let Some(e) = mined.iter_mut().find(|(t, _)| t == src) {
+            e.1 = e.1.max(*c);
+        } else {
+            mined.push((src.clone(), *c));
+        }
+    }
     let candidates = mined.len();
 
     let mut glossary = load(workspace);
@@ -458,9 +470,12 @@ fn build_stats(
     glossary.target_lang = meta.target_lang.clone();
 
     // Anything already decided — named or vetoed — is not worth paying for again.
+    // Namebox strings bypass min_occurrences: they are already speaker plates.
     let fresh: Vec<(String, usize)> = mined
         .into_iter()
-        .filter(|(t, c)| *c >= min_occ && glossary.find(t).is_none())
+        .filter(|(t, c)| {
+            glossary.find(t).is_none() && (*c >= min_occ || namebox_set.contains(t))
+        })
         .collect();
     let above_threshold = fresh.len();
     let truncated = above_threshold.saturating_sub(max_terms);
@@ -513,10 +528,11 @@ fn build_stats(
                             glossary.upsert(GlossaryTerm {
                                 src: n.src,
                                 dst: n.dst,
-                                info: n.info,
+                                info: normalize_info(&n.info).unwrap_or_else(|| "其他".into()),
                                 count,
                                 status: TermStatus::Active,
                                 source: "auto:stats".into(),
+                                case_sensitive: false,
                             });
                             added += 1;
                         } else {
@@ -527,6 +543,7 @@ fn build_stats(
                                 count,
                                 status: TermStatus::Rejected,
                                 source: "auto:stats".into(),
+                                case_sensitive: false,
                             });
                             rejected += 1;
                         }
@@ -645,12 +662,56 @@ fn build_llm(
         }
     }
 
+    let nameboxes = namebox_terms(units);
+    let namebox_set: BTreeSet<String> = nameboxes.iter().map(|(s, _)| s.clone()).collect();
+    let missing: Vec<(String, usize)> = nameboxes
+        .into_iter()
+        .filter(|(s, _)| glossary.find(s).is_none() && !dst_votes.contains_key(s))
+        .collect();
+    if !missing.is_empty() {
+        for chunk in missing.chunks(NAME_BATCH) {
+            match name_candidates(client, chunk, &meta.source_lang, &meta.target_lang) {
+                Ok(named) => {
+                    for n in named {
+                        if !n.keep || n.dst.trim().is_empty() {
+                            continue;
+                        }
+                        let row = ExtractedTerm {
+                            src: n.src.clone(),
+                            dst: n.dst.clone(),
+                            info: n.info.clone(),
+                        };
+                        if !accept_llm_term(units, &row) {
+                            continue;
+                        }
+                        let info =
+                            normalize_info(&n.info).unwrap_or_else(|| "未知性别角色".into());
+                        *dst_votes
+                            .entry(n.src.clone())
+                            .or_default()
+                            .entry(n.dst)
+                            .or_insert(0) += 1;
+                        *info_votes.entry(n.src).or_default().entry(info).or_insert(0) += 1;
+                    }
+                }
+                Err(e) => eprintln!("glossary: namebox naming failed: {e:#}"),
+            }
+        }
+    }
+
     // Rank by total dst votes (proxy for recurrence), then src for stability.
+    // Namebox entries stay at the front so max_terms cannot drop speaker plates.
     let mut ranked: Vec<(String, usize)> = dst_votes
         .iter()
         .map(|(src, votes)| (src.clone(), votes.values().sum()))
         .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.sort_by(|a, b| {
+        let an = namebox_set.contains(&a.0);
+        let bn = namebox_set.contains(&b.0);
+        bn.cmp(&an)
+            .then(b.1.cmp(&a.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
     let candidates = ranked.len();
     let truncated = candidates.saturating_sub(max_terms);
     if truncated > 0 {
@@ -663,19 +724,11 @@ fn build_llm(
     let mut sample = Vec::new();
     for (src, count) in ranked.into_iter().take(max_terms) {
         let dst = winner(dst_votes.get(&src).unwrap());
-        let mut info = info_votes
+        let info = info_votes
             .get(&src)
             .map(winner)
             .unwrap_or_else(|| "其他".into());
-        let info_l = info.to_ascii_lowercase();
-        if info_l == "other" || info_l == "others" {
-            info = "其他".into();
-        } else if !LLM_INFO_OK.iter().any(|ok| *ok == info) {
-            // Keep free-form short labels from the model; empty → 其他.
-            if info.trim().is_empty() {
-                info = "其他".into();
-            }
-        }
+        let info = normalize_info(&info).unwrap_or_else(|| "其他".into());
         if dst.is_empty() || dst == src {
             continue;
         }
@@ -689,6 +742,7 @@ fn build_llm(
             count,
             status: TermStatus::Active,
             source: "auto:llm".into(),
+            case_sensitive: false,
         });
         added += 1;
     }
@@ -809,25 +863,73 @@ fn accept_llm_term(units: &[TextUnit], row: &ExtractedTerm) -> bool {
     if knowledge::is_machine_literal(src) {
         return false;
     }
-    // Must be a real substring of some unit (anti-hallucination).
     if !units
         .iter()
         .any(|u| u.original_lines.iter().any(|l| l.contains(src)))
     {
         return false;
     }
-    let info = row.info.trim();
-    if info.is_empty() {
-        return true; // will default later
+    normalize_info(&row.info).is_some()
+}
+
+/// Map a model/human info label onto the LinguaGacha-style whitelist.
+pub fn normalize_info(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Some("其他".into());
     }
-    let lower = info.to_ascii_lowercase();
+    if LLM_INFO_OK.iter().any(|ok| *ok == t) {
+        return Some(t.to_string());
+    }
+    let lower = t.to_ascii_lowercase();
     if lower == "other" || lower == "others" {
-        return true; // normalize later via winner; still a valid bucket
+        return Some("其他".into());
     }
-    // Soft check: unknown labels still accepted (model may use short forms);
-    // whitelist is guidance in the prompt, not a hard gate beyond empty.
-    let _ = LLM_INFO_OK;
-    true
+    let mapped = match (t, lower.as_str()) {
+        ("男" | "男性", _) | (_, "male") => "男性角色",
+        ("女" | "女性", _) | (_, "female") => "女性角色",
+        (_, "place" | "location") => "地名",
+        (_, "org" | "organization") => "组织",
+        (_, "family" | "clan") => "家族",
+        (_, "item") => "特殊物品",
+        (_, "skill") => "特殊技能",
+        (_, "creature" | "monster") => "特殊生物",
+        _ => return None,
+    };
+    Some(mapped.into())
+}
+
+pub fn is_namebox(u: &TextUnit) -> bool {
+    u.domain == "namebox" || u.role == "namebox"
+}
+
+/// Nameplate strings that must enter the glossary even if the miner missed them.
+pub fn namebox_terms(units: &[TextUnit]) -> Vec<(String, usize)> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for u in units {
+        if !is_namebox(u) {
+            continue;
+        }
+        let src = u.joined_text().trim().to_string();
+        if src.chars().count() < 2 || knowledge::is_machine_literal(&src) {
+            continue;
+        }
+        *counts.entry(src).or_insert(0) += 1;
+    }
+    counts.into_iter().collect()
+}
+
+pub fn term_hits_text(term: &GlossaryTerm, text: &str) -> bool {
+    if term.src.is_empty() {
+        return false;
+    }
+    if term.case_sensitive {
+        text.contains(&term.src)
+    } else if text.contains(&term.src) {
+        true
+    } else {
+        text.to_lowercase().contains(&term.src.to_lowercase())
+    }
 }
 
 fn winner(votes: &BTreeMap<String, usize>) -> String {
@@ -906,7 +1008,7 @@ pub fn select_for_batch<'a>(
             t.status == TermStatus::Active
                 && !t.dst.is_empty()
                 && !t.src.is_empty()
-                && text.contains(&t.src)
+                && term_hits_text(t, text)
         })
         .take(limit)
         .collect()
@@ -941,22 +1043,30 @@ pub fn check(workspace: &Path) -> Result<CheckReport> {
     let units = store.all_units()?;
     let translations = store.all_translations()?;
     let glossary = load(workspace);
-    let active = glossary.active();
+    Ok(check_units(&units, &translations, &glossary))
+}
 
+pub fn check_units(
+    units: &[TextUnit],
+    translations: &BTreeMap<String, Translation>,
+    glossary: &Glossary,
+) -> CheckReport {
+    let active = glossary.active();
     let mut violations = Vec::new();
     let mut seen = 0usize;
     let mut ok = 0usize;
     for t in &active {
         let mut occurrences = 0usize;
         let mut applied = 0usize;
-        for u in &units {
+        for u in units {
             let Some(tr) = translations.get(&u.id) else {
                 continue;
             };
             if tr.passthrough {
-                continue; // the model never translated it; not a glossary failure
+                continue;
             }
-            if !u.original_lines.iter().any(|l| l.contains(&t.src)) {
+            let src_text = u.original_lines.join("\n");
+            if !term_hits_text(t, &src_text) {
                 continue;
             }
             occurrences += 1;
@@ -979,15 +1089,13 @@ pub fn check(workspace: &Path) -> Result<CheckReport> {
             });
         }
     }
-    // Worst offenders first: the term missed the most times is the one worth
-    // fixing by hand.
     violations.sort_by_key(|v| std::cmp::Reverse(v.occurrences - v.applied));
-    Ok(CheckReport {
+    CheckReport {
         active_terms: active.len(),
         terms_seen: seen,
         terms_fully_applied: ok,
         violations,
-    })
+    }
 }
 
 // ---- import / export ----
@@ -1026,6 +1134,10 @@ pub fn import_json(workspace: &Path, file: &Path) -> Result<usize> {
                     count: 0,
                     status: TermStatus::Active,
                     source: "import".into(),
+                    case_sensitive: it
+                        .get("case_sensitive")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false),
                 });
             }
         }
@@ -1042,6 +1154,7 @@ pub fn import_json(workspace: &Path, file: &Path) -> Result<usize> {
                     count: 0,
                     status: TermStatus::Active,
                     source: "import".into(),
+                    case_sensitive: false,
                 });
             }
         }
@@ -1064,7 +1177,14 @@ pub fn export_json(workspace: &Path, file: &Path) -> Result<usize> {
         .terms
         .iter()
         .filter(|t| t.status == TermStatus::Active)
-        .map(|t| serde_json::json!({"src": t.src, "dst": t.dst, "info": t.info}))
+        .map(|t| {
+            serde_json::json!({
+                "src": t.src,
+                "dst": t.dst,
+                "info": t.info,
+                "case_sensitive": t.case_sensitive,
+            })
+        })
         .collect();
     let n = items.len();
     std::fs::write(file, serde_json::to_string_pretty(&items)?)
@@ -1191,6 +1311,7 @@ mod tests {
             count,
             status: TermStatus::Active,
             source: "auto".into(),
+            case_sensitive: false,
         }
     }
 
@@ -1222,6 +1343,31 @@ mod tests {
         assert_eq!(got[0].src, "アレイ");
     }
 
+    #[test]
+    fn case_insensitive_match_unless_flagged() {
+        let mut sensitive = term("May", "梅", 3);
+        sensitive.case_sensitive = true;
+        let terms = vec![sensitive, term("Alice", "爱丽丝", 3)];
+        assert_eq!(select_for_batch(&terms, "may and Alice", 10).len(), 1);
+        assert_eq!(select_for_batch(&terms, "May and Alice", 10).len(), 2);
+    }
+
+    #[test]
+    fn namebox_terms_are_counted() {
+        let mut u = unit("アレイ");
+        u.domain = "namebox".into();
+        u.role = "namebox".into();
+        assert_eq!(namebox_terms(&[u])[0].0, "アレイ");
+    }
+
+    #[test]
+    fn normalize_info_whitelist_and_aliases() {
+        assert_eq!(normalize_info("女性角色").as_deref(), Some("女性角色"));
+        assert_eq!(normalize_info("female").as_deref(), Some("女性角色"));
+        assert_eq!(normalize_info("").as_deref(), Some("其他"));
+        assert!(normalize_info("女主光环").is_none());
+    }
+
     // ---- storage ----
 
     #[test]
@@ -1239,6 +1385,7 @@ mod tests {
                     count: 120,
                     status: TermStatus::Rejected,
                     source: "auto".into(),
+                    case_sensitive: false,
                 },
             ],
         };
@@ -1281,7 +1428,6 @@ mod tests {
         assert_eq!(g.active().len(), 2);
         assert_eq!(g.find("アレイ").unwrap().info, "女性名字");
 
-        // …and export round-trips what import accepted.
         let out = dir.join("out.json");
         assert_eq!(export_json(&dir, &out).unwrap(), 2);
         let back: serde_json::Value =
@@ -1336,6 +1482,17 @@ mod tests {
                 info: "女性角色".into(),
             }
         ));
+        assert!(
+            !accept_llm_term(
+                &units,
+                &ExtractedTerm {
+                    src: "アレイ".into(),
+                    dst: "艾蕾".into(),
+                    info: "女主光环".into(),
+                }
+            ),
+            "unknown info labels are rejected"
+        );
     }
 
     #[test]

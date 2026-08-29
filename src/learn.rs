@@ -20,7 +20,8 @@
 
 use crate::config::{LlmClient, Settings};
 use crate::knowledge::{self, Entry, FieldEntry, NoteEntry, Scope, Status, Verdict};
-use crate::model::{TextUnit, Translation, mask_controls};
+use crate::model::{TextUnit, Translation};
+use crate::preserve;
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -76,7 +77,7 @@ struct RunStats {
 }
 
 fn count_controls(lines: &[String]) -> usize {
-    lines.iter().map(|l| mask_controls(l).1.len()).sum()
+    preserve::PreserveSet::core().mask_unit_lines(lines).1.len()
 }
 
 /// Collect per-field and run-level evidence from a workspace.

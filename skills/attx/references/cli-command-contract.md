@@ -121,6 +121,41 @@ attx status --workspace <工作区>
 `passthrough`：模型拒答/失败后以原文占位的条数（算已译）；
 收尾时 >0 应报告用户并可 `translate --retry-passthrough` 重试。
 
+## review
+
+```bash
+attx review --workspace <工作区>
+```
+
+机械审校，不调模型。stdout JSON：
+
+```json
+{
+  "total": 100,
+  "translated": 90,
+  "pending": 8,
+  "passthrough": 2,
+  "glossary": {"active_terms": 12, "terms_seen": 12, "terms_fully_applied": 10, "violations": []},
+  "residual_source": {"count": 1, "sample": [{"location": "...", "unit_id": "...", "detail": "..."}]},
+  "identical": {"count": 0, "sample": []},
+  "control_loss": {"count": 0, "sample": []},
+  "namebox_mismatch": {"count": 0, "sample": []}
+}
+```
+
+`sample` 每类最多 40 条。全量清单走 `export-jsonl`。`attx run` 在 translate 之后也会附带 `review`。
+有命中 → 向用户报告，用 export/import 修，不要假装完成。
+
+## preserve
+
+```bash
+attx preserve list   --workspace <工作区>
+attx preserve add    --workspace <工作区> --pattern '<regex>' [--info <说明>]
+attx preserve remove --workspace <工作区> --pattern '<regex>'
+```
+
+命中的片段在送模型前变成 `[CTRL_n]`，写回前还原。内置：RMMZ 控制符、`{ident}`、`%s`/`%d`；`renpy` 引擎额外保护 `[ident]`。工作区规则写在 `preserve.toml`。空匹配 / 非法正则拒绝。
+
 ## translate
 
 ```bash
@@ -185,7 +220,7 @@ import 按 `id` == unit.`location` 匹配；需要非空 `translation_lines` 或
 ```bash
 attx glossary build  --workspace <工作区> [--method llm|stats] [--min-occurrences N] [--dry-run]
 attx glossary list   --workspace <工作区> [--all]
-attx glossary add    --workspace <工作区> --src <原文> --dst <译名> [--info <消歧描述>]
+attx glossary add    --workspace <工作区> --src <原文> --dst <译名> [--info <消歧描述>] [--case-sensitive]
 attx glossary remove --workspace <工作区> --src <原文>
 attx glossary import --workspace <工作区> --file <json>
 attx glossary export --workspace <工作区> --file <json>

@@ -110,6 +110,7 @@ $ATTX translate --workspace "$WS" --limit 20
 $ATTX status --workspace "$WS"
 # 用户确认后：
 $ATTX translate --workspace "$WS"
+$ATTX review --workspace "$WS"
 $ATTX writeback --workspace "$WS" --dry-run
 # 文档类直接写（产出翻译副本）；rmmz 需用户明确允许后：
 $ATTX writeback --workspace "$WS"

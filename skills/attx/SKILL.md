@@ -131,7 +131,7 @@ attx doctor --ping
 | 5 试译 | 小批量验模型 | `translate --limit 20` | 有成功条目；无规则性全败 |
 | 6 全量译 | 清 pending | `translate` 多轮 | pending 下降；可 `export-jsonl` 审校 |
 | 7 写回 | 产出译文文件 | `writeback`（rmmz 先 `--dry-run` 并取得许可） | files>0；文档类产出 `<名>.<语言>.<扩展名>` |
-| 7.5 回检 | 术语是否生效（建了术语表才做） | `glossary check --workspace` | violations 为空或已向用户报告 |
+| 7.5 回检 | 机械审校（无 LLM） | `review --workspace` | 向用户报告 residual_source / identical / control_loss / namebox_mismatch / glossary.violations；有命中则 export-jsonl 修 |
 | 8 反馈 | 补漏 | export/import/translate/writeback | 问题可定位并再写回 |
 
 `writeback` 成功后 attx 会**自动**把本轮经验写入知识库（零 API 成本）。若输出里
@@ -223,7 +223,7 @@ attx init --input <输入> --profile ./fmt.toml --src ja --dst zh     # 后续�
 约束：
 1. 只通过 attx CLI 操作；禁止手改输入文件、attx.db、工具源码。
 2. 若未配置模型，先用问答向导帮我配置 setting.toml；不要把 API Key 打进对话记录。
-3. 先 doctor --ping、detect、init、extract、status；再 limit 20 试译；通过后全量 translate。
+3. 先 doctor --ping、detect、init、extract、status；再 limit 20 试译；通过后全量 translate；写回前跑 review。
 4. RPG Maker 游戏写回前必须得到我明确允许；文档类直接产出翻译副本即可。
 5. 每阶段结束用中文汇报：做了什么、status 数字、下一步、是否需要我决策。
 ```

@@ -15,6 +15,7 @@ Translate ebooks, documents, subtitles, localization files, and games with any O
 - **Resumable by design** — every run is checkpointed in `attx.db`; stop anytime, continue anytime. Failed units become visible *passthrough* placeholders instead of killing the run.
 - **Self-improving** — successful runs leave extraction experience behind (`skip`/`extract` field judgements), reviewed by you, never applied silently to delete text.
 - **Glossary** — one agreed translation per proper noun across a whole work, injected per batch.
+- **Review** — after translate, a free mechanical scan for leftover source script, identical copies, dropped codes, and namebox drift.
 
 ---
 
@@ -262,6 +263,7 @@ attx glossary list --workspace .attx
 attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info "female given name"
 attx glossary import --workspace .attx --file terms.json
 attx glossary check --workspace .attx             # terms the translation ignored
+attx review --workspace .attx                     # residual source, identical copies, dropped codes, namebox drift
 ```
 
 Two methods:
