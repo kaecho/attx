@@ -6,41 +6,36 @@
 //! person. Batching makes this structural, not accidental: no single request
 //! ever sees enough of the work to be consistent with the rest of it.
 //!
-//! Two extraction methods:
+//! Extraction is LLM-based throughout (the LinguaGacha strategy):
 //!
 //! ```text
-//! llm   (default): source batches → model emits {src,dst,info} → vote/cap → inject
-//! stats:           mine (regex) → threshold → cap → name (LLM) → inject
+//! source batches → model emits {src,dst,info} → substring gate
+//!   → min_occurrences gate (real source hits) → vote/cap → inject
 //! ```
 //!
-//! `stats` keeps LLM spend proportional to *term count*. `llm` spends on text
-//! volume but catches proper nouns regex cannot see. Both write the same
-//! `glossary.toml` and share inject/check.
+//! No regex mining: heuristics only see katakana runs and capitalised words,
+//! so organisations, items, skills and world concepts never surface. The model
+//! reads the raw source and decides what is a term; the mechanical gates are
+//! only anti-hallucination (src must be a real substring) and cost control
+//! (a term must actually occur at least `min_occurrences` times).
 //!
-//! Two failure modes shape the design:
-//! * Statistics cannot tell a proper noun from a common word — `春` appears
-//!   constantly and is not a term. The model gets a `keep` flag (stats) or a
-//!   type whitelist (llm); vetoes are remembered so a re-build does not re-ask.
-//! * A wrong `dst` is applied everywhere, which makes it *harder* to spot than a
-//!   one-off mistranslation. Hence `check`, and hence entries stay editable.
+//! One failure mode shapes the design: a wrong `dst` is applied everywhere,
+//! which makes it *harder* to spot than a one-off mistranslation. Hence
+//! `check`, and hence entries stay editable.
 
-use crate::config::{GlossaryMethod, Settings};
+use crate::config::Settings;
 use crate::knowledge;
 use crate::llm;
 use crate::model::{TextUnit, Translation};
 use anyhow::{Context, Result, bail};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 pub const GLOSSARY_VERSION: u32 = 1;
 pub const GLOSSARY_FILE: &str = "glossary.toml";
 
-/// Candidates per stats-method naming request.
-const NAME_BATCH: usize = 40;
-/// Source characters per llm-method extract request.
+/// Source characters per extract request.
 const EXTRACT_BATCH_CHARS: usize = 3500;
 /// Hard cap on extract batches so a huge workspace cannot open an unbounded bill.
 /// ponytail: raise or make configurable if novels routinely need deeper coverage.
@@ -57,6 +52,7 @@ const LLM_INFO_OK: &[&str] = &[
     "特殊物品",
     "特殊技能",
     "特殊生物",
+    "特殊概念",
     "其他",
 ];
 
@@ -208,194 +204,28 @@ pub fn ensure_langs(workspace: &Path, g: &mut Glossary) {
     }
 }
 
-// ---- candidate mining ----
+// ---- occurrence counting ----
 
-// Japanese has no word boundaries, so mining leans on script transitions:
-// katakana runs and kanji runs are where proper nouns live in games and light
-// novels. Recall is favoured over precision — the occurrence threshold and the
-// model's `keep` veto are the two filters that follow.
-static JA_KATAKANA: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[\x{30A1}-\x{30FA}\x{30FC}]{2,}").expect("katakana regex"));
-/// `エルギア国` — a katakana name with a kanji suffix reads as one term.
-static JA_KATAKANA_KANJI: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\x{30A1}-\x{30FA}\x{30FC}]{2,}[\x{4E00}-\x{9FFF}]{1,3}")
-        .expect("katakana+kanji regex")
-});
-static JA_KANJI: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[\x{4E00}-\x{9FFF}]{2,6}").expect("kanji regex"));
-static EN_PROPER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b").expect("proper noun regex"));
-
-/// High-frequency words the patterns above will always surface and that are
-/// never worth a glossary slot. Deliberately short: this list exists to stop
-/// obvious noise from eating the `max_terms` budget, not to make semantic
-/// judgements — that is the model's job via `keep`.
-const JA_STOPWORDS: &[&str] = &[
-    "自分",
-    "今日",
-    "明日",
-    "昨日",
-    "時間",
-    "世界",
-    "人間",
-    "本当",
-    "大丈夫",
-    "場合",
-    "必要",
-    "場所",
-    "部屋",
-    "仕事",
-    "相手",
-    "最初",
-    "最後",
-    "普通",
-    "一緒",
-    "全部",
-    "意味",
-    "問題",
-    "理由",
-    "関係",
-    "状態",
-    "状況",
-    "気持",
-    "気分",
-    "男性",
-    "女性",
-    "子供",
-    "二人",
-    "一人",
-    "自身",
-    "今回",
-    "現在",
-    "説明",
-    "確認",
-    "使用",
-];
-
-const EN_STOPWORDS: &[&str] = &[
-    "The",
-    "This",
-    "That",
-    "These",
-    "Those",
-    "There",
-    "Then",
-    "They",
-    "Their",
-    "What",
-    "When",
-    "Where",
-    "Which",
-    "While",
-    "With",
-    "Without",
-    "You",
-    "Your",
-    "And",
-    "But",
-    "For",
-    "From",
-    "Have",
-    "Has",
-    "Had",
-    "Not",
-    "Are",
-    "Was",
-    "Were",
-    "Will",
-    "Would",
-    "Could",
-    "Should",
-    "Yes",
-    "Well",
-    "Just",
-    "Now",
-    "Here",
-    "Very",
-    "Really",
-    "Something",
-    "Nothing",
-    "Anything",
-    "Everything",
-    "Someone",
-    "Anyone",
-    "Everyone",
-    "Nobody",
-    "Because",
-    "Before",
-    "After",
-    "Even",
-    "Only",
-    "Also",
-    "Still",
-    "Maybe",
-    "Okay",
-    "Let",
-    "Get",
-    "Got",
-    "Can",
-    "How",
-    "Why",
-    "Who",
-    "All",
-    "Its",
-    "Our",
-    "His",
-    "Her",
-    "She",
-    "Him",
-    "Them",
-    "Was",
-];
-
-fn is_noise(term: &str, src_lang: &str) -> bool {
-    let n = term.chars().count();
-    if n < 2 {
-        return true;
-    }
-    if knowledge::is_machine_literal(term) {
-        return true;
-    }
-    if src_lang == "en" {
-        return n < 3 || EN_STOPWORDS.contains(&term);
-    }
-    JA_STOPWORDS.contains(&term)
-}
-
-/// Count proper-noun candidates across a workspace's source text.
-/// Returns `(term, occurrences)` sorted by count descending, then by term so
-/// the order is stable across runs.
-pub fn mine_candidates(units: &[TextUnit], src_lang: &str) -> Vec<(String, usize)> {
-    let patterns: Vec<&Regex> = if src_lang.eq_ignore_ascii_case("en") {
-        vec![&EN_PROPER]
-    } else {
-        vec![&JA_KATAKANA, &JA_KATAKANA_KANJI, &JA_KANJI]
-    };
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for u in units {
-        for line in &u.original_lines {
-            for re in &patterns {
-                for m in re.find_iter(line) {
-                    let t = m.as_str().trim();
-                    if is_noise(t, src_lang) {
-                        continue;
-                    }
-                    *counts.entry(t.to_string()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-    let mut out: Vec<(String, usize)> = counts.into_iter().collect();
-    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    out
+/// Count how many lines of source text contain `term`.
+///
+/// A line-level count rather than a substring-count: overlapping matches are
+/// ambiguous, and one occurrence per dialogue line is what "this name keeps
+/// coming back" means in a game or novel. Used to gate and rank LLM-extracted
+/// terms — votes only say *the model saw it in a sample batch*; this says
+/// *the work itself keeps using it*.
+pub fn count_occurrences(units: &[TextUnit], term: &str) -> usize {
+    units
+        .iter()
+        .filter(|u| u.original_lines.iter().any(|l| l.contains(term)))
+        .count()
 }
 
 // ---- build ----
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BuildReport {
-    pub method: String,
     pub candidates: usize,
+    /// Terms whose real occurrence count met `min_occurrences`.
     pub above_threshold: usize,
     /// Candidates dropped by `max_terms`. Reported rather than silently cut:
     /// a truncated run that looks complete is worse than a noisy one.
@@ -411,13 +241,12 @@ pub struct BuildReport {
     pub sample: Vec<String>,
 }
 
-/// Build a glossary for a workspace.
+/// Build a glossary for a workspace: LLM extraction over source batches.
 ///
-/// `method` / `min_occurrences` override `[glossary]` when set (CLI flags).
+/// `min_occurrences` overrides `[glossary]` when set (CLI flag).
 pub fn build(
     workspace: &Path,
     settings: &Settings,
-    method: Option<GlossaryMethod>,
     min_occurrences: Option<usize>,
     dry_run: bool,
 ) -> Result<BuildReport> {
@@ -430,145 +259,7 @@ pub fn build(
             workspace.display()
         );
     }
-
-    let method = method.unwrap_or(settings.glossary.method);
-    match method {
-        GlossaryMethod::Llm => build_llm(workspace, settings, &meta, &units, dry_run),
-        GlossaryMethod::Stats => {
-            build_stats(workspace, settings, &meta, &units, min_occurrences, dry_run)
-        }
-    }
-}
-
-fn build_stats(
-    workspace: &Path,
-    settings: &Settings,
-    meta: &crate::model::WorkspaceMeta,
-    units: &[TextUnit],
-    min_occurrences: Option<usize>,
-    dry_run: bool,
-) -> Result<BuildReport> {
-    let min_occ = min_occurrences
-        .unwrap_or(settings.glossary.min_occurrences)
-        .max(1);
-    let max_terms = settings.glossary.max_terms.max(1);
-
-    let mut mined = mine_candidates(units, &meta.source_lang);
-    let nameboxes = namebox_terms(units);
-    let namebox_set: BTreeSet<String> = nameboxes.iter().map(|(s, _)| s.clone()).collect();
-    for (src, c) in &nameboxes {
-        if let Some(e) = mined.iter_mut().find(|(t, _)| t == src) {
-            e.1 = e.1.max(*c);
-        } else {
-            mined.push((src.clone(), *c));
-        }
-    }
-    let candidates = mined.len();
-
-    let mut glossary = load(workspace);
-    glossary.source_lang = meta.source_lang.clone();
-    glossary.target_lang = meta.target_lang.clone();
-
-    // Anything already decided — named or vetoed — is not worth paying for again.
-    // Namebox strings bypass min_occurrences: they are already speaker plates.
-    let fresh: Vec<(String, usize)> = mined
-        .into_iter()
-        .filter(|(t, c)| {
-            glossary.find(t).is_none() && (*c >= min_occ || namebox_set.contains(t))
-        })
-        .collect();
-    let above_threshold = fresh.len();
-    let truncated = above_threshold.saturating_sub(max_terms);
-    let asked: Vec<(String, usize)> = fresh.into_iter().take(max_terms).collect();
-
-    if truncated > 0 {
-        eprintln!(
-            "glossary: {truncated} candidate(s) above the threshold were dropped by max_terms={max_terms}; \
-             raise it or raise min_occurrences to change what is covered"
-        );
-    }
-
-    let sample: Vec<String> = asked
-        .iter()
-        .take(10)
-        .map(|(t, c)| format!("{t} ({c})"))
-        .collect();
-
-    if dry_run {
-        return Ok(BuildReport {
-            method: GlossaryMethod::Stats.as_str().into(),
-            candidates,
-            above_threshold,
-            truncated,
-            asked: asked.len(),
-            added: 0,
-            rejected: 0,
-            total_active: glossary.active().len(),
-            min_occurrences: min_occ,
-            dry_run: true,
-            file: path(workspace).display().to_string(),
-            sample,
-        });
-    }
-
-    let mut added = 0usize;
-    let mut rejected = 0usize;
-    if !asked.is_empty() {
-        let client = crate::config::require_llm(settings)?;
-        for chunk in asked.chunks(NAME_BATCH) {
-            match name_candidates(client, chunk, &meta.source_lang, &meta.target_lang) {
-                Ok(named) => {
-                    for n in named {
-                        let count = chunk
-                            .iter()
-                            .find(|(t, _)| *t == n.src)
-                            .map(|(_, c)| *c)
-                            .unwrap_or(0);
-                        if n.keep && !n.dst.trim().is_empty() {
-                            glossary.upsert(GlossaryTerm {
-                                src: n.src,
-                                dst: n.dst,
-                                info: normalize_info(&n.info).unwrap_or_else(|| "其他".into()),
-                                count,
-                                status: TermStatus::Active,
-                                source: "auto:stats".into(),
-                                case_sensitive: false,
-                            });
-                            added += 1;
-                        } else {
-                            glossary.upsert(GlossaryTerm {
-                                src: n.src,
-                                dst: String::new(),
-                                info: n.info,
-                                count,
-                                status: TermStatus::Rejected,
-                                source: "auto:stats".into(),
-                                case_sensitive: false,
-                            });
-                            rejected += 1;
-                        }
-                    }
-                }
-                Err(e) => eprintln!("glossary: naming batch failed: {e:#}"),
-            }
-        }
-    }
-
-    let file = save(workspace, &glossary)?;
-    Ok(BuildReport {
-        method: GlossaryMethod::Stats.as_str().into(),
-        candidates,
-        above_threshold,
-        truncated,
-        asked: asked.len(),
-        added,
-        rejected,
-        total_active: glossary.active().len(),
-        min_occurrences: min_occ,
-        dry_run: false,
-        file: file.display().to_string(),
-        sample,
-    })
+    build_llm(workspace, settings, &meta, &units, min_occurrences, dry_run)
 }
 
 fn build_llm(
@@ -576,9 +267,14 @@ fn build_llm(
     settings: &Settings,
     meta: &crate::model::WorkspaceMeta,
     units: &[TextUnit],
+    min_occurrences: Option<usize>,
     dry_run: bool,
 ) -> Result<BuildReport> {
     let max_terms = settings.glossary.max_terms.max(1);
+    // A floor of 1 keeps the flag a *threshold* on recurrence: an LLM-extracted
+    // term that never re-occurs in the source is noise or a hallucination, and
+    // the substring gate already guarantees the one hit.
+    let min_occ = min_occurrences.unwrap_or(settings.glossary.min_occurrences).max(1);
     let batches = source_batches(units, EXTRACT_BATCH_CHARS, EXTRACT_MAX_BATCHES);
     let asked = batches.len();
 
@@ -595,7 +291,6 @@ fn build_llm(
 
     if dry_run {
         return Ok(BuildReport {
-            method: GlossaryMethod::Llm.as_str().into(),
             candidates: 0,
             above_threshold: 0,
             truncated: 0,
@@ -603,7 +298,7 @@ fn build_llm(
             added: 0,
             rejected: 0,
             total_active: glossary.active().len(),
-            min_occurrences: 0,
+            min_occurrences: min_occ,
             dry_run: true,
             file: path(workspace).display().to_string(),
             sample,
@@ -613,7 +308,6 @@ fn build_llm(
     if batches.is_empty() {
         let file = path(workspace);
         return Ok(BuildReport {
-            method: GlossaryMethod::Llm.as_str().into(),
             candidates: 0,
             above_threshold: 0,
             truncated: 0,
@@ -621,7 +315,7 @@ fn build_llm(
             added: 0,
             rejected: 0,
             total_active: glossary.active().len(),
-            min_occurrences: 0,
+            min_occurrences: min_occ,
             dry_run: false,
             file: file.display().to_string(),
             sample: vec![],
@@ -662,49 +356,20 @@ fn build_llm(
         }
     }
 
-    let nameboxes = namebox_terms(units);
-    let namebox_set: BTreeSet<String> = nameboxes.iter().map(|(s, _)| s.clone()).collect();
-    let missing: Vec<(String, usize)> = nameboxes
+    // Rank by real occurrences in the source (not batch votes — those only say
+    // the sampled batches happened to contain the term). Namebox speaker plates
+    // bypass the floor and stay at the front so max_terms cannot drop them.
+    let namebox_set: BTreeSet<String> = namebox_terms(units)
         .into_iter()
-        .filter(|(s, _)| glossary.find(s).is_none() && !dst_votes.contains_key(s))
+        .map(|(s, _)| s)
         .collect();
-    if !missing.is_empty() {
-        for chunk in missing.chunks(NAME_BATCH) {
-            match name_candidates(client, chunk, &meta.source_lang, &meta.target_lang) {
-                Ok(named) => {
-                    for n in named {
-                        if !n.keep || n.dst.trim().is_empty() {
-                            continue;
-                        }
-                        let row = ExtractedTerm {
-                            src: n.src.clone(),
-                            dst: n.dst.clone(),
-                            info: n.info.clone(),
-                        };
-                        if !accept_llm_term(units, &row) {
-                            continue;
-                        }
-                        let info =
-                            normalize_info(&n.info).unwrap_or_else(|| "未知性别角色".into());
-                        *dst_votes
-                            .entry(n.src.clone())
-                            .or_default()
-                            .entry(n.dst)
-                            .or_insert(0) += 1;
-                        *info_votes.entry(n.src).or_default().entry(info).or_insert(0) += 1;
-                    }
-                }
-                Err(e) => eprintln!("glossary: namebox naming failed: {e:#}"),
-            }
-        }
-    }
-
-    // Rank by total dst votes (proxy for recurrence), then src for stability.
-    // Namebox entries stay at the front so max_terms cannot drop speaker plates.
     let mut ranked: Vec<(String, usize)> = dst_votes
-        .iter()
-        .map(|(src, votes)| (src.clone(), votes.values().sum()))
+        .keys()
+        .map(|src| (src.clone(), count_occurrences(units, src)))
+        .filter(|(src, n)| *n >= min_occ || namebox_set.contains(src))
         .collect();
+    let candidates = dst_votes.len();
+    let above_threshold = ranked.len();
     ranked.sort_by(|a, b| {
         let an = namebox_set.contains(&a.0);
         let bn = namebox_set.contains(&b.0);
@@ -712,11 +377,11 @@ fn build_llm(
             .then(b.1.cmp(&a.1))
             .then_with(|| a.0.cmp(&b.0))
     });
-    let candidates = ranked.len();
-    let truncated = candidates.saturating_sub(max_terms);
+    let truncated = above_threshold.saturating_sub(max_terms);
     if truncated > 0 {
         eprintln!(
-            "glossary: {truncated} llm term(s) dropped by max_terms={max_terms}; raise it to keep more"
+            "glossary: {truncated} term(s) dropped by max_terms={max_terms}; \
+             raise it or lower min_occurrences to change what is covered"
         );
     }
 
@@ -749,15 +414,14 @@ fn build_llm(
 
     let file = save(workspace, &glossary)?;
     Ok(BuildReport {
-        method: GlossaryMethod::Llm.as_str().into(),
         candidates,
-        above_threshold: candidates,
+        above_threshold,
         truncated,
         asked,
         added,
         rejected: raw_hits.saturating_sub(added), // rough: filtered/duped/capped
         total_active: glossary.active().len(),
-        min_occurrences: 0,
+        min_occurrences: min_occ,
         dry_run: false,
         file: file.display().to_string(),
         sample,
@@ -809,14 +473,17 @@ fn extract_terms_llm(
 ) -> Result<Vec<ExtractedTerm>> {
     let system = "你是本地化术语工程师。只输出 JSON 数组，不要解释、不要 Markdown。";
     let user = format!(
-        "下面是一部作品的 {src_lang} 原文片段。请提取**应当在全作品统一译名的专有名词**，\
+        "下面是一部作品的 {src_lang} 原文片段。请提取**应当在全作品统一译名的专有名词或作品特有概念**，\
          并给出 {dst_lang} 译名。\n\n\
          规则：\n\
          - 术语必须是原文中的连续子字符串（子字符串原则）\n\
-         - 只截取核心名字，去掉修饰称谓（如「骑士艾琳」→「艾琳」）\n\
+         - 精准边界：只截取必要的连续字符，去掉修饰称谓（如「骑士艾琳」→「艾琳」，\
+           「黑木家族的族长」→「黑木家族」）\n\
          - info 必须且只能是：男性角色、女性角色、未知性别角色、地名、家族、组织、\
-           特殊物品、特殊技能、特殊生物、其他\n\
-         - 禁止：泛用词（剑/魔法/城堡）、泛用称谓职业（先生/战士/商人）、整句、变量名\n\
+           特殊物品、特殊技能、特殊生物、特殊概念、其他\n\
+         - 应当提取：独创专有词汇（人名、地名、家族、组织、专有物品/技能/生物/概念），\
+           例如「临冬城」（地名）、「凤凰社」（组织）、「魔力回路」（特殊概念）\n\
+         - 禁止：泛用词（剑/魔法/城堡/公会）、泛用称谓职业（先生/战士/商人）、整句、变量名\n\
          - 合并重复；同一概念只留一条\n\
          - 若本段没有专有名词，输出 []\n\n\
          只输出 JSON 数组：[{{\"src\":\"...\",\"dst\":\"...\",\"info\":\"...\"}}]\n\n\
@@ -878,7 +545,7 @@ pub fn normalize_info(raw: &str) -> Option<String> {
     if t.is_empty() {
         return Some("其他".into());
     }
-    if LLM_INFO_OK.iter().any(|ok| *ok == t) {
+    if LLM_INFO_OK.contains(&t) {
         return Some(t.to_string());
     }
     let lower = t.to_ascii_lowercase();
@@ -938,56 +605,6 @@ fn winner(votes: &BTreeMap<String, usize>) -> String {
         .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
         .map(|(k, _)| k.clone())
         .unwrap_or_default()
-}
-
-#[derive(Debug, Deserialize)]
-struct NamedTerm {
-    src: String,
-    #[serde(default)]
-    keep: bool,
-    #[serde(default)]
-    dst: String,
-    #[serde(default)]
-    info: String,
-}
-
-fn name_candidates(
-    client: &crate::config::LlmClient,
-    chunk: &[(String, usize)],
-    src_lang: &str,
-    dst_lang: &str,
-) -> Result<Vec<NamedTerm>> {
-    let list: String = chunk
-        .iter()
-        .map(|(t, c)| format!("- {t}（{c} 次）"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let user = format!(
-        "下面是从一部作品的 {src_lang} 原文中统计出的高频候选词。\
-         请判断每个候选是否为**应当在全作品统一译名的专有名词**（人名、地名、组织名、独有概念）。\n\n\
-         判断规则：\n\
-         - 常见词、普通名词、动词短语、形容词、整句 → keep=false\n\
-         - 带称呼后缀的形式（如「〜さん」「〜様」）不要单独成条 → keep=false\n\
-         - 可拆分的复合词，只保留其中的专有名词部分 → 复合词本身 keep=false\n\
-         - keep=true 时必须给出 dst（{dst_lang} 译名）与 info（简短消歧描述，\
-           如「女性名字」「男性名字」「地点」「组织」「物品」）\n\n\
-         只输出 JSON 数组，每个候选一条，src 原样复制：\n\
-         [{{\"src\":\"...\",\"keep\":true,\"dst\":\"...\",\"info\":\"...\"}}]\n\n\
-         候选：\n{list}"
-    );
-    let v = llm::ask_json(
-        client,
-        "你是本地化术语工程师。只输出 JSON 数组，不要解释、不要 Markdown。",
-        &user,
-    )?;
-    let arr = v
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("expected a JSON array of terms"))?;
-    Ok(arr
-        .iter()
-        .filter_map(|item| serde_json::from_value::<NamedTerm>(item.clone()).ok())
-        .filter(|n| !n.src.trim().is_empty())
-        .collect())
 }
 
 // ---- per-batch injection ----
@@ -1230,75 +847,31 @@ mod tests {
             .unwrap_or(0)
     }
 
-    // ---- mining ----
+    // ---- occurrence counting ----
 
     #[test]
-    fn mines_katakana_names() {
+    fn counts_lines_containing_the_term() {
         let units = repeat("アレイは村を出た", 12);
-        let got = mine_candidates(&units, "ja");
-        assert_eq!(count_of(&got, "アレイ"), 12);
+        assert_eq!(count_occurrences(&units, "アレイ"), 12);
     }
 
     #[test]
-    fn mines_katakana_with_kanji_suffix_as_one_term() {
-        let units = repeat("エルギア国の兵士", 5);
-        let got = mine_candidates(&units, "ja");
-        assert_eq!(count_of(&got, "エルギア国"), 5, "compound place name");
-        assert_eq!(count_of(&got, "エルギア"), 5, "and the bare name too");
+    fn counts_a_line_once_even_with_two_hits() {
+        let units = repeat("アレイとアレイの影", 5);
+        assert_eq!(count_occurrences(&units, "アレイ"), 5, "line-level count");
     }
 
     #[test]
-    fn mines_kanji_runs_greedily() {
-        // With no tokeniser, a kanji run is taken whole: `魔法使いの弟子` yields
-        // `魔法使`, not `魔法`. Over-capture is the accepted trade — the model's
-        // `keep` veto is what removes the fragments that are not real terms.
-        let units = repeat("魔法使いの弟子", 4);
-        let got = mine_candidates(&units, "ja");
-        assert_eq!(count_of(&got, "魔法使"), 4);
-        assert_eq!(count_of(&got, "弟子"), 4);
-        assert_eq!(count_of(&got, "魔法"), 0, "runs are not sub-divided");
+    fn absent_terms_count_zero() {
+        let units = repeat("アレイは村を出た", 3);
+        assert_eq!(count_occurrences(&units, "ベルナ"), 0);
     }
 
     #[test]
-    fn mines_english_proper_nouns() {
+    fn counts_work_across_scripts() {
         let units = repeat("Alice went to Silver Harbor today", 6);
-        let got = mine_candidates(&units, "en");
-        assert_eq!(count_of(&got, "Alice"), 6);
-        assert_eq!(count_of(&got, "Silver Harbor"), 6);
-    }
-
-    #[test]
-    fn common_words_are_filtered_before_the_model_is_asked() {
-        // The model charges per candidate; obvious noise must not get that far.
-        let units = repeat("自分の気持を確認する", 20);
-        let got = mine_candidates(&units, "ja");
-        assert_eq!(count_of(&got, "自分"), 0);
-        assert_eq!(count_of(&got, "気持"), 0);
-    }
-
-    #[test]
-    fn english_sentence_openers_are_filtered() {
-        let units = repeat("The door opened. There was Alice", 5);
-        let got = mine_candidates(&units, "en");
-        assert_eq!(count_of(&got, "The"), 0);
-        assert_eq!(count_of(&got, "There"), 0);
-        assert_eq!(count_of(&got, "Alice"), 5);
-    }
-
-    #[test]
-    fn machine_literals_never_become_candidates() {
-        let units = repeat("Img Png Wav", 5);
-        let got = mine_candidates(&units, "en");
-        assert!(!got.iter().any(|(t, _)| t == "12"));
-    }
-
-    #[test]
-    fn results_are_sorted_by_count_then_term() {
-        let mut units = repeat("アレイ", 9);
-        units.extend(repeat("ベルナ", 3));
-        let got = mine_candidates(&units, "ja");
-        assert_eq!(got[0].0, "アレイ");
-        assert!(got[0].1 > got[1].1);
+        assert_eq!(count_occurrences(&units, "Alice"), 6);
+        assert_eq!(count_occurrences(&units, "Silver Harbor"), 6);
     }
 
     // ---- injection ----
@@ -1496,11 +1069,11 @@ mod tests {
     }
 
     #[test]
-    fn glossary_method_parse() {
-        use crate::config::GlossaryMethod;
-        assert_eq!(GlossaryMethod::parse("llm"), Some(GlossaryMethod::Llm));
-        assert_eq!(GlossaryMethod::parse("STATS"), Some(GlossaryMethod::Stats));
-        assert_eq!(GlossaryMethod::parse("regex"), Some(GlossaryMethod::Stats));
-        assert_eq!(GlossaryMethod::parse("nope"), None);
+    fn normalize_info_accepts_concept_label() {
+        // 特殊概念 is the LinguaGacha label for world-specific concepts like
+        // magic systems; it must pass the whitelist now that the prompt asks
+        // for it explicitly.
+        assert_eq!(normalize_info("特殊概念").as_deref(), Some("特殊概念"));
     }
+
 }

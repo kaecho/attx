@@ -218,7 +218,7 @@ import 按 `id` == unit.`location` 匹配；需要非空 `translation_lines` 或
 ## glossary（术语表，默认关闭）
 
 ```bash
-attx glossary build  --workspace <工作区> [--method llm|stats] [--min-occurrences N] [--dry-run]
+attx glossary build  --workspace <工作区> [--min-occurrences N] [--dry-run]
 attx glossary list   --workspace <工作区> [--all]
 attx glossary add    --workspace <工作区> --src <原文> --dst <译名> [--info <消歧描述>] [--case-sensitive]
 attx glossary remove --workspace <工作区> --src <原文>
@@ -227,27 +227,32 @@ attx glossary export --workspace <工作区> --file <json>
 attx glossary check  --workspace <工作区>
 ```
 
-`build` 两种提取方式（`[glossary].method`，CLI `--method` 可覆盖；**默认 `llm`**）：
+提取全程由 LLM 负责（LinguaGacha 策略）：原文分批交给模型直接抽
+`{src,dst,info}`（专有名词与作品特有概念：人名/地名/家族/组织/物品/技能/生物/概念），
+之后机械把关两道：
 
-| method | 做法 | 费用大致跟谁走 |
-|--------|------|----------------|
-| `llm` | 原文分批交给模型直接抽 `{src,dst,info}`，再投票/截断 | 文本量（批次数） |
-| `stats` | 正则挖候选 → `min_occurrences` 门槛 → 模型只给过线词起名 | 术语数 |
+1. **子串闸门**：`src` 必须是源文真实子串（防幻觉）；
+2. **`min_occurrences` 门槛**：按原文行级出现次数过滤偶发词
+   （`[glossary].min_occurrences`，默认 10；CLI `--min-occurrences` 可覆盖；
+   namebox 说话人铭牌不受此限）。
+
+同一 `src` 跨批次投票，译名/类型多数胜出；namebox 铭牌置前排。
+费用与文本量（批次数）成正比。
 
 `build` 报告字段：
 
 | 字段 | 含义 |
 |------|------|
-| `method` | `llm` 或 `stats` |
-| `candidates` | stats：正则候选总数；llm：聚合后的唯一 src 数 |
-| `above_threshold` | stats：≥ `min_occurrences`；llm：同 candidates |
+| `candidates` | 聚合后的唯一 src 数（过子串闸门） |
+| `above_threshold` | 出现次数 ≥ `min_occurrences` 的数量 |
 | `truncated` | 被 `max_terms` 砍掉的数量（>0 时说明覆盖不全，需向用户报告） |
-| `asked` | stats：送给模型命名的数量；llm：原文批次数 |
-| `added` / `rejected` | 写入 / 否决（或过滤）数量 |
+| `asked` | 送往模型的原文批次数 |
+| `added` / `rejected` | 写入 / 过滤掉的数量 |
 | `total_active` | 当前生效术语总数 |
-| `sample` | 样本（候选或已写入条目） |
+| `min_occurrences` | 本次生效的出现次数门槛 |
+| `sample` | 样本（已写入条目） |
 
-**必须先 `--dry-run`**：不调用模型。`llm` 看 `asked`（批次数）；`stats` 看 `asked` 与 `sample`，向用户报告规模与预计费用。
+**必须先 `--dry-run`**：不调用模型，看 `asked`（批次数）向用户报告规模与预计费用。
 取得同意后再真建。`build` 显式调用时不受 `[glossary].enabled` 限制。
 
 `check` 输出 `violations[]`（`src`/`dst`/`occurrences`/`applied`），按未生效次数降序。
@@ -319,8 +324,7 @@ max_context_items = 6
 
 [glossary]
 enabled = false        # 默认关闭：构建术语表有额外 LLM 费用
-method = "llm"         # llm=模型抽术语；stats=正则挖掘+命名
-min_occurrences = 10   # 仅 stats：出现次数低于此值不进术语表
+min_occurrences = 10   # LLM 提取的术语须在原文出现 ≥ 此次数才入表
 max_terms = 200        # 保留术语上限
 inject_limit = 30      # 单批注入提示词的术语上限
 

@@ -105,7 +105,7 @@ init → extract →（启用或强制时构建术语表）→ translate → wri
 
 | 子命令 | 作用 |
 |------------|------|
-| `build --workspace <dir> [--method llm\|stats] [--min-occurrences N] [--dry-run]` | 把专有名词提取进 `glossary.toml`；务必先试运行 |
+| `build --workspace <dir> [--min-occurrences N] [--dry-run]` | 通过 LLM 把专有名词提取进 `glossary.toml`；务必先试运行 |
 | `list [--all]` | 术语（JSON）（`--all` 包含模型否决的） |
 | `add --src <term> --dst <translation> [--info <desc>]` | 添加/覆盖一个术语 |
 | `remove --src <term>` | 删除一个术语 |

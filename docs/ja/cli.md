@@ -105,7 +105,7 @@ init → extract →（用語集が有効または強制なら）→ translate �
 
 | サブコマンド | 役割 |
 |------------|------|
-| `build --workspace <dir> [--method llm\|stats] [--min-occurrences N] [--dry-run]` | 固有名詞を `glossary.toml` に抽出；常に最初にドライランを |
+| `build --workspace <dir> [--min-occurrences N] [--dry-run]` | LLM で固有名詞を `glossary.toml` に抽出；常に最初にドライランを |
 | `list [--all]` | 用語を JSON で表示（`--all` はモデルに却下されたものを含む） |
 | `add --src <term> --dst <translation> [--info <desc>]` | 用語を 1 つ追加 / 上書き |
 | `remove --src <term>` | 用語を 1 つ削除 |

@@ -110,14 +110,11 @@ pub struct GlossarySection {
     /// Explicit `attx glossary build` ignores this — asking is consent.
     #[serde(default)]
     pub enabled: bool,
-    /// How candidates are found. `llm` (default) sends source batches to the
-    /// model; `stats` mines with regex then only asks the model to name hits.
-    #[serde(default)]
-    pub method: GlossaryMethod,
-    /// Stats method only: a candidate must appear at least this often.
+    /// A candidate the LLM extracted must occur at least this often in the
+    /// real source text to enter the glossary (namebox speaker plates excepted).
     #[serde(default = "default_min_occurrences")]
     pub min_occurrences: usize,
-    /// Cap on terms kept after extraction / naming (highest signal first).
+    /// Cap on terms kept after extraction (highest occurrence count first).
     #[serde(default = "default_max_terms")]
     pub max_terms: usize,
     /// Upper bound on terms injected into any one translation batch.
@@ -125,39 +122,10 @@ pub struct GlossarySection {
     pub inject_limit: usize,
 }
 
-/// How `glossary build` discovers proper nouns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GlossaryMethod {
-    /// Model reads source batches and emits `{src,dst,info}` (LinguaGacha-style).
-    #[default]
-    Llm,
-    /// Regex mine → frequency gate → model names survivors (cheaper on huge works).
-    Stats,
-}
-
-impl GlossaryMethod {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "llm" => Some(Self::Llm),
-            "stats" | "stat" | "regex" => Some(Self::Stats),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Llm => "llm",
-            Self::Stats => "stats",
-        }
-    }
-}
-
 impl Default for GlossarySection {
     fn default() -> Self {
         Self {
             enabled: false,
-            method: GlossaryMethod::Llm,
             min_occurrences: default_min_occurrences(),
             max_terms: default_max_terms(),
             inject_limit: default_inject_limit(),
@@ -326,16 +294,15 @@ max_context_items = 6
 # 显式执行 `attx glossary build` 则无视本开关，执行即视为同意。
 [glossary]
 enabled = false
-# 提取方法：
-#   "llm"   （默认）原文分批直接交给模型，让它提取专有名词并给出译名（{src,dst,info}）。
-#           能识别正则看不到的专有名词，花费与文本量成正比。
-#   "stats" 先用正则挖掘候选（日文：片假名串/汉字串；英文：大写词），
-#           达到 min_occurrences 门槛后再让模型命名（keep 否决），花费与术语数量成正比。
-# 解析时 "stat"/"regex" 也视为 "stats"。
-method = "llm"
-# 仅 stats 方法：候选出现次数达到该值才值得占用术语表名额。
+# 提取策略：LLM 全程负责（LinguaGacha 策略）。原文分批直接交给模型，
+# 由它提取专有名词与作品特有概念（人名/地名/家族/组织/物品/技能/生物/概念）
+# 并给出译名（{src,dst,info}），费用与文本量（批次数）成正比。
+# 机械把关只有两道：子串闸门（术语必须是原文真实子串，防幻觉）
+# 和 min_occurrences 出现次数门槛（按原文行级出现次数过滤偶发词）。
+# 正则死规则已移除：正则只能看到片假名串和大写词，
+# 组织名、物品名、技能名等术语根本不会浮现，语义判断交给模型更可靠。
 min_occurrences = 10
-# 保留术语数量上限（按出现次数/票数从高到低截断）。
+# 保留术语数量上限（按真实出现次数从高到低截断）。
 # 超出的候选会被丢弃并在日志中报告；调大本值或调高 min_occurrences 可扩大覆盖。
 max_terms = 200
 # 单个翻译批次最多注入的术语条数。
@@ -390,7 +357,6 @@ clients = []
         )
         .unwrap();
         assert!(!s.glossary.enabled, "the paid feature stays off by default");
-        assert_eq!(s.glossary.method, GlossaryMethod::Llm);
         assert_eq!(s.glossary.min_occurrences, 10);
         assert!(s.learn.auto_summarize, "free capture is on by default");
         assert!(!s.learn.llm_review, "the paid check stays off by default");
@@ -410,7 +376,6 @@ enabled = true
         )
         .unwrap();
         assert!(s.glossary.enabled);
-        assert_eq!(s.glossary.method, GlossaryMethod::Llm);
         assert_eq!(s.glossary.min_occurrences, 10);
     }
 

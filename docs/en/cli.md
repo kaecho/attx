@@ -105,7 +105,7 @@ Builtins always apply: RMMZ control codes, `{ident}`, `%s`/`%d`. Engine `renpy` 
 
 | Subcommand | Role |
 |------------|------|
-| `build --workspace <dir> [--method llm\|stats] [--min-occurrences N] [--dry-run]` | Extract proper nouns into `glossary.toml`; always dry-run first |
+| `build --workspace <dir> [--min-occurrences N] [--dry-run]` | Extract proper nouns into `glossary.toml` via LLM; always dry-run first |
 | `list [--all]` | Terms as JSON (`--all` includes model-rejected ones) |
 | `add --src <term> --dst <translation> [--info <desc>]` | Add/overwrite one term |
 | `remove --src <term>` | Remove one term |

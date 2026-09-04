@@ -139,7 +139,7 @@ max_context_items = 6  # max units per batch
 
 [glossary]
 enabled = false        # build during `attx run` (costs extra LLM calls)
-method = "llm"         # llm | stats
+min_occurrences = 10   # LLM 提取的术语须在原文出现 ≥ 此次数才入表
 
 [learn]
 auto_summarize = true  # capture experience after writeback (free)
@@ -253,12 +253,12 @@ Profile 是一个小 TOML 文件：带命名 `text`/`role` 组的逐行正则，
 
 分批次翻译长篇作品的模型无法与自身保持一致：同一个专有名词会在不同章节间漂移。术语表为整部作品的每个术语固定一个约定译名。
 
-**默认关闭** —— 构建术语表会花费额外的 LLM 调用。默认提取方式为 **`llm`**（模型读源文并给出术语）；**`stats`** 保留旧的先正则挖掘再命名的路径（更便宜）。
+**默认关闭** —— 构建术语表会花费额外的 LLM 调用。提取全程由 LLM 负责（LinguaGacha 策略）：模型读源文并给出术语。
 
 ```bash
-attx glossary build --workspace .attx --dry-run              # size the run, spend nothing
-attx glossary build --workspace .attx                        # default method=llm
-attx glossary build --workspace .attx --method stats         # regex mine + name
+attx glossary build --workspace .attx --dry-run              # 规模预估，分文不花
+attx glossary build --workspace .attx                        # LLM 提取
+attx glossary build --workspace .attx --min-occurrences 5    # 放宽出现次数门槛
 attx glossary list --workspace .attx
 attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info "female given name"
 attx glossary import --workspace .attx --file terms.json
@@ -266,17 +266,19 @@ attx glossary check --workspace .attx             # terms the translation ignore
 attx review --workspace .attx                     # 残留假名、原文照抄、丢失保护码、姓名栏漂移
 ```
 
-两种方式：
+一种策略，全程 LLM 提取（LinguaGacha 策略）：
 
 ```
-llm   (default): source batches → model emits {src,dst,info} → vote / max_terms → inject → check
-stats:           mine (regex) → min_occurrences → max_terms → name (LLM) → inject → check
+source batches → model emits {src,dst,info} → substring gate
+  → min_occurrences gate (real source hits) → vote / max_terms → inject → check
 ```
 
-- **`llm`**：费用跟文本批次数走；召回更好；每个 `src` 必须是源文的真实子串（防幻觉）。
-- **`stats`**：挖掘/阈值免费，模型只给高频命中命名 —— **费用跟术语数走**；`min_occurrences` 调低会收集更多、费用更高。
-
-统计无法区分专有名词与普通词，所以 stats 给模型一个 `keep` 否决权；llm 依靠类型引导加上子串闸门。已决定的条目（包括否决的）会被记住。术语按批次注入，只注入该批次实际包含的术语（受 `inject_limit` 上限约束）。
+正则死规则已移除：正则只能看到片假名串和大写词，
+组织名、物品名、技能名、世界观概念等术语根本不会浮现。
+由模型读原文判断什么是术语；机械闸门只负责两件事——
+防幻觉（`src` 必须是源文真实子串）和费用控制
+（术语在作品中出现至少 `min_occurrences` 次，namebox 说话人铭牌除外）。
+同一 `src` 跨批次投票，多数胜出。费用跟文本批次数走。
 
 每条目带一个消歧 `info`（“女性名字”、“地点”）。这不是装饰：没有它，模型无法判断名字在语境中应如何称呼。
 
@@ -285,8 +287,7 @@ stats:           mine (regex) → min_occurrences → max_terms → name (LLM) �
 ```toml
 [glossary]
 enabled = false        # build during `attx run`
-method = "llm"         # llm | stats
-min_occurrences = 10   # stats only
+min_occurrences = 10   # 术语须在原文出现 ≥ 此次数才入表
 max_terms = 200        # cap on terms kept
 inject_limit = 30      # cap on terms injected into one batch
 ```

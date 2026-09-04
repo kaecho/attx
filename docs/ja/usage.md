@@ -112,7 +112,7 @@ attx glossary list  --workspace .attx-book
 attx glossary check --workspace .attx-book             # 翻訳が無視した用語
 ```
 
-README の *Glossary* セクションで、2 つの抽出方法（`llm` / `stats`）と `[glossary]` 設定キーを参照してください。
+README の *Glossary* セクションで、LLM 抽出戦略と `[glossary]` 設定キーを参照してください（`min_occurrences` のデフォルトは 10）。
 
 ## 経験 / 学習
 

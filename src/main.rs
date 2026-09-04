@@ -334,10 +334,8 @@ enum GlossaryCommands {
     Build {
         #[arg(long)]
         workspace: PathBuf,
-        /// `llm` (model extracts from text) or `stats` (regex mine + name)
-        #[arg(long)]
-        method: Option<String>,
-        /// Stats method only: override [glossary].min_occurrences
+        /// Override [glossary].min_occurrences: how often a term must occur in
+        /// the real source text before it enters the glossary
         #[arg(long)]
         min_occurrences: Option<usize>,
         /// Report plan without calling the model
@@ -545,7 +543,7 @@ fn run() -> Result<()> {
             let want_glossary =
                 !no_glossary && !no_translate && (force_glossary || settings.glossary.enabled);
             if want_glossary {
-                match glossary::build(&ws, &settings, None, None, false) {
+                match glossary::build(&ws, &settings, None, false) {
                     Ok(r) => out["glossary"] = serde_json::to_value(r)?,
                     Err(e) => {
                         eprintln!("glossary: build skipped ({e:#})");
@@ -678,31 +676,17 @@ fn run_glossary(command: GlossaryCommands, settings: &config::Settings) -> Resul
     match command {
         GlossaryCommands::Build {
             workspace,
-            method,
             min_occurrences,
             dry_run,
         } => {
-            let method = match method.as_deref() {
-                None => None,
-                Some(s) => Some(config::GlossaryMethod::parse(s).ok_or_else(|| {
-                    anyhow::anyhow!("unknown glossary method `{s}` (use llm or stats)")
-                })?),
-            };
-            let report =
-                glossary::build(&workspace, settings, method, min_occurrences, dry_run)?;
+            let report = glossary::build(&workspace, settings, min_occurrences, dry_run)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report.dry_run {
-                if report.method == "llm" {
-                    eprintln!(
-                        "glossary: dry run — {} source batch(es) would be sent for term extraction",
-                        report.asked
-                    );
-                } else {
-                    eprintln!(
-                        "glossary: dry run — {} candidate(s) at or above {} occurrence(s) would be named",
-                        report.asked, report.min_occurrences
-                    );
-                }
+                eprintln!(
+                    "glossary: dry run — {} source batch(es) would be sent for term extraction \
+                     (min_occurrences = {})",
+                    report.asked, report.min_occurrences
+                );
             }
             Ok(())
         }

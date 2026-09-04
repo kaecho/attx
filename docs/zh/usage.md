@@ -112,7 +112,7 @@ attx glossary list  --workspace .attx-book
 attx glossary check --workspace .attx-book             # terms the translation ignored
 ```
 
-两种提取方法（`llm` / `stats`）与 `[glossary]` 配置项见 README 的 *术语表* 一节。
+LLM 提取策略与 `[glossary]` 配置项见 README 的 *术语表* 一节（`min_occurrences` 默认 10）。
 
 ## 经验 / 学习
 

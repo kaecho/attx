@@ -139,7 +139,7 @@ max_context_items = 6  # max units per batch
 
 [glossary]
 enabled = false        # build during `attx run` (costs extra LLM calls)
-method = "llm"         # llm | stats
+min_occurrences = 10   # LLM-extracted terms must occur this often to enter
 
 [learn]
 auto_summarize = true  # capture experience after writeback (free)
@@ -253,12 +253,12 @@ A profile is a small TOML file: per-line regexes with named `text`/`role` groups
 
 A model translating a long work in batches has no way to be consistent with itself: the same proper noun drifts across chapters. A glossary fixes one agreed translation per term for the whole work.
 
-**Off by default** — building one spends extra LLM calls. Default extraction is **`llm`** (model reads source and emits terms); **`stats`** keeps the older regex-mine-then-name path (cheaper).
+**Off by default** — building one spends extra LLM calls. Extraction is LLM-based throughout (the LinguaGacha strategy): the model reads the source and proposes terms.
 
 ```bash
 attx glossary build --workspace .attx --dry-run              # size the run, spend nothing
-attx glossary build --workspace .attx                        # default method=llm
-attx glossary build --workspace .attx --method stats         # regex mine + name
+attx glossary build --workspace .attx                        # LLM extraction
+attx glossary build --workspace .attx --min-occurrences 5    # looser recurrence gate
 attx glossary list --workspace .attx
 attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info "female given name"
 attx glossary import --workspace .attx --file terms.json
@@ -266,17 +266,20 @@ attx glossary check --workspace .attx             # terms the translation ignore
 attx review --workspace .attx                     # residual source, identical copies, dropped codes, namebox drift
 ```
 
-Two methods:
+One strategy, LLM extraction throughout (the LinguaGacha approach):
 
 ```
-llm   (default): source batches → model emits {src,dst,info} → vote / max_terms → inject → check
-stats:           mine (regex) → min_occurrences → max_terms → name (LLM) → inject → check
+source batches → model emits {src,dst,info} → substring gate
+  → min_occurrences gate (real source hits) → vote / max_terms → inject → check
 ```
 
-- **`llm`**: spend tracks text batches; better recall; every `src` must be a real substring of the source (anti-hallucination).
-- **`stats`**: mining/threshold are free, so the model only names frequent hits — **spend tracks term count**; lower `min_occurrences` collects more and costs more.
-
-Statistics cannot tell a proper noun from a common word, so stats gives the model a `keep` veto; llm relies on type guidance plus the substring gate. Decided entries (including rejects) are remembered. Terms are injected per batch, only those a batch actually contains (capped by `inject_limit`).
+Regex mining is gone: heuristics only see katakana runs and capitalised words,
+so organisations, items, skills and world concepts never surfaced. The model
+reads the raw source and decides what is a term; mechanical gates handle only
+anti-hallucination (`src` must be a real substring of the source) and cost
+control (a term must occur at least `min_occurrences` times in the work, namebox
+speaker plates excepted). Every `src` is voted on across batches; majority wins.
+Spend tracks text batches.
 
 Each entry carries a disambiguating `info` ("female given name", "place"). That is not decoration: without it the model cannot tell how a name should be addressed in context.
 
@@ -285,8 +288,7 @@ In `setting.toml`:
 ```toml
 [glossary]
 enabled = false        # build during `attx run`
-method = "llm"         # llm | stats
-min_occurrences = 10   # stats only
+min_occurrences = 10   # a term must occur this often in the source to enter
 max_terms = 200        # cap on terms kept
 inject_limit = 30      # cap on terms injected into one batch
 ```

@@ -100,12 +100,13 @@ Agent 启动时必须先解析出本机真实入口，并在任务单写死。
 5. **并发与预算**（可选，给默认值让用户确认）：`worker_count=4`、`batch_chars=2500`。
 6. **术语表**（默认关闭，必须主动问）：
    > 是否开启自动术语表？开启后 attx 会在翻译前额外调用模型统一专有名词译名，
-   > **显著提升长篇作品的一致性**。默认 `method=llm`（模型读原文抽术语，费用跟
-   > 文本批次数走）；也可 `method=stats`（正则挖高频词再命名，费用跟术语数走，
-   > 更便宜）。调高 `max_terms` 可多收，费用与噪音同时上升。
+   > **显著提升长篇作品的一致性**。提取全程由 LLM 负责（LinguaGacha 策略）：
+   > 模型读原文抽术语（人名/地名/组织/物品/技能/概念等），再用出现次数门槛
+   > `min_occurrences`（默认 10）过滤偶发词。费用跟文本批次数走；
+   > 调高 `max_terms` 或调低 `min_occurrences` 可多收，费用与噪音同时上升。
 
    用户同意 → `[glossary] enabled = true`；不确定 → 保持 `false`，并告知随时可用
-   `attx glossary build` 单独构建（该命令不受开关限制；可用 `--method`）。
+   `attx glossary build` 单独构建（该命令不受开关限制；可用 `--min-occurrences`）。
 
 然后生成 `<attx目录>/setting.toml`（模板见 `references/cli-command-contract.md`），执行：
 
@@ -126,8 +127,7 @@ attx doctor --ping
 | 1 探测 | 识别格式 | `detect --input <输入>` | 返回 `engine` 与 `content_root` |
 | 2 初始化 | 建工作区 | `init --input ... --src ja\|en --dst zh [--workspace]` | 返回 `workspace` |
 | 3 提取 | 入库文本单元 | `extract --workspace <工作区>` | `extracted > 0` |
-| 4 状态 | 进度事实 | `status --workspace` | 记录 total / translated / pending |
-| 4.5 术语表 | 统一专有名词（仅在用户开启时） | `glossary build --workspace`（先 `--dry-run` 报候选数与费用） | `total_active > 0` |
+| 4.5 术语表 | 统一专有名词（仅在用户开启时） | `glossary build --workspace`（先 `--dry-run` 报批次数与费用） | `total_active > 0` |
 | 5 试译 | 小批量验模型 | `translate --limit 20` | 有成功条目；无规则性全败 |
 | 6 全量译 | 清 pending | `translate` 多轮 | pending 下降；可 `export-jsonl` 审校 |
 | 7 写回 | 产出译文文件 | `writeback`（rmmz 先 `--dry-run` 并取得许可） | files>0；文档类产出 `<名>.<语言>.<扩展名>` |

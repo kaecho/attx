@@ -112,7 +112,7 @@ attx glossary list  --workspace .attx-book
 attx glossary check --workspace .attx-book             # terms the translation ignored
 ```
 
-See the README's *Glossary* section for the two extraction methods (`llm` / `stats`) and the `[glossary]` config keys.
+See the README's *Glossary* section for the LLM extraction strategy and the `[glossary]` config keys (`min_occurrences` defaults to 10).
 
 ## Experience / learn
 
