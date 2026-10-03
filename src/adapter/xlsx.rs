@@ -115,6 +115,7 @@ impl FormatAdapter for XlsxAdapter {
         Ok(vec![OutputFile {
             path: output_sibling(input, target_lang, &ext),
             bytes: buf.into_inner(),
+            permissions: Some(std::fs::metadata(input)?.permissions()),
         }])
     }
 }

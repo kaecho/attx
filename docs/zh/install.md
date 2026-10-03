@@ -1,80 +1,76 @@
 # 安装
 
-## 发行版二进制
+## 下载发行包
 
-从 [GitHub Releases](https://github.com/kaecho/attx/releases)（tag `v*`）下载适合你操作系统的压缩包。可用目标：Linux x86_64、Windows x86_64、macOS x86_64 + aarch64。把 `attx` / `attx.exe` 放进你的 `PATH`。
+从 [GitHub Releases](https://github.com/kaecho/attx/releases) 下载 `v0.10.0` 的对应压缩包。
+
+| 平台 | 构建目标 | 包名 |
+|------|----------|------|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` | `attx-linux-x86_64.tar.gz` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | `attx-windows-x86_64.zip` |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `attx-macos-aarch64.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin` | `attx-macos-x86_64.tar.gz` |
+
+解压后保留 `setting.example.toml`、`skills/`、`profiles/`、`docs/` 及文档构建配置。包另含 README、CHANGELOG 和 LICENSE。把 `attx` 或 `attx.exe` 放入 PATH，也可以始终使用完整路径。Linux 包不是 musl 静态包；没有 ARM Linux 或 32 位 Windows 的预构建包。
+
+Linux/macOS 在解压目录运行：
+
+```bash
+./attx --version
+./attx --help
+```
+
+Windows PowerShell 在解压目录运行：
+
+```powershell
+.\attx.exe --version
+.\attx.exe --help
+# 可执行文件路径含空格时使用调用运算符
+& 'C:\Tools\attx toolkit\attx.exe' --help
+```
+
+不要把终端或系统拦截报错直接当成工具故障。先确认包架构、执行权限和路径，再按系统的正常安全流程处理。
 
 ## 从源码构建
+
+需要 Rust 1.89 或更新的 stable 工具链，使用 Rust 2024 edition。不需要 nightly。SQLite 随依赖构建；HTTP 使用 rustls，模型请求为同步调用。
 
 ```bash
 git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
-cargo install --path .   # optional
+# 可选：安装到 Cargo 的 bin 目录
+cargo install --path .
 ```
 
-需要较新的 stable Rust（edition 2024）。不使用 nightly 特性，不锁定 MSRV。
+Windows 对应二进制为 `.\target\release\attx.exe`，MSVC 工具链需要其正常的编译环境。二次开发和发布矩阵见[开发页](development.md)。
 
-## LLM 配置 —— 两条路径
+## 配置不是安装的一部分
 
-### A. Agent Q&A（推荐）
+离线命令不要求有效模型配置：
 
-安装 Skill，然后让 agent 配置 attx。它会依次走端点 → Key → 模型 → 语言，并写入 `setting.toml` 而不回显 Key。见 [Agent](agents.md)。
+```bash
+attx formats
+attx detect --input './novel.epub'
+```
 
-### B. 手动
+真正翻译前复制示例，在本机编辑 `base_url`、`api_key` 和 `model`：
 
 ```bash
 cp setting.example.toml setting.toml
+attx --config './setting.toml' doctor --json --ping
 ```
 
-```toml
-[llm]
-default_client = "main"
+PowerShell：
 
-[[llm.clients]]
-name = "main"
-provider_type = "openai"          # OpenAI-compatible Chat Completions
-base_url = "https://api.example.com/v1"
-api_key = "YOUR_API_KEY"
-model = "your-model"
-timeout = 600                     # seconds, per request
-# temperature = 0.3               # 省略则翻译 0.3，glossary/learn JSON 0.0
-# reasoning_effort = "medium"     # 省略则不发送
-# max_tokens = 8192               # 省略则不发送
-# stream = true                   # 省略则 false；按 SSE delta.content 拼接
-# extra = { top_p = 0.9 }         # 最后合并进请求体；不能替换 messages
-
-[translation]
-worker_count = 8       # parallel HTTP batches
-rpm = 60               # global rate limit per minute (0 = unlimited)
-retry_count = 3
-retry_delay = 2
-batch_chars = 2500     # max source chars per batch
-max_context_items = 6  # max units per batch
+```powershell
+Copy-Item '.\setting.example.toml' '.\setting.toml'
+.\attx.exe --config '.\setting.toml' doctor --json --ping
 ```
 
-然后验证：
+`--ping` 会产生一次很小的模型请求。检查 `llm.configured` 和 `ping`；`doctor` 顶层 `status="ok"` 或退出码 0 不表示接口连接成功。
 
-```bash
-attx doctor --ping
-```
+配置查找只包含显式 `--config`、存在的 `$ATTX_HOME/setting.toml`、当前目录 `setting.toml`。平台用户配置目录用于 Profile/经验，不会自动提供模型配置。密钥不要写进命令行、聊天、工单或版本库。完整字段与环境变量作用域见[配置参考](configuration.md)。
 
-`doctor` 检查配置，列出内置适配器与已保存的 Profile；`--ping` 还会向 LLM 发送一次极小的请求。机器可读形式：`attx doctor --json`。
-
-### 配置查找顺序
-
-`--config <path>` → `$ATTX_HOME/setting.toml` → `./setting.toml`。
-
-- `ATTX_HOME` 也存放你保存的 Profile 与学到的经验：`$ATTX_HOME/profiles/`、`$ATTX_HOME/knowledge/`。
-- 未设置 `ATTX_HOME` 时使用平台配置目录（Linux 上为 `~/.config/attx/`）。
-- `setting.toml` 已被 gitignore —— **绝不提交 API Key**。
-- `--client <name>` 可在单次调用中切换到非默认的 `[[llm.clients]]` 条目。
-
-## 验证安装
-
-```bash
-attx formats                 # list of built-in adapters as JSON
-attx detect --input <file>   # which adapter claims your input
-attx --help
-```
+下一步：[快速开始](quickstart.md) · [Agent 安装](agents.md)。

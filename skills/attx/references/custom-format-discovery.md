@@ -1,96 +1,90 @@
-# 未知格式：分析 → 写 Profile → 试跑 → 记住
+# 未知文本格式：探测、验证和复用
 
-`attx detect` 报 "no format adapter matched" 时按本文流程走。目标：让 attx 学会这个格式，
-下次同类文件**自动识别**。
+优先专用适配器，再尝试保存的 Profile，最后由 `auto` 保守嗅探内容。不要仅因扩展名陌生就放弃，也不要为了“支持任何格式”把脚本和二进制当成正文。
 
-## 决策树
-
-```text
-detect 失败
- └─ attx analyze --input <输入>
-     ├─ binary=true / container=zip → 解包后对内部文件再 analyze；纯二进制走 JSONL 逃生舱
-     ├─ 文本 / JSON → 写自定义 Profile（本文主流程）
-     └─ 结构太复杂（如带偏移表的封包） → 外部提取脚本 + translate-jsonl
-```
-
-## 主流程（agent 按序执行）
-
-### 1. 侦察
+## 先用本地探测
 
 ```bash
-attx analyze --input <文件或目录>
+attx detect --input <输入>
+attx analyze --input <输入> --src ja
 ```
 
-读 JSON 报告：`encoding`（Shift_JIS/GBK 也能直接处理，无需 iconv）、
-`sample_head`（判断行结构）、`json`（top_keys / 数组首元素 → 判断哪些字段是正文）、
-目录时 `extensions` + `peek`。
+读取 `engine`、`content_root`、`profile`。`analyze` 提供编码、结构、样本、源语言密度，目录还提供扩展名分布与抽样。`detect` 没有 `--engine`；需要强制已知引擎时用 `run` 或 `init`。
 
-### 2. 起草 Profile
+`auto` 根据内容处理可识别的 JSON、XML、标量配置和正文，不依赖固定扩展名。它只翻译可靠定位的文本，保留非正文结构。目录中不支持的文件可能原样复制，必须报告覆盖情况，不能说成全部内容已翻译。
+
+提取报告的 `auto_coverage` 含 `supported_files`、`copied_files`、`unsupported_total`、`unsupported_paths`（最多 50 个样例）。这是覆盖报告，不是成功翻译数量，也不是所有跳过文件的完整清单。
 
 ```bash
-attx profile new --output ./fmt.toml --name <格式名>
+attx run --input <输入> --engine auto --src ja --dst zh
 ```
 
-模板自带注释。规则三选一可混用（JSON 规则在文件可解析为 JSON 时生效）：
+只有探测证据支持时才强制 `auto`。源文编码、结构和文件身份校验失败时停止，不扩大规则来掩盖问题。
 
-| kind | 适用 | 关键字段 |
-|------|------|----------|
-| `line_regex` | 行结构文本（脚本、ini、日志式） | `pattern`，命名组 `(?P<text>…)` 必须、`(?P<role>…)` 可选 |
-| `json_keys` | JSON，正文字段名固定（任意深度） | `keys = ["message", …]`（值为字符串或字符串数组） |
-| `json_paths` | JSON，按位置精确指定 | `paths`，`*` 一层 / `**` 任意层，如 `events/*/text` |
+## 有限模型推断
 
-其他字段：`extensions`（目录扫描必填）、`skip_lines`（注释/命令行）、
-`detect_regex`（自动识别辅助）、`overwrite`（true=原地写回并留 `*.attxbak`；默认写
-`<名>.<语言>.<扩展名>` 副本）、`notes`（写清规则依据，给下个读者）。
+`run` 没有匹配适配器时可自动推断 Profile；`--no-infer` 可关闭这个模型步骤。自动推断有额外请求，但属于默认格式处理流程，不等于自动开启付费 glossary。
 
-参考样例：仓库 `profiles/examples/`（kirikiri-kag / ini-lang / json-messages）。
-
-### 3. 迭代验证（不写盘）
+也可独立推断，先查看结果：
 
 ```bash
-attx profile test --profile ./fmt.toml --input <输入> --roundtrip
+attx profile infer --input <输入> --output ./fmt.toml --src ja --name myformat
 ```
 
-检查 JSON 输出：
+固定最多 3 次提案和验证尝试。输出已存在时拒绝覆盖。每个提案只含声明式规则，不执行代码；强制 `overwrite=false`，经过试提取及源文无损/no-op 往返验证。成功报告 `profile`、`engine`、`units`、`attempts`、`output`、`roundtrip`、`overwrite` 和 `status`。
 
-- `units` 数量符合预期？太少 → 规则漏配；太多 → 把命令/路径行加进 `skip_lines`
-- `sample[].text` 干净吗？不能混进标签、时间轴、变量名
-- `sample[].role` 取到说话人了吗（有则填）
-- `roundtrip.ok == true`（内存写回成功，不落盘）
-- `detects == true`（否则补 `detect_regex` / 调低 `min_units`）
+失败时说明无法安全处理的具体结构，不能反复启动推断或执行模型建议的任意脚本。二进制、加密、偏移表封包需要已有外部提取器或用户提供的 JSONL，见 `jsonl-workflow.md`。
 
-修改 → 重跑，直到三项都对。**禁止**为凑数把过滤放宽到会译坏代码/路径。
+## 手工声明式 Profile
 
-### 4. 正式翻译
+本地样本足以确定规则时可以创建并编辑任务 Profile，不必调用模型：
 
 ```bash
-attx init --input <输入> --profile ./fmt.toml --src ja --dst zh
-attx extract --workspace <工作区>
-attx status --workspace <工作区>            # 报告规模，>2000 条先问用户
-attx translate --workspace <工作区> --limit 20   # 试译
-attx translate --workspace <工作区>
-attx writeback --workspace <工作区> --dry-run    # overwrite=true 时需用户许可再真写
+attx profile new --output ./fmt.toml --name myformat
 ```
 
-Profile 会被拷贝进 `<工作区>/profile.toml`，工作区自包含、可复现。
+| kind | 用途 | 字段 |
+|------|------|------|
+| `line_regex` | 单行脚本或配置中的明确文本片段 | `pattern`，必须有 `(?P<text>...)`，可选 `(?P<role>...)` |
+| `json_keys` | 任意深度的固定正文字段 | `keys = ["message", "description"]` |
+| `json_paths` | 精确定位 JSON 正文 | `paths`；`*` 一层，`**` 任意层 |
 
-### 5. 记住格式（问用户）
+规则可混用，JSON 规则仅在内容可解析为 JSON 时生效。`extensions` 用于目录扫描，`detect_regex` 限定识别特征，`min_units` 要求最低提取量，`skip_lines` 排除注释或命令，`notes` 说明规则依据。样例在 `profiles/examples/`。
 
-翻译成功后**问用户**："是否保存此格式 Profile，今后自动识别同类文件？" 同意则：
+任务新 Profile 保持 `overwrite=false`，默认产出翻译副本。用户明确选择的既有 `overwrite=true` Profile 可以正常原地写回并保留备份，无需再问写回许可；不能把推断结果自行改成 true。
+
+## 验证和正式执行
 
 ```bash
-attx profile save --profile ./fmt.toml      # --force 覆盖同名
-attx profile list                           # 确认
+attx profile test --profile ./fmt.toml --input <输入> --src ja --roundtrip
 ```
 
-保存位置：`$ATTX_HOME/profiles/` 或 `~/.config/attx/profiles/`。
-此后 `attx detect` / `attx formats` / `attx init --engine custom:<名>` 都认得它。
+读取：
 
-## 硬性边界
+- `units` 是否符合正文范围，`sample[].text` 是否混入代码、路径、标签或资源标识。
+- `sample[].role` 是否是实际角色，不要把命令参数当角色。
+- `detects` 是否为 true，避免一个过宽 Profile 误接管别的格式。
+- `roundtrip.ok` 是否为 true。往返在内存完成，不等于实际生成译文文件，也不能证明真实译文质量。
 
-- Profile 是**声明式规则**，不是代码；不要试图用它处理二进制、加密封包 —— 那类走
-  外部提取器 + `translate-jsonl`（见 `jsonl-workflow.md`）。
-- `overwrite = true` 的 Profile 写回等同 rmmz：**先 dry-run，得到用户许可再写**。
-- 写回输出一律 UTF-8。原文件是 Shift-JIS 且引擎只认 Shift-JIS 时，提醒用户可能需要
-  转码回去或给引擎打 UTF-8 补丁（如 KiriKiri 加 BOM / 引擎设置）。
-- 同一目录混多种结构时，可拆多个 Profile 分别 init 到不同 workspace。
+根据证据修正规则，给本次迭代设有限次数；始终不能靠放宽过滤来凑数量。无法确认源文无损和正文边界时停止。
+
+```bash
+attx run --input <输入> --profile ./fmt.toml --src ja --dst zh
+```
+
+Profile 拷贝为 `<工作区>/profile.toml`，工作区可复现。正常翻译请求包括此输入的写回，规模较大也不默认要求再次批准全量。用户要先试译时加 `--limit N --no-writeback`；只在接受剩余问题时加 `--allow-partial`。
+
+## 保存和复用
+
+已验证并成功用于任务的 Profile 可以保存供后续匹配；用户要求记住格式时直接执行，不再问同样的问题。
+
+```bash
+attx profile list
+attx profile save --profile ./fmt.toml
+```
+
+保存到 `$ATTX_HOME/profiles/`，否则使用用户配置目录中的 `attx/profiles/`。后续 `detect`、`formats`、`run --engine custom:<名称>` 可复用。
+
+先检查已存名称。相同 Profile 直接复用，不制造重复项；同名不同内容保留原项，给新 Profile 明确的新名称。不要默默 `--force` 覆盖其他任务的规则。确需替换既有规则时说明差异并取得针对该替换的许可。
+
+编码依适配器处理。不要笼统承诺所有输出保留原编码或都能直接用于只支持 Shift-JIS 的引擎；明确说明报告中的编码约束，无法表示译文时停止，而不是用替换字符写坏文本。

@@ -1,5 +1,6 @@
 mod adapter;
 mod config;
+mod fileio;
 mod glossary;
 mod knowledge;
 mod learn;
@@ -120,7 +121,17 @@ enum Commands {
         #[arg(long)]
         retry_passthrough: bool,
     },
-    /// Write translations back into the game
+    /// Repair mechanically flagged translations with bounded targeted requests
+    Repair {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Inspect the repair plan without HTTP requests or cache changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Normalize, validate and safely write translated artifacts
     Writeback {
         #[arg(long)]
         workspace: PathBuf,
@@ -130,6 +141,9 @@ enum Commands {
         /// Skip the automatic post-writeback experience summary
         #[arg(long)]
         no_learn: bool,
+        /// Write valid units while retaining originals for unresolved units
+        #[arg(long)]
+        allow_partial: bool,
     },
     /// extract → translate → writeback
     Run {
@@ -161,6 +175,12 @@ enum Commands {
         /// Never build a glossary, even when [glossary].enabled is true
         #[arg(long, conflicts_with = "glossary")]
         no_glossary: bool,
+        /// Disable paid declarative profile inference for unrecognized text
+        #[arg(long)]
+        no_infer: bool,
+        /// Permit incomplete output, with unresolved units left unchanged
+        #[arg(long)]
+        allow_partial: bool,
     },
     /// Status of workspace translations
     Status {
@@ -220,6 +240,17 @@ enum ProfileCommands {
         output: PathBuf,
         /// Profile name baked into the template
         #[arg(long, default_value = "myformat")]
+        name: String,
+    },
+    /// Infer and validate a safe declarative profile via the configured LLM
+    Infer {
+        #[arg(long, alias = "game")]
+        input: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value = "ja")]
+        src: String,
+        #[arg(long, default_value = "auto-profile")]
         name: String,
     },
     /// Trial-extract with a profile and report matched units (JSON)
@@ -457,7 +488,7 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        Commands::Profile { command } => run_profile(command),
+        Commands::Profile { command } => run_profile(command, &settings),
         Commands::Learn { command } => run_learn(command, &settings),
         Commands::Glossary { command } => run_glossary(command, &settings),
         Commands::Init {
@@ -501,16 +532,22 @@ fn run() -> Result<()> {
         } => {
             let r = pipeline::translate(&workspace, &settings, limit, dry_run, retry_passthrough)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
-            Ok(())
+            complete_status(r.status, r.dry_run)
+        }
+        Commands::Repair { workspace, limit, dry_run } => {
+            let r = pipeline::repair(&workspace, &settings, limit, dry_run)?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+            complete_status(r.status, r.dry_run)
         }
         Commands::Writeback {
             workspace,
             dry_run,
             no_learn,
+            allow_partial,
         } => {
-            let r = pipeline::writeback(&workspace, &settings, dry_run, !no_learn)?;
+            let r = pipeline::writeback(&workspace, &settings, dry_run, !no_learn, allow_partial)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
-            Ok(())
+            complete_status(r.status, r.dry_run)
         }
         Commands::Run {
             input,
@@ -524,7 +561,20 @@ fn run() -> Result<()> {
             no_writeback,
             glossary: force_glossary,
             no_glossary,
+            no_infer,
+            allow_partial,
         } => {
+            let mut profile = profile;
+            let mut inference = None;
+            if engine.is_none() && profile.is_none() {
+                let candidate = pipeline::workspace_profile_path(&input, workspace.as_deref());
+                if candidate.is_file() {
+                    profile = Some(candidate.display().to_string());
+                } else if !no_infer && !no_translate && pipeline::detect_any(&input).is_err() {
+                    inference = Some(pipeline::profile_infer(&input, &candidate, &src, "auto-profile", &settings)?);
+                    profile = Some(candidate.display().to_string());
+                }
+            }
             let ws = pipeline::init_workspace(
                 &input,
                 engine.as_deref(),
@@ -533,42 +583,13 @@ fn run() -> Result<()> {
                 &dst,
                 workspace,
             )?;
-            let extracted = pipeline::extract(&ws, &settings, true)?.extracted;
-            let mut out = serde_json::json!({
-                "workspace": ws,
-                "extracted": extracted,
-            });
-            // The glossary costs extra model calls, so it only runs when the
-            // config opted in or this invocation asked for it explicitly.
-            let want_glossary =
-                !no_glossary && !no_translate && (force_glossary || settings.glossary.enabled);
-            if want_glossary {
-                match glossary::build(&ws, &settings, None, false) {
-                    Ok(r) => out["glossary"] = serde_json::to_value(r)?,
-                    Err(e) => {
-                        eprintln!("glossary: build skipped ({e:#})");
-                        out["glossary"] = serde_json::json!({"error": format!("{e:#}")});
-                    }
-                }
-            }
-            if !no_translate {
-                let tr = pipeline::translate(&ws, &settings, limit, false, false)?;
-                out["translate"] = serde_json::to_value(tr)?;
-                match pipeline::review(&ws) {
-                    Ok(r) => out["review"] = serde_json::to_value(r)?,
-                    Err(e) => {
-                        eprintln!("review: skipped ({e:#})");
-                        out["review"] = serde_json::json!({"error": format!("{e:#}")});
-                    }
-                }
-            }
-            if !no_writeback && !no_translate {
-                let wb = pipeline::writeback(&ws, &settings, false, true)?;
-                out["writeback"] = serde_json::to_value(wb)?;
-            }
-            out["status"] = serde_json::json!("ok");
+            let mut out = pipeline::run_workspace(&ws, &settings, pipeline::RunOptions {
+                limit, no_translate, no_writeback, force_glossary, no_glossary, allow_partial,
+            })?;
+            if let Some(report) = inference { out["profile_inference"] = report; }
+            let final_status = out["status"].as_str().unwrap_or("needs_attention");
             println!("{}", serde_json::to_string_pretty(&out)?);
-            Ok(())
+            complete_status(final_status, false)
         }
         Commands::Status { workspace } => {
             let s = pipeline::status(&workspace)?;
@@ -590,7 +611,7 @@ fn run() -> Result<()> {
         } => {
             let r = pipeline::translate_jsonl(&input, &output, &settings, &src, &dst, limit)?;
             println!("{}", serde_json::to_string_pretty(&r)?);
-            Ok(())
+            complete_status(r.status, r.dry_run)
         }
         Commands::ExportJsonl {
             workspace,
@@ -609,13 +630,13 @@ fn run() -> Result<()> {
     }
 }
 
-fn run_profile(command: ProfileCommands) -> Result<()> {
+fn run_profile(command: ProfileCommands, settings: &config::Settings) -> Result<()> {
     match command {
         ProfileCommands::New { output, name } => {
             if output.exists() {
                 anyhow::bail!("{} already exists", output.display());
             }
-            std::fs::write(&output, profile::template(&name))?;
+            fileio::StagedFile::new(&output, profile::template(&name).as_bytes())?.commit_new()?;
             println!(
                 "{}",
                 serde_json::json!({
@@ -624,6 +645,11 @@ fn run_profile(command: ProfileCommands) -> Result<()> {
                     "status": "ok",
                 })
             );
+            Ok(())
+        }
+        ProfileCommands::Infer { input, output, src, name } => {
+            let report = pipeline::profile_infer(&input, &output, &src, &name, settings)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         ProfileCommands::Test {
@@ -660,6 +686,16 @@ fn run_profile(command: ProfileCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn complete_status(status: &str, dry_run: bool) -> Result<()> {
+    if !dry_run && status != "ok" {
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        eprintln!("attx: {status}; inspect the JSON report for unresolved units");
+        std::process::exit(2);
+    }
+    Ok(())
 }
 
 fn resolve_profile_path(arg: &str) -> Result<PathBuf> {

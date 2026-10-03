@@ -119,45 +119,62 @@ impl TextUnit {
     }
 }
 
-pub fn unmask_controls(text: &str, map: &[(String, String)]) -> String {
-    let mut out = text.to_string();
-    for (k, v) in map {
-        out = out.replace(k, v);
-    }
-    out
+
+
+/// Kana letters and sound marks, not separators such as `・` or `゠`.
+pub fn has_kana(text: &str) -> bool {
+    text.chars().any(is_kana)
 }
 
-
-/// Hiragana / katakana only — CJK ideographs are valid in Chinese output.
-pub fn has_kana(text: &str) -> bool {
-    text.chars().any(|c| matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}'))
+pub(crate) fn is_kana(c: char) -> bool {
+    matches!(c,
+        '\u{3041}'..='\u{3096}' | '\u{3099}'..='\u{309F}' |
+        '\u{30A1}'..='\u{30FA}' | '\u{30FC}'..='\u{30FF}' |
+        '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' |
+        '\u{1B000}'..='\u{1B122}' | '\u{1B132}' | '\u{1B150}'..='\u{1B152}' |
+        '\u{1B155}' | '\u{1B164}'..='\u{1B167}'
+    )
 }
 
 pub fn has_hangul(text: &str) -> bool {
-    text.chars()
-        .any(|c| matches!(c, '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}'))
+    text.chars().any(|c| c.is_alphabetic() && matches!(c,
+        '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}' |
+        '\u{3131}'..='\u{318E}' | '\u{A960}'..='\u{A97F}' |
+        '\u{D7B0}'..='\u{D7FF}' | '\u{FFA0}'..='\u{FFDC}'
+    ))
+}
+
+pub(crate) fn is_cjk(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' |
+        '\u{F900}'..='\u{FAFF}' | '\u{20000}'..='\u{2FA1F}' | '\u{30000}'..='\u{323AF}')
 }
 
 /// Rough JP/CJK source-text probe (default ja profile).
 pub fn looks_like_source_ja(text: &str) -> bool {
-    text.chars().any(|c| {
-        matches!(c,
-            '\u{3040}'..='\u{309F}' | // hiragana
-            '\u{30A0}'..='\u{30FF}' | // katakana + prolonged sound
-            '\u{4E00}'..='\u{9FFF}'   // CJK
-        )
-    })
+    text.chars().any(|c| is_kana(c) || is_cjk(c))
 }
 
 pub fn looks_like_source_en(text: &str) -> bool {
-    let letters: String = text.chars().filter(|c| c.is_ascii_alphabetic()).collect();
-    letters.len() >= 3
+    text.chars().filter(char::is_ascii_alphabetic).take(3).count() >= 3
 }
 
 pub fn needs_translation(text: &str, src: &str) -> bool {
-    match src {
-        "en" => looks_like_source_en(text),
-        _ => looks_like_source_ja(text),
+    let lang = src.trim().split(['-', '_']).next().unwrap_or(src);
+    match lang.to_ascii_lowercase().as_str() {
+        "ja" | "jp" | "jpn" => looks_like_source_ja(text),
+        "zh" | "zho" | "chi" | "cn" => text.chars().any(is_cjk),
+        "en" | "eng" => looks_like_source_en(text),
+        "ko" | "kor" => has_hangul(text),
+        "ru" | "uk" | "bg" | "be" | "sr" | "mk" => text.chars().any(|c| c.is_alphabetic() && matches!(c, '\u{0400}'..='\u{052F}')),
+        "ar" | "fa" | "ur" => text.chars().any(|c| c.is_alphabetic() && matches!(c, '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' | '\u{08A0}'..='\u{08FF}')),
+        "hi" | "mr" | "ne" => text.chars().any(|c| c.is_alphabetic() && matches!(c, '\u{0900}'..='\u{097F}')),
+        "th" => text.chars().any(|c| c.is_alphabetic() && matches!(c, '\u{0E00}'..='\u{0E7F}')),
+        "de" | "fr" | "es" | "it" | "pt" | "nl" | "pl" | "cs" | "sk" | "ro" |
+        "hu" | "tr" | "vi" | "id" | "ms" | "sv" | "no" | "da" | "fi" => text.chars().any(|c| {
+            c.is_alphabetic() && matches!(c, '\u{0041}'..='\u{024F}' | '\u{1E00}'..='\u{1EFF}')
+        }),
+        // Unknown and automatic profiles cannot assume a particular script.
+        _ => text.chars().any(char::is_alphabetic),
     }
 }
 
@@ -165,13 +182,6 @@ pub fn needs_translation(text: &str, src: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mask_roundtrip() {
-        let s = r"\C[1]こんにちは\n[1]";
-        let (m, map) = crate::preserve::PreserveSet::core().mask_line(s);
-        assert!(m.contains("[CTRL_"));
-        assert_eq!(unmask_controls(&m, &map), s);
-    }
 
 
     #[test]
@@ -182,5 +192,29 @@ mod tests {
         assert!(!has_kana("艾蕾离开了"));
         assert!(has_hangul("안녕"));
         assert!(!has_hangul("你好"));
+        assert!(!has_kana("・禁止挑食 乔・约翰尼 ゠ ･"));
+        assert!(has_kana("ｶﾅ"));
+        assert!(has_kana("ー"));
+        assert!(needs_translation("안녕", "ko-KR"));
+        assert!(needs_translation("Привет", "ru"));
+    }
+
+    #[test]
+    fn source_languages_use_their_scripts() {
+        for (lang, positive) in [
+            ("ZH_tw", "你好"), ("ja-JP", "開始"), ("KO_kr", "안녕"),
+            ("RU-ru", "Привет"), ("uk", "Привіт"), ("ar", "مرحبا"),
+            ("hi", "नमस्ते"), ("th", "สวัสดี"), ("fr", "été"),
+            ("vi", "Tiếng Việt"), ("auto", "Hello"), ("auto", "你好"),
+        ] {
+            assert!(needs_translation(positive, lang), "{lang}: {positive}");
+            assert!(!needs_translation("123・!?", lang), "{lang}");
+        }
+        assert!(!needs_translation("こんにちは", "zh-tw"));
+        assert!(!needs_translation("你好", "ko"));
+        assert!(!needs_translation("١٢٣", "ar"));
+        assert!(!needs_translation("๑๒๓", "th"));
+        assert!(!looks_like_source_ja("・"));
+        assert!(looks_like_source_ja("ｶﾅ"));
     }
 }

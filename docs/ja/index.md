@@ -1,44 +1,54 @@
-# attx
+# attx のドキュメント
 
-**Agent Translation Toolkit eXtensible** — コーディングエージェントと人間のための、純 Rust・単一バイナリ・フォーマット非依存の AI 翻訳フレームワーク。
-
-```
-extract (format adapter) → translate (LLM core) → writeback (format adapter)
-```
-
-ゲーム（RPG Maker MV/MZ、Ren'Py、MTool）、電子書籍（EPUB）、文書（DOCX/XLSX/TXT/MD）、字幕（SRT/VTT/ASS/LRC）、ローカライズファイル（PO、i18next、Paratranz、VNTextPatch）を、**任意の OpenAI 互換 LLM** で翻訳できます。進捗は SQLite ワークスペースにキャッシュされるため、中断した実行は無料で再開できます。
-
-## 他のツールと何が違うのか
-
-- **エージェントファースト。** attx は stdout に JSON を出力するローカル CLI です — コーディングエージェントにとってネイティブなツール面です。Skill（`skills/attx/`）が実行プロトコルです：段階的パイプライン、ハードストップ、Q&A 設定ウィザード。MCP サーバーは不要です。
-- **19 の組み込みアダプター** に加えて、**カスタムフォーマットプロファイル**（`line_regex` / `json_keys` / `json_paths` の TOML ルール）でその他のフォーマットにも対応。
-- **設計上レジューム可能。** すべてのユニットが `attx.db` にチェックポイントされます。`translate` を再実行して続行；モデルに送信されるのは保留ユニットだけです。
-- **正直な失敗。** モデルが失敗し続けるユニットは、目に見える *passthrough*（パススルー）プレースホルダーになります — 実行は完了し、`--retry-passthrough` でそれらのユニットだけを正確に再キューします。
-- **自己改善。** 成功した実行は抽出経験を残し、何かを削除する前にあなたがレビューします。
-
-## エージェントから始める（最速）
-
-1. バイナリをインストール（[Releases](https://github.com/kaecho/attx/releases) または `cargo build --release`）
-2. Skill をインストール：`cp -a skills/attx ~/.claude/skills/`
-3. エージェントに指示：
+attx (Agent Translation Toolkit eXtensible) は、ゲーム、電子書籍、文書、字幕、ローカライズファイルを OpenAI 互換 Chat Completions API で翻訳するローカル CLI です。0.10.0 は Rust 2024 の単一バイナリで、SQLite に抽出結果と翻訳を保存します。人間が直接使う場合も、コーディングエージェントに実行させる場合も同じパイプラインを使います。
 
 ```text
-Strictly follow <attx-dir>/skills/attx/SKILL.md
-Help me set up attx if needed, then translate <input> from Japanese to Simplified Chinese.
+入力 → アダプターで抽出 → SQLite → 翻訳と有限修復 → 検証 → 出力
 ```
 
-Skill は、`setting.toml` がないとき **Q&A ウィザード**（endpoint、API key、model、言語）を実行し、キーをディスクにのみ書き込み、その後 `doctor --ping` → detect → extract → 試し翻訳 → 本番実行 の順に進めます。
+## 最初の翻訳
 
-## 自分でやる場合
+設定やコマンドの実行を任せたい場合は、[エージェント翻訳ガイド](agent-translation.md)のプロンプトを一度コピーしてコーディングエージェントへ渡してください。エージェントが文書を読み、インストールと設定作成を進めます。あなたは接続先、API キー、モデル、入力、言語、予算などの質問に答えます。各話題で目的、影響、推奨値の説明を受けられ、TOML の手動編集は不要です。キーは安全な秘密入力や記録されない非表示端末で渡し、使える既存設定は再利用します。
+
+自分で実行したい場合は、[インストール](install.md)と[クイックスタート](quickstart.md)を参照し、`setting.example.toml` を `setting.toml` にコピーして本機で endpoint、API キー、model を設定します。
 
 ```bash
-cp setting.example.toml setting.toml   # base_url / api_key / model を記入
-attx doctor --ping
-attx run --input novel.epub --src ja --dst zh   # → novel.zh.epub
+attx doctor --json --ping
+attx run --input novel.epub --src ja --dst zh
 ```
 
-## 対応範囲
+EPUB の通常出力は `novel.zh.epub`、ワークスペースは入力の隣の `.attx-novel` です。RPG Maker はバックアップ付きでゲーム内に書き戻します。出力方式は[フォーマット](formats.md)ごとに異なります。ユーザーが指定入力の翻訳を依頼した場合、通常の書き戻しもその依頼に含まれます。追加の必須確認プロンプトはありません。
 
-電子書籍、文書、字幕、ローカライズ JSON/PO、Ren'Py、RPG Maker、未知フォーマット用のカスタム TOML プロファイル — [Formats](formats.md)（フォーマット）を参照。
+## このツールが管理すること
 
-続き：[インストール](install.md) · [エージェント](agents.md) · [使い方](usage.md)
+- 専用アダプター、保存済みプロファイル、内容を調べる `auto` の順に形式を選択します。未対応のテキストは安全な宣言型プロファイルを有限回数で推論できます。
+- 原文に一致するコミット済みキャッシュを再利用します。中断後の再開で同じ成功項目を送り直す必要はありません。ただし未完了の HTTP 要求や追加修復の費用まで無料になるわけではありません。
+- 制御コードと変数を保護し、応答の ID、行数、保護トークン、残留原文を検査します。失敗を原文の仮置き `passthrough` として表示し、成功件数とは分けます。
+- 不完全な翻訳は既定で書き戻しを止めます。明示的な `--allow-partial` は有効な部分だけを書き、未解決部分の原文を残します。
+- 語彙表、作品内の文体メモ、形式ごとの抽出経験を保存します。課金される語彙抽出と LLM 経験審査は既定で無効です。
+
+## 保証しないこと
+
+機械レビューは意味の正確さ、文学的品質、ゲームの正常動作を証明しません。あらゆる未知バイナリ、暗号化アーカイブ、スクリプト文法に自動対応するわけでもありません。`auto` が未対応ファイルをコピーした件数は翻訳成功件数ではありません。出力はファイル単位で置換され、ディレクトリ全体のトランザクションではありません。
+
+## 読み方
+
+| 目的 | ページ |
+|---|---|
+| 配布物、Rust、PATH | [インストール](install.md) |
+| 質問に答えて導入・設定・翻訳を任せる | [エージェント翻訳ガイド](agent-translation.md) |
+| POSIX と Windows の実行例 | [クイックスタート](quickstart.md) |
+| 全設定、既定値、秘密情報、費用 | [設定](configuration.md) |
+| 再開、語彙表、保護、学習 | [使い方](usage.md) |
+| 全組み込み形式と対応限界 | [フォーマット](formats.md) |
+| 未知形式、推論、TOML ルール | [プロファイル](profiles.md) |
+| ゲーム内書き戻しと固定会話スロット | [RPG Maker MV/MZ](rmmz.md) |
+| 残留分類、正規化、修復 | [品質と修復](quality.md) |
+| 全コマンド、フラグ、レポート、終了コード | [CLI](cli.md) |
+| 無人実行とエージェント権限 | [エージェント](agents.md) |
+| キャッシュ、ロック、JSONL、バックアップ | [ワークスペース](workspace.md) |
+| モジュールと設計上の境界 | [アーキテクチャ](architecture.md) |
+| 二次開発、テスト、CI、リリース、多言語文書 | [開発](development.md) |
+| 症状別の診断と対処 | [トラブルシューティング](troubleshooting.md) |
+
+ソースは [GitHub](https://github.com/kaecho/attx)、配布物は [Releases](https://github.com/kaecho/attx/releases) を参照してください。

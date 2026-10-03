@@ -1,90 +1,79 @@
-# 格式
+# 格式与未知输入
+
+`attx formats` 是当前二进制的格式清单。自动选择顺序为专用内置适配器、已保存 Profile、`auto` 内容探测。相同 `.json` 扩展名按结构选择，不能仅凭扩展名判断用途。强制选择用 `init --engine` 或 `run --engine`，`detect` 没有这个选项。
 
 ## 内置适配器
 
-`attx formats` 以 JSON 打印权威清单 —— id、扩展名，以及输入是文件还是目录。检测顺序固定；`.json` 各变体按内容嗅探，最具体的优先。
+| id | 输入 | 提取与输出范围 |
+|----|------|----------------|
+| `rmmz` | RPG Maker MV/MZ 目录 | 数据库、事件对白、姓名框、选项、滚动文字和安全插件参数；原地写回，见[专页](rmmz.md) |
+| `epub` | `.epub` | 叶子正文块如段落、标题、列表项；跳过 ruby 注音，保留图片和结构，更新语言元数据；语言后缀副本 |
+| `html` | `.html`、`.htm`、`.xhtml` | HTML 正文块；语言后缀副本 |
+| `docx` | `.docx` | 正文及脚注/尾注的段落文本，译文由段落首个 run 承载；副本，不保证原来逐 run 的字体分配 |
+| `xlsx` | `.xlsx`、`.xlsm` | 共享字符串 `xl/sharedStrings.xml`，跳过注音 run；副本，不是公式、图表、所有 inline 字符串或宏的翻译器 |
+| `srt` | `.srt` | 字幕正文，时间和序号保留；副本 |
+| `vtt` | `.vtt` | 字幕正文，头部和时间信息保留；副本 |
+| `ass` | `.ass`、`.ssa` | `Dialogue:` Text，保护覆盖标签和 `\N`，Name 可作角色；副本 |
+| `lrc` | `.lrc` | 歌词正文，时间标签和元数据保留；副本 |
+| `csv` | `.csv`、`.tsv` | 按单元格提取，支持引号字段及字段内换行，只重写含源文的记录；副本 |
+| `po` | `.po`、`.pot` | 填入 `msgstr`，头部和 plural 条目直通；副本，不是完整 gettext 复数翻译器 |
+| `renpy` | `.rpy` | `translate` 块内对白及 `old`/`new` 对，跳过资源语句；副本，不解析所有 Ren'Py/Python 程序 |
+| `md` | `.md`、`.markdown` | 逐行提取正文并保留标题/列表前缀，跳过 fenced code；不是完整 Markdown AST，副本 |
+| `txt` | `.txt` | 逐行正文单元；副本 |
+| `paratranz` | `.json`，内容嗅探 | Paratranz 导出中待填的 translation；副本 |
+| `vnt` | `.json`，内容嗅探 | VNTextPatch 的 name/message 数据；副本 |
+| `mtool` | `.json`，内容嗅探 | MTool 翻译映射，如 ManualTransFile；副本 |
+| `i18next` | `.json`，内容嗅探 | 嵌套字符串叶子；副本 |
+| `jsonl` | `.jsonl` 或含 `source.jsonl` 的目录 | 不按源语言过滤输入记录；文件输出语言后缀副本，目录输出 `translated.jsonl` |
+| `auto` | 文件或目录，按内容 | 下述保守文本子集；文件副本或目录 `translated-<dst>/` |
 
-| id | 扩展名 | 输入 | 输出 |
-|----|-----------|-------|--------|
-| `rmmz` | — | 目录 | 原地 + `*.attxbak` |
-| `epub` | `.epub` | 文件 | `<name>.<dst>.epub` |
-| `html` | `.html` `.htm` `.xhtml` | 文件 | 翻译副本 |
-| `docx` | `.docx` | 文件 | `<name>.<dst>.docx` |
-| `xlsx` | `.xlsx` `.xlsm` | 文件 | 翻译副本 |
-| `srt` | `.srt` | 文件 | 翻译副本 |
-| `vtt` | `.vtt` | 文件 | 翻译副本 |
-| `ass` | `.ass` `.ssa` | 文件 | 翻译副本 |
-| `lrc` | `.lrc` | 文件 | 翻译副本 |
-| `csv` | `.csv` `.tsv` | 文件 | 翻译副本 |
-| `po` | `.po` `.pot` | 文件 | 翻译副本 |
-| `renpy` | `.rpy` | 文件 | 翻译副本 |
-| `md` | `.md` `.markdown` | 文件 | 翻译副本 |
-| `txt` | `.txt` | 文件 | 翻译副本 |
-| `paratranz` | `.json`（嗅探） | 文件 | 翻译副本 |
-| `vnt` | `.json`（嗅探） | 文件 | 翻译副本 |
-| `mtool` | `.json`（嗅探） | 文件 | 翻译副本 |
-| `i18next` | `.json`（嗅探） | 文件 | 翻译副本 |
-| `jsonl` | `.jsonl`，或含 `source.jsonl` 的目录 | 文件或目录 | `translated.jsonl` |
-| `custom:<name>` | 来自 Profile | 文件或目录 | 副本，`overwrite = true` 时原地写回 |
+`custom:<name>` 是 Profile 动态适配器，不是固定内置格式。一般文档副本为 `<stem>.<dst>.<ext>`，实际以 writeback 的 `paths` 为准。已有目标也会备份，而非任意覆盖。
 
-当检测有歧义或错误时强制指定适配器：`attx init --engine <id>`。
+## `auto` 支持什么
 
-### 各格式说明
+未知后缀不代表不可翻译。`auto` 尝试解码并识别可信结构，只替换明确的人类文本跨度。
 
-- **epub** —— 段落级单元，覆盖叶子块（`p`、标题、`li`、……）；注音假名（`<rt>`/`<rp>`）会从源文中剔除；图片与排版保留；写回时更新 `dc:language`。
-- **docx** —— 段落级，覆盖 `w:t` run（正文 + 脚注/尾注）；每段第一个 run 接收译文。
-- **xlsx** —— 翻译共享字符串表（`xl/sharedStrings.xml`），因此所有工作表保持一致；注音 `rPh` run 跳过。
-- **srt/vtt/lrc** —— 时间轴行、头部与元数据原样保留；只翻译字幕/歌词文本。
-- **ass** —— 只翻译 `Dialogue:` 的 Text 字段；`{\tag}` 覆盖与 `\N` 换行保留；`Name` 列作为说话人角色。
-- **csv/tsv** —— 按单元格的单元（RFC 4180：带引号字段、内嵌换行）；只重写含源语言文本的记录。
-- **po** —— 填充 `msgstr`；头部条目与 `msgid_plural` 条目原样直通。
-- **renpy** —— 只在 `translate` 块内：带引号的对白以及 `old`/`new` 字符串对；资源语句（voice/play/show/……）跳过。
-- **rmmz** —— 见 [RPG Maker](rmmz.md)。
-- **mtool/paratranz/vnt/i18next** —— 按内容嗅探的 JSON 形态（MTool `ManualTransFile.json`、Paratranz 导出只填空的 `translation` 字段、VNTextPatch `name`/`message`、i18next 嵌套字符串叶子）。
-- **jsonl** —— 逃生舱：通过外部提取/写回脚本支持任意引擎；提取时不按源语言过滤。
+- JSON：在任意层次识别字符串值，避开 key、标识符、资源路径等机器数据；保留未改跨度的字节、空白和布局。嵌套扫描深度超过 128 会拒绝，而不是递归处理任意深度。
+- XML：处理严格 XML 1.0 字符数据，转义译文并保留标签/属性/注释；不翻译 CDATA，也不支持 DTD、实体声明或 XML 1.1。
+- INI、TOML、简单 YAML：只支持可可靠定位的标量子集。不是完整 YAML parser，不承诺多行、复杂 flow、anchor 或所有转义写法。
+- 正文：只有内容足够像自然语言时才接管，包括没有已知扩展名的纯文本。不把脚本代码、二进制或含混结构猜成正文。
 
-### 编码
+机器文字和源语言判断都是启发式，可能漏掉 UI 单词或专名，也可能选到语义上的标识。查看提取样本及覆盖报告；不能把结构可往返理解为所有字段都选对了。
 
-文本输入自动检测编码：严格 UTF-8 → UTF-16（BOM）→ `chardetng` 猜测（Shift-JIS、GBK、……）→ `encoding_rs` 解码。输出**一律 UTF-8**。
-
-## 未知格式？教 attx 一个 Profile
+## 混合目录的边界
 
 ```bash
-attx analyze --input ./project         # recon: encoding, structure, samples, JSON shape
-attx profile new --output fmt.toml     # documented rule template
-attx profile test --profile fmt.toml --input ./project --roundtrip   # iterate
-attx init --input ./project --profile fmt.toml --src ja --dst zh
-attx profile save --profile fmt.toml   # detect auto-recognizes it from now on
+attx detect --input './project'
+attx run --input './project' --engine auto --src ja --dst zh --no-infer
 ```
 
-### Profile 结构
+目录 `auto` 会把支持的文本写到 `project/translated-zh/` 对应路径，不支持的候选文件原样复制。它不在目录里再次分派 EPUB、字幕或脚本专用适配器；例如目录中的 EPUB 不会自动拆包翻译。需要其专用行为时逐个以文件运行，或使用明确的外部批处理。
 
-```toml
-name = "myformat"                    # id → engine "custom:myformat"
-label = "My format"
-extensions = ["ks"]                  # e.g. ["ks", "scn"]
-detect_regex = []                    # ALL must match in the first 64 KiB
-min_units = 1                        # auto-detect needs ≥ this many units
-overwrite = false                    # true = write back in place
-skip_lines = []                      # line_regex mode: skip matching lines
-notes = ""
+`extract.auto_coverage` 含：
 
-# Per-line regex: (?P<text>...) required, (?P<role>...) optional
-[[rules]]
-kind = "line_regex"
-pattern = '^(?P<role>[^\s@;]*)\s*「(?P<text>.+)」$'
+| 字段 | 含义 |
+|------|------|
+| `supported_files` | 有可处理文本跨度的文件数量，不是成功译文数量 |
+| `copied_files` | 未支持、会原样复制的候选文件数量 |
+| `unsupported_total` | 不支持的候选文件总数 |
+| `unsupported_paths` | 最多 50 个路径样例，不是完整清单 |
+| `excluded_entries` | 未遍历的生成目录、元数据、备份和符号链接项数量；被排除目录根计1，不统计内部所有文件 |
+| `excluded_paths` | 最多50个排除路径样例，与 unsupported_paths 分开 |
 
-# JSON: string values under these object keys (any depth)
-[[rules]]
-kind = "json_keys"
-keys = ["message", "name"]
+`.attx*`、`.git`、`node_modules`、生成目录 `translated-*/translated`、backup/backups 和备份后缀被排除。含语言后缀的源资源有歧义时原样复制，不静默省略。符号链接不遍历，输入或输出路径中的不安全链接会被拒绝。排除项不是复制覆盖范围的一部分；它们单独计入 excluded_entries/excluded_paths。若全部候选没有提取单元，`run` 会停止，不能把原样复制说成翻译成功。
 
-# JSON: string leaves at path globs (* one level, ** any depth)
-[[rules]]
-kind = "json_paths"
-paths = ["events/*/text", "**/choices/*"]
-```
+## 编码
 
-已保存的 Profile 位于 `$ATTX_HOME/profiles/`（或 `~/.config/attx/profiles/`），并以 `custom:<name>` 出现在 `attx formats` / `attx detect` 中。
+通用文本读取先尝试严格 UTF-8、带 BOM 的 UTF-16，再以 chardetng/encoding_rs 猜测旧编码。专用文本适配器和 Profile 通常输出 UTF-8，不能笼统承诺保留 Shift-JIS/GBK；DOCX、EPUB 等容器按其自身格式处理。
 
-示例：`profiles/examples/`（KiriKiri KAG、INI、通用 JSON）。Agent 流程：`skills/attx/references/custom-format-discovery.md`。
+`auto` 要求源文无损解码和旧编码往返，保留原编码及 BOM。译文无法用原编码表示时失败，例如某些中文无法写入 Shift-JIS。正确办法是在外部工具中制作 UTF-8 输入副本并用新工作区，不能用替换字符吞掉文字或改 hash。
+
+## 未识别时如何继续
+
+1. `analyze --input <路径>` 查看编码、结构、二进制容器线索和样本。
+2. 简单行结构或 JSON 可用[Profile](profiles.md)。`run` 在允许翻译、没有匹配适配器时可自动请求模型推断；`--no-infer` 禁止这项额外费用。
+3. 脚本转义、二进制、加密/压缩的未知容器或模糊语法，应使用可靠外部提取器导出 JSONL，并由外部工具写回。
+
+PDF、OCR、任意游戏引擎的二进制脚本和运行时字体修补不在当前内置覆盖中。不要承诺“任意格式”都能直接原地翻译。
+
+继续：[Profile](profiles.md) · [JSONL 工作流](usage.md) · [故障排查](troubleshooting.md)。

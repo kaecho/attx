@@ -1,8 +1,8 @@
 //! Text-preserve rules: regex hits become `[CTRL_n]` before the model sees them.
 //!
-//! RMMZ backslash codes stay the baseline (same pattern as `model::mask_controls`).
-//! Built-in extras cover `{ident}` and printf `%s`/`%d`. Ren'Py adds `[ident]`.
-//! A workspace `preserve.toml` appends more patterns; overlapping hits keep the
+//! Built-ins cover named RMMZ controls, brace and printf placeholders, and
+//! literal control-mask tokens. Ren'Py adds interpolation; markup adapters add
+//! HTML/XML tags. Workspace rules append patterns. Overlapping hits keep the
 //! leftmost-longest span.
 
 use anyhow::{Context, Result, bail};
@@ -14,18 +14,18 @@ use std::sync::LazyLock;
 pub const PRESERVE_FILE: &str = "preserve.toml";
 pub const PRESERVE_VERSION: u32 = 1;
 
-/// Shared with `model::mask_controls` so RMMZ codes have one pattern.
+/// RMMZ controls, including named plugin controls with single-line arguments.
 pub const RMMZ_CONTROL_PATTERN: &str = r"(?x)
         \\{2}                                   # escaped backslash
-        | \\[VvNnCcGg]\[\d+\]                   # \V[n] \N[n] \C[n] \G[n] (case variants)
-        | \\[VvNnCcGg]                          # bare
-        | \\[!.>|{\}\\\$\^]                     # single-char controls
-        | \\[A-Za-z]\[\d+\]                     # other letter[n]
-        | \\[A-Za-z]                            # other letter
+        | \\[A-Za-z]+\[[^\]\r\n]*\]            # named controls, including plugin arguments
+        | \\[!.>|{\}\\\$\^]                   # single-character controls
+        | \\[A-Za-z]                            # bare letter control
         ";
 
-const BRACE_PLACEHOLDER: &str = r"\{[A-Za-z_][A-Za-z0-9_]*\}";
-const PRINTF_PLACEHOLDER: &str = r"%\d*[sd]";
+const BRACE_PLACEHOLDER: &str = r"\{\{\s*[A-Za-z_][A-Za-z0-9_.]*\s*\}\}|\{[A-Za-z_][A-Za-z0-9_]*\}|\{\d+(?:,-?\d+)?(?::[^{}\r\n]+)?\}";
+const PRINTF_PLACEHOLDER: &str = r"%(?:\d+\$)?[-+#0]*(?:\d+|\*(?:\d+\$)?)?(?:\.(?:\d+|\*(?:\d+\$)?))?(?:hh|ll|[hlLjzt])?[diuoxXfFeEgGaAcspn]|%%";
+const MASK_TOKEN: &str = r"\[CTRL_\d+\]";
+const INLINE_TAG: &str = r#"</?[A-Za-z][A-Za-z0-9:_-]*(?:\s+[A-Za-z_:][A-Za-z0-9_:.-]*(?:\s*=\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s<>"'=]+))?)*\s*/?>"#;
 const RENPY_BRACKET: &str = r"\[[A-Za-z_][A-Za-z0-9_]*(?:![a-z]+)?\]";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,13 +72,14 @@ impl PreserveSet {
         Self { rules: Vec::new() }
     }
 
-    /// RMMZ codes + `{ident}` + printf. No engine-specific extras.
+    /// Engine controls, brace/printf placeholders, and literal mask tokens.
     pub fn core() -> &'static Self {
         static SET: LazyLock<PreserveSet> = LazyLock::new(|| {
             let mut s = PreserveSet::empty();
             s.push_builtin(RMMZ_CONTROL_PATTERN, "rmmz control codes");
             s.push_builtin(BRACE_PLACEHOLDER, "brace placeholder");
             s.push_builtin(PRINTF_PLACEHOLDER, "printf placeholder");
+            s.push_builtin(MASK_TOKEN, "literal control-mask token");
             s
         });
         &SET
@@ -87,6 +88,9 @@ impl PreserveSet {
         let mut s = Self::core().clone();
         if engine == "renpy" {
             s.push_builtin(RENPY_BRACKET, "renpy interpolation");
+        }
+        if matches!(engine, "auto" | "epub" | "html" | "xml" | "md" | "docx" | "srt" | "vtt") {
+            s.push_builtin(INLINE_TAG, "inline HTML/XML tag");
         }
         s
     }
@@ -141,27 +145,28 @@ impl PreserveSet {
             .collect()
     }
 
+    fn literal_spans(&self, text: &str) -> Vec<(usize, usize)> {
+        let mut spans = Vec::new();
+        for rule in &self.rules {
+            spans.extend(rule.re.find_iter(text).filter(|hit| !hit.is_empty()).map(|hit| (hit.start(), hit.end())));
+        }
+        spans.sort_unstable_by_key(|&(start, end)| (start, std::cmp::Reverse(end - start)));
+        let mut end = 0;
+        spans.retain(|&(start, next)| {
+            if start < end { return false }
+            end = next;
+            true
+        });
+        spans
+    }
+
+    fn literals<'a>(&self, lines: &'a [String]) -> Vec<&'a str> {
+        lines.iter().flat_map(|line| self.literal_spans(line).into_iter().map(|(start, end)| &line[start..end])).collect()
+    }
+
     /// Mask one line. Overlapping hits: leftmost, then longest.
     pub fn mask_line(&self, text: &str) -> (String, Vec<(String, String)>) {
-        let mut spans: Vec<(usize, usize)> = Vec::new();
-        for rule in &self.rules {
-            for m in rule.re.find_iter(text) {
-                if m.start() == m.end() {
-                    continue;
-                }
-                spans.push((m.start(), m.end()));
-            }
-        }
-        spans.sort_by_key(|&(a, b)| (a, std::cmp::Reverse(b - a)));
-        let mut kept: Vec<(usize, usize)> = Vec::new();
-        let mut last_end = 0usize;
-        for (start, end) in spans {
-            if start < last_end {
-                continue;
-            }
-            kept.push((start, end));
-            last_end = end;
-        }
+        let kept = self.literal_spans(text);
         let mut map = Vec::new();
         let mut out = String::with_capacity(text.len());
         let mut last = 0;
@@ -176,20 +181,27 @@ impl PreserveSet {
         (out, map)
     }
 
-    /// Unit-wide `[CTRL_n]` numbering. Same high-first rename as `model::mask_unit_lines`.
+    /// Unit-wide `[CTRL_n]` numbering; replacement never rescans inserted tokens.
     pub fn mask_unit_lines(&self, lines: &[String]) -> (Vec<String>, Vec<(String, String)>) {
         let mut unit_map: Vec<(String, String)> = Vec::new();
         let mut masked_lines = Vec::with_capacity(lines.len());
         for line in lines {
             let (m, map) = self.mask_line(line);
             let base = unit_map.len();
-            let mut line_out = m;
-            let mut renamed = vec![(String::new(), String::new()); map.len()];
-            for (j, (k, v)) in map.into_iter().enumerate().rev() {
-                let nk = format!("[CTRL_{}]", base + j);
-                line_out = line_out.replacen(&k, &nk, 1);
-                renamed[j] = (nk, v);
+            let mut line_out = String::with_capacity(m.len());
+            let mut cursor = 0;
+            let token_re = mask_token_regex();
+            let mut renamed = Vec::with_capacity(map.len());
+            for (j, (k, v)) in map.into_iter().enumerate() {
+                renamed.push((format!("[CTRL_{}]", base + j), v));
+                debug_assert_eq!(k, format!("[CTRL_{j}]"));
             }
+            for (j, hit) in token_re.find_iter(&m).enumerate() {
+                line_out.push_str(&m[cursor..hit.start()]);
+                line_out.push_str(&renamed[j].0);
+                cursor = hit.end();
+            }
+            line_out.push_str(&m[cursor..]);
             unit_map.extend(renamed);
             masked_lines.push(line_out);
         }
@@ -257,8 +269,8 @@ fn save_file(path: &Path, file: &PreserveFile) -> Result<()> {
         std::fs::create_dir_all(dir).ok();
     }
     let body = toml::to_string_pretty(file).context("serialize preserve.toml")?;
-    let header = "# attx preserve — regexes whose hits become [CTRL_n] before translate.\n\
-                  # Builtin RMMZ / {ident} / %s rules always apply; this file only adds more.\n";
+    let header = "# attx preserve: regex hits become [CTRL_n] before translation.\n\
+                  # Built-in controls and placeholders apply; this file adds rules.\n";
     std::fs::write(path, format!("{header}{body}"))
         .with_context(|| format!("write {}", path.display()))?;
     Ok(())
@@ -275,13 +287,94 @@ fn compile_rule(pattern: &str) -> Result<Regex> {
     Ok(re)
 }
 
-/// How many original preserved spans are missing from the translation.
-pub fn lost_token_count(translation_lines: &[String], map: &[(String, String)]) -> usize {
-    if map.is_empty() {
-        return 0;
+fn mask_token_regex() -> &'static Regex {
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(MASK_TOKEN).expect("mask token pattern"));
+    &RE
+}
+
+/// Named/indexed placeholders may move; engine controls and markup may not.
+fn reorderable_literal(literal: &str) -> bool {
+    static NAMED: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!("^(?:{BRACE_PLACEHOLDER}|{RENPY_BRACKET})$")).expect("named placeholder pattern"));
+    if !literal.starts_with("[CTRL_") && NAMED.is_match(literal) { return true }
+    literal.strip_prefix('%').and_then(|tail| tail.split_once('$'))
+        .is_some_and(|(index, _)| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Require exact token multiplicity and the relative order of positional controls.
+pub fn check_masked_tokens(lines: &[String], map: &[(String, String)]) -> Result<()> {
+    let mut seen = vec![false; map.len()];
+    let mut ordered = map.iter().filter(|(_, literal)| !reorderable_literal(literal));
+    for hit in lines.iter().flat_map(|line| mask_token_regex().find_iter(line)) {
+        let index = hit.as_str()[6..hit.as_str().len() - 1].parse::<usize>().ok();
+        let Some(index) = index.filter(|&index| map.get(index).is_some_and(|(token, _)| token == hit.as_str())) else {
+            bail!("unknown control-mask token {}", hit.as_str());
+        };
+        if seen[index] { bail!("duplicate control-mask token {}", hit.as_str()) }
+        seen[index] = true;
+        if !reorderable_literal(&map[index].1) && ordered.next().is_none_or(|(token, _)| token != hit.as_str()) {
+            bail!("engine control-mask order mismatch at {}", hit.as_str());
+        }
     }
+    if seen.contains(&false) { bail!("missing control-mask token(s)") }
+    Ok(())
+}
+
+/// Validate restored literals too, covering imports and existing cache records.
+pub fn check_preserved_literals(lines: &[String], map: &[(String, String)], set: &PreserveSet) -> Result<()> {
+    let actual = set.literals(lines);
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    for (_, literal) in map { *counts.entry(literal).or_default() += 1; }
+    let mut ordered = map.iter().filter(|(_, literal)| !reorderable_literal(literal));
+    for literal in actual {
+        let Some(count) = counts.get_mut(literal).filter(|count| **count > 0) else {
+            bail!("unexpected or duplicate preserved literal {literal:?}");
+        };
+        *count -= 1;
+        if !reorderable_literal(literal) && ordered.next().is_none_or(|(_, expected)| expected != literal) {
+            bail!("engine control or markup order mismatch");
+        }
+    }
+    if counts.values().any(|&count| count != 0) { bail!("missing preserved literal(s)") }
+    Ok(())
+}
+
+/// Restore tokens in one pass so literal source tokens cannot be rescanned.
+pub fn unmask_line(text: &str, map: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for hit in mask_token_regex().find_iter(text) {
+        out.push_str(&text[cursor..hit.start()]);
+        let literal = map.iter().find(|(token, _)| token == hit.as_str())
+            .map(|(_, literal)| literal.as_str()).unwrap_or(hit.as_str());
+        out.push_str(literal);
+        cursor = hit.end();
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+/// Count missing preserved literal occurrences, not just distinct strings.
+pub fn lost_token_count(translation_lines: &[String], map: &[(String, String)]) -> usize {
     let dst = translation_lines.join("\n");
-    map.iter().filter(|(_, v)| !dst.contains(v.as_str())).count()
+    let mut expected = std::collections::BTreeMap::<&str, usize>::new();
+    for (_, literal) in map {
+        *expected.entry(literal.as_str()).or_default() += 1;
+    }
+    let mut spans = Vec::new();
+    for literal in expected.keys().copied().filter(|literal| !literal.is_empty()) {
+        for (start, _) in dst.match_indices(literal) {
+            spans.push((start, start + literal.len(), literal));
+        }
+    }
+    spans.sort_by_key(|&(start, end, _)| (start, std::cmp::Reverse(end - start)));
+    let mut last_end = 0;
+    for (start, end, literal) in spans {
+        if start < last_end { continue; }
+        last_end = end;
+        let missing = expected.get_mut(literal).expect("known preserved literal");
+        *missing = missing.saturating_sub(1);
+    }
+    expected.into_values().sum()
 }
 
 #[cfg(test)]
@@ -388,5 +481,54 @@ mod tests {
         let map = vec![("[CTRL_0]".into(), "{item}".into())];
         assert_eq!(lost_token_count(&["拿到了{item}".into()], &map), 0);
         assert_eq!(lost_token_count(&["拿到了东西".into()], &map), 1);
+    }
+    #[test]
+    fn repeated_literals_are_counted_and_nested_spans_are_not_double_counted() {
+        let (_, map) = PreserveSet::core().mask_line("{name} {name} {name}");
+        assert_eq!(lost_token_count(&["{name}".into()], &map), 2);
+        assert_eq!(lost_token_count(&["{name} {name} {name}".into()], &map), 0);
+        let (_, map) = PreserveSet::core().mask_line(r"\n \n[1]");
+        assert_eq!(lost_token_count(&[r"\n[1]".into()], &map), 1);
+    }
+
+    #[test]
+    fn control_tokens_require_exact_multiplicity() {
+        let (_, map) = PreserveSet::core().mask_line(r"\SE[カナ]\V[1]");
+        assert!(check_masked_tokens(&["[CTRL_0]你好[CTRL_1]".into()], &map).is_ok());
+        for bad in ["[CTRL_0]你好", "[CTRL_0][CTRL_0][CTRL_1]", "[CTRL_0][CTRL_1][CTRL_8]", "[CTRL_00][CTRL_1]"] {
+            assert!(check_masked_tokens(&[bad.into()], &map).is_err());
+        }
+        assert!(check_masked_tokens(&["[CTRL_0]".into()], &[]).is_err());
+    }
+
+    #[test]
+    fn reordered_masked_and_restored_controls_are_rejected() {
+        let set = PreserveSet::core();
+        let (_, map) = set.mask_line(r"\C[1]こんにちは\C[0]");
+        assert!(check_masked_tokens(&["[CTRL_1]你好[CTRL_0]".into()], &map).is_err());
+        assert!(check_preserved_literals(&[r"\C[0]你好\C[1]".into()], &map, set).is_err());
+        assert!(check_preserved_literals(&[r"\C[1]你好\C[0]".into()], &map, set).is_ok());
+    }
+
+    #[test]
+    fn literal_mask_tokens_restore_without_recursive_replacement() {
+        let lines = vec!["literal [CTRL_1] {name}".into(), "[CTRL_0]".into()];
+        let (masked, map) = PreserveSet::core().mask_unit_lines(&lines);
+        assert!(check_masked_tokens(&masked, &map).is_ok());
+        let restored: Vec<String> = masked.iter().map(|line| unmask_line(line, &map)).collect();
+        assert_eq!(restored, lines);
+    }
+
+    #[test]
+    fn common_placeholder_boundaries_preserve_only_declared_syntax() {
+        let input = r"\SE[カナ] %2$s %1$04d %.2f %% {{ player.name }} {0} {1,-8:N2} {item} [普通的人类文本] [word] {ordinary prose} 100% ready";
+        let (_, map) = PreserveSet::core().mask_line(input);
+        let protected: Vec<&str> = map.iter().map(|(_, value)| value.as_str()).collect();
+        assert_eq!(protected, [r"\SE[カナ]", "%2$s", "%1$04d", "%.2f", "%%", "{{ player.name }}", "{0}", "{1,-8:N2}", "{item}"]);
+        assert!(!protected.contains(&"[word]"));
+        let markup = r#"<span class="name">人类文本</span><br/> 3 < 5 > 2"#;
+        assert!(PreserveSet::core().mask_line(markup).1.is_empty());
+        let (_, tags) = PreserveSet::for_engine("auto").mask_line(markup);
+        assert_eq!(tags.iter().map(|(_, value)| value.as_str()).collect::<Vec<_>>(), [r#"<span class="name">"#, "</span>", "<br/>"]);
     }
 }

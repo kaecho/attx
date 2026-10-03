@@ -1,6 +1,6 @@
 use crate::model::{ItemType, TextUnit, Translation, WorkspaceMeta};
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -41,6 +41,11 @@ impl Store {
                 updated_at TEXT NOT NULL,
                 passthrough INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS published (
+                unit_id TEXT PRIMARY KEY,
+                translation_lines TEXT NOT NULL,
+                source_hash TEXT NOT NULL
+            );
             "#,
         )?;
         // Migrate pre-0.4 workspaces (no passthrough column); ignore "duplicate column".
@@ -48,10 +53,24 @@ impl Store {
             "ALTER TABLE translations ADD COLUMN passthrough INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        if !conn.prepare("PRAGMA table_info(units)")?.query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|column| column == "ordinal") {
+            conn.execute("ALTER TABLE units ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0", [])?;
+        }
         Ok(Self { conn })
     }
 
+    pub fn meta_value(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT value FROM meta WHERE key=?1", params![key], |row| row.get(0)).optional()?)
+    }
+
+    pub fn set_meta_value(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
+        Ok(())
+    }
+
     pub fn set_meta(&self, meta: &WorkspaceMeta) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
         let pairs = [
             ("engine", meta.engine.as_str()),
             ("game_path", meta.game_path.as_str()),
@@ -61,12 +80,13 @@ impl Store {
             ("created_at", meta.created_at.as_str()),
         ];
         for (k, v) in pairs {
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO meta(key,value) VALUES(?1,?2)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 params![k, v],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -88,17 +108,17 @@ impl Store {
         })
     }
 
-    pub fn replace_units(&self, units: &[TextUnit]) -> Result<()> {
+    pub fn replace_units(&self, units: &[TextUnit], source_snapshot: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM units", [])?;
         {
             // OR REPLACE: duplicate unit ids (same location + text emitted twice)
             // must not abort extraction of an otherwise valid input.
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO units(id,engine,domain,location,item_type,role,original_lines,source_line_paths,context,payload,source_hash)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                "INSERT OR REPLACE INTO units(id,engine,domain,location,item_type,role,original_lines,source_line_paths,context,payload,source_hash,ordinal)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?;
-            for u in units {
+            for (ordinal, u) in units.iter().enumerate() {
                 let lines = serde_json::to_string(&u.original_lines)?;
                 let paths = serde_json::to_string(&u.source_line_paths)?;
                 let hash = TextUnit::source_hash(&u.original_lines);
@@ -114,6 +134,7 @@ impl Store {
                     u.context,
                     u.payload,
                     hash,
+                    ordinal as i64,
                 ])?;
             }
         }
@@ -123,13 +144,15 @@ impl Store {
              OR source_hash NOT IN (SELECT source_hash FROM units WHERE units.id = translations.unit_id)",
             [],
         )?;
+        tx.execute("DELETE FROM published WHERE unit_id NOT IN (SELECT id FROM units) OR source_hash NOT IN (SELECT source_hash FROM units WHERE units.id=published.unit_id)", [])?;
+        tx.execute("INSERT INTO meta(key,value) VALUES('source_snapshot',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![source_snapshot])?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn all_units(&self) -> Result<Vec<TextUnit>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id,engine,domain,location,item_type,role,original_lines,source_line_paths,context,payload FROM units ORDER BY domain, location",
+            "SELECT id,engine,domain,location,item_type,role,original_lines,source_line_paths,context,payload FROM units ORDER BY ordinal, rowid",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -171,7 +194,7 @@ impl Store {
              FROM units u
              LEFT JOIN translations t ON t.unit_id = u.id AND t.source_hash = u.source_hash
              WHERE t.unit_id IS NULL
-             ORDER BY u.context, u.location",
+             ORDER BY u.ordinal, u.rowid",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -208,18 +231,29 @@ impl Store {
     }
 
     pub fn save_translation(&self, tr: &Translation) -> Result<()> {
-        let lines = serde_json::to_string(&tr.translation_lines)?;
+        self.save_translations(std::slice::from_ref(tr))
+    }
+
+    /// Commit a completed batch together so interruptions cannot leave half a batch.
+    pub fn save_translations(&self, translations: &[Translation]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
         let now = chrono_like_now();
-        self.conn.execute(
-            "INSERT INTO translations(unit_id, translation_lines, source_hash, updated_at, passthrough)
-             VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(unit_id) DO UPDATE SET
-               translation_lines=excluded.translation_lines,
-               source_hash=excluded.source_hash,
-               updated_at=excluded.updated_at,
-               passthrough=excluded.passthrough",
-            params![tr.unit_id, lines, tr.source_hash, now, tr.passthrough as i64],
-        )?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO translations(unit_id, translation_lines, source_hash, updated_at, passthrough)
+                 VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(unit_id) DO UPDATE SET
+                   translation_lines=excluded.translation_lines,
+                   source_hash=excluded.source_hash,
+                   updated_at=excluded.updated_at,
+                   passthrough=excluded.passthrough",
+            )?;
+            for tr in translations {
+                let lines = serde_json::to_string(&tr.translation_lines)?;
+                stmt.execute(params![tr.unit_id, lines, tr.source_hash, now, tr.passthrough as i64])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -265,7 +299,8 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM units", [], |r| r.get(0))?;
         let translated: usize = self.conn.query_row(
             "SELECT COUNT(*) FROM units u
-             INNER JOIN translations t ON t.unit_id=u.id AND t.source_hash=u.source_hash",
+             INNER JOIN translations t ON t.unit_id=u.id AND t.source_hash=u.source_hash
+             WHERE t.passthrough=0",
             [],
             |r| r.get(0),
         )?;
@@ -279,7 +314,7 @@ impl Store {
         Ok(Counts {
             total,
             translated,
-            pending: total.saturating_sub(translated),
+            pending: total.saturating_sub(translated + passthrough),
             passthrough,
         })
     }
@@ -288,7 +323,7 @@ impl Store {
     pub fn domain_counts(&self) -> Result<BTreeMap<String, (usize, usize)>> {
         let mut stmt = self.conn.prepare(
             "SELECT u.domain, COUNT(*),
-                    COUNT(CASE WHEN t.unit_id IS NOT NULL THEN 1 END)
+                    COUNT(CASE WHEN t.unit_id IS NOT NULL AND t.passthrough=0 THEN 1 END)
              FROM units u
              LEFT JOIN translations t ON t.unit_id=u.id AND t.source_hash=u.source_hash
              GROUP BY u.domain",
@@ -306,6 +341,30 @@ impl Store {
             map.insert(domain, (total as usize, translated as usize));
         }
         Ok(map)
+    }
+
+    pub fn all_published(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut statement = self.conn.prepare("SELECT unit_id,translation_lines FROM published")?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut output = BTreeMap::new();
+        for row in rows {
+            let (id, lines) = row?;
+            output.insert(id, serde_json::from_str(&lines)?);
+        }
+        Ok(output)
+    }
+
+    pub fn replace_published(&self, translations: &BTreeMap<String, Translation>) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute("DELETE FROM published", [])?;
+        {
+            let mut statement = transaction.prepare("INSERT INTO published(unit_id,translation_lines,source_hash) VALUES(?1,?2,?3)")?;
+            for (id, translation) in translations {
+                statement.execute(params![id, serde_json::to_string(&translation.translation_lines)?, translation.source_hash])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 }
 
@@ -332,4 +391,26 @@ pub fn workspace_db(workspace: &Path) -> Result<Store> {
         bail!("workspace not found: {}", workspace.display());
     }
     Store::open(workspace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_order_survives_opaque_ids_and_passthrough_is_not_success() {
+        let workspace = crate::adapter::test_dir("store-source-order");
+        let store = Store::open(&workspace).unwrap();
+        let units: Vec<TextUnit> = ["z-first", "a-second"].iter().map(|id| TextUnit {
+            id: id.to_string(), engine: "jsonl".into(), domain: "body".into(), location: id.to_string(),
+            item_type: ItemType::ShortText, role: String::new(), original_lines: vec!["こんにちは".into()],
+            source_line_paths: vec![], context: "same-scene".into(), payload: String::new(),
+        }).collect();
+        store.replace_units(&units, "snapshot").unwrap();
+        assert_eq!(store.all_units().unwrap().iter().map(|u| u.id.as_str()).collect::<Vec<_>>(), ["z-first", "a-second"]);
+        store.save_translation(&Translation { unit_id: units[0].id.clone(), translation_lines: units[0].original_lines.clone(), source_hash: TextUnit::source_hash(&units[0].original_lines), passthrough: true }).unwrap();
+        let counts = store.counts().unwrap();
+        assert_eq!((counts.total, counts.translated, counts.pending, counts.passthrough), (2, 0, 1, 1));
+        assert_eq!(store.pending_units().unwrap()[0].id, "a-second");
+    }
 }

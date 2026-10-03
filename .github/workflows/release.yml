@@ -15,8 +15,33 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests and CLI smoke
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          cargo test --locked -- --test-threads=1
+          cargo build --release --locked
+          test "$(target/release/attx --version)" = "attx ${RELEASE_TAG#v}"
+          target/release/attx --help
+          target/release/attx doctor --json
+      - name: Documentation
+        run: |
+          pip install -r requirements-docs.txt
+          mkdocs build --strict
   build:
     name: Build ${{ matrix.target }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -36,6 +61,8 @@ jobs:
             artifact: attx-macos-x86_64
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -45,7 +72,7 @@ jobs:
         shell: bash
         run: |
           rustup target add ${{ matrix.target }}
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -58,8 +85,8 @@ jobs:
           else
             cp target/${{ matrix.target }}/release/attx dist/$OUT/
           fi
-          cp README.md README.zh-CN.md LICENSE setting.example.toml dist/$OUT/
-          cp -a skills profiles dist/$OUT/
+          cp README.md README.zh-CN.md CHANGELOG.md LICENSE setting.example.toml mkdocs.yml requirements-docs.txt dist/$OUT/
+          cp -a skills profiles docs dist/$OUT/
           cd dist
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             7z a -tzip "$OUT.zip" "$OUT"
@@ -81,6 +108,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Resolve tag
         id: tag
@@ -109,7 +138,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
-          generate_release_notes: true
+          body_path: CHANGELOG.md
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

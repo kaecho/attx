@@ -10,6 +10,7 @@
 //! "Contributing" for the full checklist.
 
 pub mod ass;
+pub mod auto;
 pub mod csv;
 pub mod docx;
 pub mod epub;
@@ -44,6 +45,8 @@ pub struct DetectHit {
 pub struct OutputFile {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
+    /// Source mode for new outputs; existing destination modes remain a fallback.
+    pub permissions: Option<std::fs::Permissions>,
 }
 
 impl OutputFile {
@@ -51,6 +54,7 @@ impl OutputFile {
         Self {
             path,
             bytes: body.into_bytes(),
+            permissions: None,
         }
     }
 }
@@ -115,12 +119,16 @@ pub fn all_adapters() -> Vec<Box<dyn FormatAdapter>> {
         Box::new(jsonkv::MtoolAdapter),
         Box::new(jsonkv::I18nextAdapter),
         Box::new(jsonl::JsonlAdapter),
+        Box::new(auto::AutoAdapter),
     ]
 }
 
 pub fn detect(input: &Path) -> Result<DetectHit> {
     let input = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
     for a in all_adapters() {
+        if a.id() == "auto" {
+            continue;
+        }
         if let Some(hit) = a.detect(&input) {
             return Ok(hit);
         }

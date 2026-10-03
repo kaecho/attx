@@ -352,6 +352,7 @@ fn build_llm(
                         .or_insert(0) += 1;
                 }
             }
+            Err(e) if llm::is_fatal_llm_error(&e) => return Err(e),
             Err(e) => eprintln!("glossary: extract batch {}/{} failed: {e:#}", i + 1, asked),
         }
     }
@@ -840,12 +841,6 @@ mod tests {
             .collect()
     }
 
-    fn count_of(v: &[(String, usize)], term: &str) -> usize {
-        v.iter()
-            .find(|(t, _)| t == term)
-            .map(|(_, c)| *c)
-            .unwrap_or(0)
-    }
 
     // ---- occurrence counting ----
 

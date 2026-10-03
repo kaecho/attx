@@ -162,6 +162,7 @@ impl FormatAdapter for EpubAdapter {
         Ok(vec![OutputFile {
             path: output_sibling(input, target_lang, "epub"),
             bytes: buf.into_inner(),
+            permissions: Some(std::fs::metadata(input)?.permissions()),
         }])
     }
 }

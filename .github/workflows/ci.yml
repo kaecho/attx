@@ -16,9 +16,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo build
-        run: cargo build --release
+        run: cargo build --release --locked
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked -- --test-threads=1
       - name: smoke CLI
         shell: bash
         run: |

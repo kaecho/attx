@@ -1,80 +1,82 @@
-# Install
+# Installation
 
-## Release binary
+## Release packages
 
-Download the archive for your OS from [GitHub Releases](https://github.com/kaecho/attx/releases) (tags `v*`). Available targets: Linux x86_64, Windows x86_64, macOS x86_64 + aarch64. Put `attx` / `attx.exe` on your `PATH`.
+Download the package for your platform from [release v0.10.0](https://github.com/kaecho/attx/releases/tag/v0.10.0). Extract the whole archive so the example configuration, profiles, and agent skill remain available.
 
-## From source
+| Package | Target | Archive |
+|---|---|---|
+| `attx-linux-x86_64` | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| `attx-windows-x86_64` | `x86_64-pc-windows-msvc` | `.zip` |
+| `attx-macos-aarch64` | `aarch64-apple-darwin` | `.tar.gz` |
+| `attx-macos-x86_64` | `x86_64-apple-darwin` | `.tar.gz` |
+
+The packages contain `attx` or `attx.exe`, the English and Chinese README, `CHANGELOG.md`, `LICENSE`, `setting.example.toml`, `skills/`, `profiles/`, `docs/`, `mkdocs.yml`, and `requirements-docs.txt`. Linux packages target GNU libc, not musl. No ARM Linux or 32-bit Windows package is in this matrix.
+
+Put the binary on `PATH`, or invoke its full path. On Linux and macOS, make it executable if extraction did not preserve permissions:
+
+```bash
+chmod +x "./attx"
+./attx --version
+./attx --help
+```
+
+PowerShell does not run a current-directory executable by bare name:
+
+```powershell
+.\attx.exe --version
+.\attx.exe --help
+```
+
+The translation runtime needs no Python, Node.js, external SQLite server, or asynchronous service. Python is needed only to build the documentation site.
+
+## Build from source
+
+Use stable Rust 1.89 or newer. The crate uses edition 2024 and declares `rust-version = "1.89"`.
 
 ```bash
 git clone https://github.com/kaecho/attx.git
-cd attx
+cd "attx"
 cargo build --release
-./target/release/attx --help
-cargo install --path .   # optional
+./target/release/attx --version
+cargo install --path . --locked
 ```
 
-Requires a recent stable Rust (edition 2024). No nightly features, no MSRV pin.
+On Windows, run the same Git and Cargo commands from a developer environment with the Rust target's linker available. Before installation, the executable is:
 
-## LLM config — two paths
+```powershell
+.\target\release\attx.exe --version
+```
 
-### A. Agent Q&A (recommended)
+`cargo install --path . --locked` installs the binary into Cargo's executable directory. It does not install the checkout's example configuration, skill, or profile examples beside that binary. Keep the checkout if you use those resources.
 
-Install the Skill, then ask the agent to set up attx. It walks endpoint → key → model → languages and writes `setting.toml` without echoing the key. See [Agents](agents.md).
+Build dependencies include bundled SQLite and Rustls TLS. The runtime HTTP client is blocking and uses ordinary scoped worker threads. See [development](development.md) for CI and release details.
 
-### B. Manual
+## Configuration and a first check
+
+From the extracted package or repository:
 
 ```bash
-cp setting.example.toml setting.toml
+cp "setting.example.toml" "setting.toml"
 ```
 
-```toml
-[llm]
-default_client = "main"
+PowerShell:
 
-[[llm.clients]]
-name = "main"
-provider_type = "openai"          # OpenAI-compatible Chat Completions
-base_url = "https://api.example.com/v1"
-api_key = "YOUR_API_KEY"
-model = "your-model"
-timeout = 600                     # seconds, per request
-# temperature = 0.3               # omit: translate 0.3, JSON helpers 0.0
-# reasoning_effort = "medium"     # omit: not sent
-# max_tokens = 8192               # omit: not sent
-# stream = true                   # omit: false; SSE delta.content
-# extra = { top_p = 0.9 }         # merged last; cannot replace messages
-
-[translation]
-worker_count = 8       # parallel HTTP batches
-rpm = 60               # global rate limit per minute (0 = unlimited)
-retry_count = 3
-retry_delay = 2
-batch_chars = 2500     # max source chars per batch
-max_context_items = 6  # max units per batch
+```powershell
+Copy-Item ".\setting.example.toml" ".\setting.toml"
+notepad ".\setting.toml"
 ```
 
-Then verify:
+Edit `base_url`, `api_key`, and `model` locally. Do not paste the key into chat. The example contains a placeholder endpoint and cannot translate until these fields are real. Then run:
 
 ```bash
-attx doctor --ping
+attx --config "./setting.toml" doctor --json
+attx --config "./setting.toml" doctor --ping --json
+attx formats
 ```
 
-`doctor` checks config, lists the built-in adapters and saved profiles; `--ping` also sends one tiny request to the LLM. Machine-readable form: `attx doctor --json`.
+`doctor --ping` sends a small paid-or-quota-consuming model request. A successful installation is separate from valid provider credentials. Check `llm.configured` and `ping` in the JSON, not only top-level `status`.
 
-### Config search order
+Configuration lookup is an explicit `--config` path, then an existing `$ATTX_HOME/setting.toml`, then `./setting.toml`. The platform configuration directory is used for saved profiles and knowledge, not as an implicit settings-file search location. Details are in [configuration](configuration.md).
 
-`--config <path>` → `$ATTX_HOME/setting.toml` → `./setting.toml`.
-
-- `ATTX_HOME` also holds your saved profiles and learned experience: `$ATTX_HOME/profiles/`, `$ATTX_HOME/knowledge/`.
-- Without `ATTX_HOME`, the platform config dir is used (`~/.config/attx/` on Linux).
-- `setting.toml` is gitignored — **never commit API keys**.
-- `--client <name>` switches to a non-default `[[llm.clients]]` entry for one invocation.
-
-## Verify the install
-
-```bash
-attx formats                 # list of built-in adapters as JSON
-attx detect --input <file>   # which adapter claims your input
-attx --help
-```
+Continue with the [quick start](quickstart.md), or install the bundled [agent skill](agents.md).

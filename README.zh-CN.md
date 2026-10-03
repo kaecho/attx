@@ -1,116 +1,48 @@
 # attx
 
-**English** | [中文](README.zh-CN.md) | [Docs](https://kaecho.github.io/attx/)
+[English](README.md) | [完整文档](https://kaecho.github.io/attx/zh/) | [下载发行版](https://github.com/kaecho/attx/releases)
 
-**Agent Translation Toolkit eXtensible** —— 一个纯 Rust、单二进制、格式无关的 AI 翻译框架，面向 agent 与人类用户。
+Agent Translation Toolkit eXtensible 是一个 Rust 命令行翻译工具，处理游戏、电子书、文档、字幕和本地化文件。它调用 OpenAI 兼容的 Chat Completions 接口，把进度保存在 SQLite 工作区中。
 
+```text
+识别格式 → 提取 → 可选术语表 → 翻译 → 检查与修复 → 安全写回
 ```
-extract (format adapter) → translate (LLM core) → writeback (format adapter)
+
+0.10.0 使用同一条管线支持普通 CLI 和 Agent。失败条目会在限定次数内定向重试；仍未解决的问题明确报告。用户要求正常翻译后，不再强制追加一次写回许可问答。
+
+## 不想手工配置：复制给 Agent
+
+打开[Agent 翻译向导](docs/zh/agent-translation.md)，复制完整提示词即可。Agent 自己阅读安装、使用和配置文档，询问 API、通过安全输入接收 Key，然后逐步解释模型、语向、费用、并发、术语表等选择，自动生成配置并开始翻译。你只回答问题，不需要手工编辑 TOML。
+
+```text
+请使用 https://github.com/kaecho/attx，先阅读项目安装、使用、配置文档和
+skills/attx/SKILL.md、skills/attx/references/agent-setup.md。
+我不想手工配置。请逐步询问翻译 API、通过安全输入或隐藏终端接收 Key，
+然后询问模型、输入、语向、预算及参数。每一步说明这是什么、能做什么、
+建议怎样配置以及费用/风险，由你安装工具、生成配置、校验并执行翻译。
+已有可用配置就复用；不回显密钥，不把正常带备份写回设为另一轮许可问答。
 ```
 
-使用任意 OpenAI 兼容的 LLM 翻译电子书、文档、字幕、本地化文件与游戏。进度缓存在 SQLite 工作区中，中断的运行可免费续跑。格式支持以 [AiNiee](https://github.com/NEKOparapa/AiNiee) 的读写插件集为蓝本，用 Rust 适配器重新实现。
+## 安装
 
-- **19 个内置适配器** —— EPUB、HTML、DOCX、XLSX、TXT/MD、SRT/VTT/ASS/LRC、CSV、PO、Ren'Py、RPG Maker MV/MZ、MTool/Paratranz/VNTextPatch/i18next JSON，外加一个通用 JSONL 交换格式。
-- **自定义格式 Profile** —— 用一个小 TOML 文件（`line_regex` / `json_keys` / `json_paths` 规则）教 attx 认识任何未知的文本/JSON 格式。
-- **设计上可续跑** —— 每次运行都在 `attx.db` 中打点存档；随时可停，随时可续。失败的单元会变成可见的 *passthrough* 占位，而不是终止整个运行。
-- **自我改进** —— 成功的运行会留下提取经验（`skip`/`extract` 字段判断），由你审阅，绝不会悄悄应用而删除文本。
-- **术语表** —— 为整部作品的每个专有名词约定一个译名，按批次注入。
-- **回检** —— 翻译后免费机械扫描：残留假名、原文照抄、丢失保护码、姓名栏与对白不一致。
+从 [GitHub Releases](https://github.com/kaecho/attx/releases) 下载对应平台的压缩包：Linux x86_64、Windows x86_64、macOS Apple Silicon 或 macOS Intel。发行包包含程序、配置示例、Agent Skill、自定义 Profile 示例和文档源码。
 
----
-
-## Agent 快速上手（推荐）
-
-attx 的设计目标是让编程 agent 能够**阅读 Skill、问你几个问题、写好 `setting.toml` 并运行流水线** —— 你不需要先手工编辑配置。
-
-### 1. 安装二进制
-
-- **发行版：** [Releases](https://github.com/kaecho/attx/releases)（tag `v*`）
-- **从源码构建：**
+源码构建需要 Rust 1.89 或更新版本：
 
 ```bash
 git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
-# optional:
-cargo install --path .
+# 可选：安装到 Cargo 的 bin 目录
+cargo install --path . --locked
 ```
 
-### 2. 安装 Skill（让 agent 了解协议）
+下文默认 `attx` 已加入 `PATH`。Windows 可以使用 `./attx.exe` 或完整程序路径。
 
-```text
-skills/attx/SKILL.md           # stages, hard stops, Q&A config wizard
-skills/attx/references/        # CLI contract, agent usage, custom-format discovery, recovery, JSONL, feedback
-```
+## 第一次翻译
 
-**Claude Code：**
-
-```bash
-# personal, all sessions:
-mkdir -p ~/.claude/skills && cp -a skills/attx ~/.claude/skills/
-# or project-scoped:
-mkdir -p .claude/skills && cp -a skills/attx .claude/skills/
-```
-
-**其他任何 agent**（Cursor / Codex / OpenCode / ……）：保留检出目录并说：
-
-```text
-Strictly follow <attx-dir>/skills/attx/SKILL.md
-```
-
-**为什么用 Skill 而不是 MCP 服务器？** attx 是一个本地 CLI，stdout 输出 JSON —— 这已经是编程 agent 的原生工具面。Skill 是任何 agent 都能遵循的纯 Markdown；MCP 只是把同一个 CLI 包在一个常驻进程后面。
-
-### 3. 一条提示词 —— agent 通过 Q&A 配置，然后翻译
-
-如果 `setting.toml` 缺失或 `attx doctor` 失败，Skill **要求**进行交互式向导。agent 一次问一项：
-
-1. API 端点（OpenAI / DeepSeek / 自定义 OpenAI 兼容 `base_url`）
-2. API Key → 只写入 `setting.toml`，**绝不**回显到聊天中
-3. 模型名
-4. 语向（`src` / `dst`）
-5. 可选：并发 / 术语表
-
-然后运行 `attx doctor --ping` 并继续流水线。
-
-复制粘贴：
-
-```text
-Use the attx toolkit at <attx-dir>, following skills/attx/SKILL.md.
-
-Help me set up attx if needed (Q&A wizard: endpoint, key, model, languages),
-then translate <input path> from Japanese into Simplified Chinese.
-
-Rules:
-1. Only operate through the attx CLI; never hand-edit inputs, attx.db, or tool source.
-2. If the LLM is not configured, run the Q&A config wizard first; never print my API key.
-3. doctor --ping → detect → init → extract → status → translate --limit 20 → full translate.
-4. Prefer translated copies for files; ask before any in-place overwrite.
-5. Report counts and next step after each stage.
-```
-
-更短的形式也可以：
-
-```text
-Help me set up attx, then translate ./novel.epub from Japanese to Simplified Chinese.
-```
-
----
-
-## 快速上手（手动）
-
-```bash
-cp setting.example.toml setting.toml   # fill base_url / api_key / model
-attx doctor --ping                     # verify config + LLM connectivity
-attx run --input novel.epub --src ja --dst zh
-# → writes novel.zh.epub next to the input; the original is never touched
-```
-
-对于大型输入，请使用分步流水线，先用小的 `--limit` 试译（见 [用法](#用法)）。
-
----
-
-## 配置 LLM
+复制 `setting.example.toml` 为 `setting.toml`，在本机填写 `base_url`、`api_key` 和 `model`。不要把密钥发到 Agent 聊天或提交到 Git。
 
 ```toml
 [llm]
@@ -118,305 +50,182 @@ default_client = "main"
 
 [[llm.clients]]
 name = "main"
-provider_type = "openai"          # OpenAI-compatible Chat Completions
 base_url = "https://your-provider.example/v1"
 api_key = "YOUR_API_KEY"
 model = "your-model-name"
-timeout = 600                     # seconds
-# temperature = 0.3               # 省略则翻译 0.3，glossary/learn JSON 0.0
-# reasoning_effort = "medium"     # 省略则不发送
-# max_tokens = 8192               # 省略则不发送
-# stream = true                   # 省略则 false；按 SSE delta.content 拼接
-# extra = { top_p = 0.9 }         # 最后合并进请求体；不能替换 messages
+```
 
+接口必须支持 `{base_url}/chat/completions`。程序不直接实现 Anthropic、Gemini 或 Responses API；可以通过兼容网关接入。省略翻译、术语表和学习小节时，程序使用默认值。
+
+```bash
+attx --config ./setting.toml doctor --ping --json
+attx --config ./setting.toml run --input "novel.epub" --src ja --dst zh
+```
+
+检查 `doctor` 输出中的 `llm.configured` 和 `ping`，不能只看退出码。`--ping` 会发起一个很小的模型请求，可能计费。
+
+第二条命令输出 `novel.zh.epub`，不修改原书。工作区是输入旁的 `.attx-novel/`。目录输入一般使用 `<输入>/.attx/`。
+
+PowerShell：
+
+```powershell
+Copy-Item setting.example.toml setting.toml
+# 先在本机编辑 setting.toml，再执行以下命令
+./attx.exe --config ./setting.toml doctor --ping --json
+./attx.exe --config ./setting.toml run --input "C:/Books/novel.epub" --src ja --dst zh
+```
+
+只试译、不写输出：
+
+```bash
+attx run --input "novel.epub" --src ja --dst zh --limit 20 --no-writeback
+attx translate --workspace ".attx-novel"
+attx writeback --workspace ".attx-novel"
+```
+
+试译后还有待翻条目时，命令可能退出 2。已完成的批次仍在缓存中；再次执行 `translate` 会续跑。
+
+## 支持格式与输出位置
+
+| 输入 | 适配器 ID | 输出 |
+|---|---|---|
+| RPG Maker MV/MZ 游戏目录 | `rmmz` | 原地写 `data/*.json` 和 `js/plugins.js`，保留首次备份 |
+| EPUB、HTML、Word、Excel | `epub`、`html`、`docx`、`xlsx` | 带目标语言后缀的同目录副本 |
+| 纯文本、Markdown | `txt`、`md` | 带语言后缀的副本 |
+| SRT、WebVTT、ASS/SSA、LRC | `srt`、`vtt`、`ass`、`lrc` | 带语言后缀的副本 |
+| CSV/TSV、gettext PO/POT | `csv`、`po` | 带语言后缀的副本 |
+| Ren'Py 翻译导出 | `renpy` | 带语言后缀的 `.rpy` 副本 |
+| MTool、Paratranz、VNTextPatch、i18next JSON | `mtool`、`paratranz`、`vnt`、`i18next` | 带语言后缀的 JSON 副本 |
+| JSONL 文本包 | `jsonl` | 文件副本，或目录下的 `translated.jsonl` |
+| 按内容识别的结构化文本 | `auto` | 文件副本，或 `translated-<目标语言>/` 目录树 |
+| 声明式 TOML Profile | `custom:<name>` | 默认副本；可显式配置原地写回 |
+
+```bash
+attx formats
+attx detect --input "input.file"
+attx analyze --input "input.file" --src ja
+```
+
+`auto` 可识别未知后缀中的 JSON 字符串、严格 XML 文本节点、INI/TOML/简单 YAML 的单行标量，以及能可靠判定的普通文章。它保护未改动的结构字节；译文可在原编码中表示时，保留原编码和 BOM。
+
+Auto 目录模式会把不支持的文件原样复制，并在 `extract.auto_coverage` 中报告。它不会在目录树中自动调用全部文档、压缩包、字幕或脚本适配器。复制文件不等于翻译文件。二进制封包、加密资产、含糊脚本和不支持的语法仍需要专用适配器或外部提取器。
+
+普通探测失败时，`run` 可以让已配置的模型生成声明式 Profile。程序校验提取结果和保持原文的空操作 roundtrip，强制 `overwrite = false`，最多接受三轮提案。`--no-infer` 关闭这项额外计费操作。模型仍可能选择不完整或语义不对的字段，roundtrip 不能证明覆盖完整。
+
+```bash
+attx profile infer --input "scene.scn" --output ./scene.toml --src ja --name scene
+attx profile test --profile ./scene.toml --input "scene.scn" --roundtrip
+attx run --input "scene.scn" --profile ./scene.toml --src ja --dst zh
+attx profile save --profile ./scene.toml
+```
+
+详见[格式能力与限制](docs/zh/formats.md)和[自定义 Profile](docs/zh/profiles.md)。
+
+## 自动检查与修复
+
+模型结果入库前，程序检查编号、行结构和保护标记的精确数量，拒绝被截断的响应。缺失或不合格条目缩小批次后重试，已经通过的同批条目不重复翻译。
+
+中文目标语默认做保守的机械规范化：上下文能确认是中文时，删除独立的 `っ`/`ッ`，把 `っすよ`/`っす` 改为 `哦`，把 `ー` 改为 `～`。整句日文、引用的字形说明和保护片段不会被机械删掉，`・` 仍保留。
+
+RPG Maker 消息重排保护第 0 槽中的独立 `【名字】`，正文控制符保持完整，不增删事件命令。两个槽只能装一个姓名和一整句台词时，正文可能超过默认 44 个半宽单元的估计宽度；程序报告超宽，不会为了压行把姓名粘进台词。
+
+```bash
+attx review --workspace ".attx-novel"
+attx repair --workspace ".attx-novel"
+attx writeback --workspace ".attx-novel" --dry-run
+```
+
+审校报告包含源语残留、`kana_edge`、`kana_mixed`、`kana_untranslated`、原文照抄、保护码丢失、姓名栏不一致，以及术语表建议。报告样本有上限，实际修复候选不受样本上限限制。成功写回会把规范化和重排后的行同步到缓存，后续导出能看到实际渲染行。
+
+任何模型都不能保证任意格式一次翻译完美。检查可以发现特定的结构和文字系统问题，但不能证明语义、人物口吻、提取完整性或真实游戏画面都正确。[质量与修复](docs/zh/quality.md)说明了这些边界。
+
+## 配置与费用
+
+配置查找顺序：`--config`，然后是存在的 `$ATTX_HOME/setting.toml`，最后是当前目录的 `setting.toml`。`--client <name>` 临时选择另一个客户端。
+
+```toml
 [translation]
-worker_count = 8       # parallel HTTP batches
-rpm = 60               # global request rate limit per minute (0 = unlimited)
+worker_count = 8
+rpm = 60
 retry_count = 3
-retry_delay = 2        # seconds between retries
-batch_chars = 2500     # max source chars per batch
-max_context_items = 6  # max units per batch
+retry_delay = 2
+batch_chars = 2500
+max_context_items = 6
+repair_rounds = 2
+context_chars = 1200
 
 [glossary]
-enabled = false        # build during `attx run` (costs extra LLM calls)
-min_occurrences = 10   # LLM 提取的术语须在原文出现 ≥ 此次数才入表
+enabled = false
+min_occurrences = 10
+max_terms = 200
+inject_limit = 30
 
 [learn]
-auto_summarize = true  # capture experience after writeback (free)
-llm_review = false     # also ask the model to check proposals (costs money)
+auto_summarize = true
+llm_review = false
 ```
 
-`setting.toml` 已被 gitignore —— 绝不提交 API Key。用 `attx doctor --ping` 验证。
+每个被选中的单元，每轮最多进入 `1 + retry_count` 次请求。`translate` 和 `run` 在初始轮之后，最多再对未解决的选中条目执行 `repair_rounds` 轮修复。设为 0 可关闭额外审校轮；请求级重试仍受 `retry_count` 限制。`context_chars` 是每个请求的前后文总字符预算，不是模型上下文窗口。
 
-配置查找顺序：`--config` → `$ATTX_HOME/setting.toml` → `./setting.toml`。`--client <name>` 可在单次调用中切换 LLM 客户端。
+术语表自动构建默认关闭，会额外调用模型。已有生效术语仍按批次注入。经验总结默认在本地执行，只有开启 `llm_review` 才增加模型复核。会删除提取条目的学习规则仍需按编号批准，Agent 不得批量批准。
 
----
+[配置参考](docs/zh/configuration.md)逐项说明所有参数、类型、默认值、可选模型字段、`extra` 覆盖顺序、环境变量和调优方法。[工作流程](docs/zh/usage.md)给出术语表、保护规则与学习命令的用法。
 
-## 用法
+## 写回安全与状态
 
-### 一键运行
+正常翻译请求包含其常规输出路径，不再强制追加写回确认。程序在执行时检查风险：
+
+- 默认存在待翻或不合格条目就阻止写回。显式 `--allow-partial` 只应用有效译文，让未解决条目保留原文。
+- 首次覆盖已有文件前，生成 `{原路径}.attxbak`，以后不覆盖这份备份。备份失败则停止写入。
+- 所有输出先暂存，再逐文件替换。单文件替换是原子的，整个目录不是一个文件系统事务。
+- 工作区修改使用操作系统锁；工作区绑定输入、引擎、Profile 快照和语向。
+- 源单元或锚点变化后，必须重新提取。RPG Maker 优先使用原始快照或首次备份，避免把已写回的译文当作新原文。
+- dry-run 不修改缓存中的规范化结果，也不替换输出文件。
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 命令完成，或返回 dry-run 计划 |
+| `1` | 执行、配置、源文完整性或 HTTP 错误 |
+| `2` | 翻译未完成、写回被阻止，或显式部分输出仍需处理 |
+
+退出 2 时，stdout 仍输出 JSON，包含 `status`、数量和审校详情。`doctor` 与建议性质的 `review` 有自己的报告语义，不要仅凭退出码推断翻译已经完成。
+
+## 给 Agent 使用
+
+执行协议是 [`skills/attx/SKILL.md`](skills/attx/SKILL.md)，配套参考文档说明问答配置、CLI 字段、恢复和未知格式。首次配置可用[解释式向导](docs/zh/agent-translation.md)；已有有效配置不重复提问，正常写回不再追加许可。
+
+可以直接发给 Agent：
+
+```text
+按照 <attx目录>/skills/attx/SKILL.md，使用本机 attx CLI。
+把 <输入路径> 从日文翻译成简体中文。
+执行常规管线，在配置次数内修复检测到的问题，然后带备份写回。
+报告输出路径和未解决问题，不打印密钥，不手改输入或数据库。
+```
+
+Claude Code 的本地安装示例：
 
 ```bash
-attx run --input "novel.epub" --src ja --dst zh
-# → novel.zh.epub next to the input
+mkdir -p ~/.claude/skills
+cp -a skills/attx ~/.claude/skills/
 ```
 
-`run` = `init` → `extract` →（可选术语表）→ `translate` → `writeback`，每个阶段以 JSON 报告。加 `--limit 20` 试译，`--no-writeback` 在写回前检查，`--glossary`/`--no-glossary` 覆盖配置。
+其他 Agent 可直接读取仓库 Skill，不需要 MCP 服务或内置 Agent 运行时。无关删除、重置工作区，以及超出本次任务的付费范围，仍应单独取得授权。
 
-### 分步执行（大型输入 —— 先试译 20 个单元）
+## 文档与二次开发
+
+完整手册提供[中文](docs/zh/index.md)、[English](docs/en/index.md)和[日本語](docs/ja/index.md)。从[快速开始](docs/zh/quickstart.md)进入，再按需要查阅 [CLI](docs/zh/cli.md)、[工作区与 JSONL](docs/zh/workspace.md)、[架构](docs/zh/architecture.md)和[二次开发](docs/zh/development.md)。
 
 ```bash
-attx detect  --input book.epub
-attx init    --input book.epub --src ja --dst zh      # workspace: .attx-book/
-attx extract --workspace .attx-book
-attx status  --workspace .attx-book
-attx translate --workspace .attx-book --limit 20      # trial
-attx translate --workspace .attx-book                 # full; re-run to resume
-attx writeback --workspace .attx-book --dry-run       # preview planned files
-attx writeback --workspace .attx-book                 # → book.zh.epub
+cargo test -- --test-threads=1
+cargo clippy --all-targets
+cargo build --release
+pip install -r requirements-docs.txt
+mkdocs build --strict
 ```
 
-工作区布局：目录输入使用 `<dir>/.attx`；文件输入使用 `<parent>/.attx-<stem>` —— 内含 `attx.db`（单元 + 译文 + 元数据）、`workspace.json`，可选 `glossary.toml`、`experience.toml`、`profile.toml`。
+Rust 测试全部放在对应源码文件中。适配器只负责提取和生成输出，管线负责网络、缓存和文件提交。新增适配器、Profile 规则、配置字段或 CLI 命令前，先看开发指南。
 
-大多数文件格式写出**翻译副本**（`*.<dst>.*`），源文件保持不动。`rmmz` 游戏适配器**原地**写回，带一次性 `*.attxbak` 备份 —— 务必先 `writeback --dry-run`。
+本轮研究了 [LinguaGacha](https://github.com/neavo/LinguaGacha) 的定向重试、Agent 与批量翻译共用服务、有界上下文、严格结构检查和文本保护，使用 Rust 独立实现，没有复制其源码。它的商业使用声明不构成对 attx 的许可证授权。格式适配器设计也参考了 [AiNiee](https://github.com/NEKOparapa/AiNiee)。
 
-真实世界验证：一部 4,171 段的全本轻小说 EPUB（含插图 10.9 MB）一次运行 ja→zh-Hans 全部译完 —— 覆盖率 100%，EPUB 结构与插图完好，目录及 `dc:title`/`dc:language` 已本地化。
-
-### 当模型失败时：passthrough
-
-如果某个单元的翻译反复失败，attx 会把原文存为带标记的 **passthrough** 占位，以便运行完成。`attx status` 报告数量；`attx translate --retry-passthrough` 精确地重新入队这些单元。
-
-### 手动 / 离线审校（JSONL）
-
-```bash
-attx export-jsonl --workspace .attx-book --output pending.jsonl --filter pending
-# review/edit translation_lines externally, then:
-attx import-jsonl --workspace .attx-book --input pending.jsonl
-attx writeback    --workspace .attx-book
-```
-
-独立使用，无需工作区：
-
-```bash
-attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --dst zh
-```
-
----
-
-## 支持的格式
-
-| id | 输入 | 说明 | 输出 |
-|----|------|------|------|
-| `epub` | `.epub` | 电子书 / 轻小说：段落级，注音假名（`<rt>`）从源文中剔除，图片与排版保留，`dc:language` 更新 | `<name>.<dst>.epub` |
-| `html` | `.html` `.htm` `.xhtml` | 独立 HTML 页面：块级 + `<title>` | 翻译副本 |
-| `docx` | `.docx` | Word 文档：段落级，覆盖 `w:t` run | `<name>.<dst>.docx` |
-| `xlsx` | `.xlsx` `.xlsm` | Excel 工作簿：翻译共享字符串表，所有工作表保持一致 | 翻译副本 |
-| `txt` | `.txt` | 纯文本小说，每行一个单元 | `<name>.<dst>.txt` |
-| `md` | `.md` `.markdown` | Markdown：跳过代码块，标题/列表/引用前缀保留 | `<name>.<dst>.md` |
-| `srt` / `vtt` | 文件 | 字幕：时间轴行与头部原样保留，字幕文本翻译 | 翻译副本 |
-| `ass` | `.ass` `.ssa` | ASS/SSA 字幕：`{\tag}` 覆盖与 `\N` 换行保留，Name → 说话人 | 翻译副本 |
-| `lrc` | `.lrc` | 歌词：时间戳保留，`[ti:…]` 元标签跳过 | 翻译副本 |
-| `csv` | `.csv` `.tsv` | 表格（RFC4180：引号、内嵌换行）；只重写已翻译的记录 | 翻译副本 |
-| `po` | `.po` `.pot` | Gettext：填充 `msgstr`；复数条目与头部直通 | 翻译副本 |
-| `renpy` | `.rpy` | Ren'Py `translate` 块：对白 + `old`/`new` 字符串 | 翻译副本 |
-| `rmmz` | 目录 | RPG Maker MV/MZ 数据 + `js/plugins.js` 中的插件参数（插件*源文件*永不修改） | 原地 + `*.attxbak` |
-| `mtool` | `.json` | MTool `ManualTransFile.json`（内容嗅探） | 翻译副本 |
-| `paratranz` | `.json` | Paratranz 导出；只填空的 `translation` 字段 | 翻译副本 |
-| `vnt` | `.json` | VNTextPatch 导出（`name`/`message`） | 翻译副本 |
-| `i18next` | `.json` | 字符串叶子的嵌套 JSON（≥80%） | 翻译副本 |
-| `jsonl` | 文件/目录 | 通用逃生舱：通过外部提取/写回脚本支持任意引擎 | `translated.jsonl` |
-| `custom:<name>` | 文件/目录 | **自定义 Profile**：agent（或你）为任何未知文本/JSON 格式编写的 TOML 规则 | 副本或原地 |
-
-`attx formats` 以 JSON 打印这份清单（含已保存的自定义 Profile）。四种 `.json` 变体按内容嗅探区分；有歧义时用 `--engine <id>` 强制。
-
-文本输入自动检测编码（通过 chardetng 检测 UTF-8 / UTF-16 BOM / Shift-JIS / GBK）；输出一律 UTF-8。
-
-暂不支持（欢迎贡献适配器，见 [贡献](#贡献)）：Translator++ 工程、PDF、二进制封包（请走 JSONL 逃生舱）。
-
-### 未知格式？教 attx 一个 Profile
-
-`detect` 失败时不要停下来 —— attx 自带一套为 agent 打造的分析工具链：
-
-```bash
-attx analyze --input ./project         # recon: encoding, structure, samples, JSON shape
-attx profile new --output fmt.toml     # documented rule template (line_regex / json_keys / json_paths)
-attx profile test --profile fmt.toml --input ./project --roundtrip   # iterate until units look right
-attx init --input ./project --profile fmt.toml --src ja --dst zh     # then extract/translate/writeback as usual
-attx profile save --profile fmt.toml   # "remember this format" — detect auto-recognizes it from now on
-```
-
-Profile 是一个小 TOML 文件：带命名 `text`/`role` 组的逐行正则，和/或 JSON 键/路径选择器。完整的 agent 流程见 `profiles/examples/`（KiriKiri KAG、INI、通用 JSON）与 `skills/attx/references/custom-format-discovery.md`。
-
----
-
-## 术语表
-
-分批次翻译长篇作品的模型无法与自身保持一致：同一个专有名词会在不同章节间漂移。术语表为整部作品的每个术语固定一个约定译名。
-
-**默认关闭** —— 构建术语表会花费额外的 LLM 调用。提取全程由 LLM 负责（LinguaGacha 策略）：模型读源文并给出术语。
-
-```bash
-attx glossary build --workspace .attx --dry-run              # 规模预估，分文不花
-attx glossary build --workspace .attx                        # LLM 提取
-attx glossary build --workspace .attx --min-occurrences 5    # 放宽出现次数门槛
-attx glossary list --workspace .attx
-attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info "female given name"
-attx glossary import --workspace .attx --file terms.json
-attx glossary check --workspace .attx             # terms the translation ignored
-attx review --workspace .attx                     # 残留假名、原文照抄、丢失保护码、姓名栏漂移
-```
-
-一种策略，全程 LLM 提取（LinguaGacha 策略）：
-
-```
-source batches → model emits {src,dst,info} → substring gate
-  → min_occurrences gate (real source hits) → vote / max_terms → inject → check
-```
-
-正则死规则已移除：正则只能看到片假名串和大写词，
-组织名、物品名、技能名、世界观概念等术语根本不会浮现。
-由模型读原文判断什么是术语；机械闸门只负责两件事——
-防幻觉（`src` 必须是源文真实子串）和费用控制
-（术语在作品中出现至少 `min_occurrences` 次，namebox 说话人铭牌除外）。
-同一 `src` 跨批次投票，多数胜出。费用跟文本批次数走。
-
-每条目带一个消歧 `info`（“女性名字”、“地点”）。这不是装饰：没有它，模型无法判断名字在语境中应如何称呼。
-
-在 `setting.toml` 中：
-
-```toml
-[glossary]
-enabled = false        # build during `attx run`
-min_occurrences = 10   # 术语须在原文出现 ≥ 此次数才入表
-max_terms = 200        # cap on terms kept
-inject_limit = 30      # cap on terms injected into one batch
-```
-
-显式执行 `attx glossary build` 会忽略 `enabled` —— 主动要求就是同意。而且一旦存在 `glossary.toml`，`translate` 总会从中注入：注入几乎免费，所以*不*使用你已经构建好的术语表反而奇怪。
-
----
-
-## 自我改进的经验层
-
-适配器用硬编码启发式决定提取什么，而这些表有时是错的 —— 一个看起来像 UI 文本的字段可能实际上是脚本逐字引用的标识符。翻译它，运行时就会出问题。此前这类修复只留在源码里，于是下一个项目又重新踩一遍。
-
-attx 把这种判断作为数据保存，并**自动**捕获：每次成功的 `writeback` 都会把运行总结为经验条目，零 API 成本，因为证据已经躺在工作区数据库里。
-
-```bash
-attx writeback --workspace .attx         # …and learn skip-fields from the run, automatically
-attx writeback --workspace .attx --no-learn   # opt out for one run
-attx learn summarize --workspace .attx   # or trigger it by hand
-attx learn summarize --workspace .attx --llm  # also ask the model (costs money)
-attx learn note --workspace .attx --name honorifics --text "角色名后的さん/くん保留不译"
-attx learn pending                       # entries awaiting approval, with evidence
-attx learn review --approve 1,3          # approve; only now do they delete anything
-attx learn list --workspace .attx        # this work's notes
-attx learn defaults --format rmmz        # example: built-in baseline for one format
-attx learn forget --field achievename    # drop a skip/extract entry
-attx learn forget --name honorifics --workspace .attx
-attx extract --no-knowledge              # escape hatch: ignore all of it
-```
-
-`summarize` 只沉淀提取判断（哪些字段不该译）和客观信号（例如控制码丢失）。翻译腔调、敬称、人称不在那些统计里。用 `learn note` 写：默认 `topic = "prompt"`，下一轮 `translate` 会注入系统提示词。专有名词仍然走术语表。
-
-**文件格式刻意保持开放。** 条目带 `kind`，attx 不认识的 kind 会原样往返 —— 所以 agent 可以发明 `kind = "voice-hint"`，attx 会原封不动地交还，而不是悄悄丢弃。目前有两种 kind 会被处理：
-
-```toml
-[[entry]]
-kind = "field"          # a field-name extraction judgement
-field = "key"
-verdict = "skip"        # skip | extract
-scope = "nested"        # nested | top | any
-domain = "plugins"      # restrict to one unit domain; empty = any
-status = "pending"      # approved | pending
-
-[[entry]]
-kind = "note"           # free-form experience; topic="prompt" reaches the model
-topic = "prompt"
-text = "This format loses control codes; keep every [CTRL_n] verbatim."
-```
-
-四层经验合并，后者优先：内置默认（内嵌，见 `learn defaults`）→ `$ATTX_HOME/knowledge/<format>.toml` → `<workspace>/experience.toml`。同一层内，精确字段名胜过 `*后缀`，`skip` 胜过 `extract`。
-
-三个值得知道的保护机制：
-
-- **新增自动生效；删除等你批准。** Note 与 `extract` 条目立即生效 —— 最坏情况只是提示词变长。`skip` 是唯一会删除文本的判定，所以它先记为 `pending`，在 `learn review --approve` 之前不做任何事。漏译在 `status` 中可见；被悄悄丢弃的行则不可见。
-- **学习可以覆盖名称启发式，但绝不会覆盖值的证据。** 当值是数字、路径或脚本时，`extract` 条目会被拒绝，因此坏条目不可能把开关 id 或文件名发给模型。
-- **条目按域限定作用范围。** 某个域的规则不会在另一个同名但含义不同的域上触发。
-
----
-
-## CLI 参考
-
-| 命令 | 作用 |
-|---------|------|
-| `doctor [--ping] [--json]` | 配置检查 / LLM 连通性检查 |
-| `formats` | 支持的适配器 + 已保存的 Profile（JSON） |
-| `detect --input <path>` | 格式探测，含已保存的 Profile（保留 `--game` 别名） |
-| `analyze --input <path>` | 未知输入的侦察报告（编码、结构、样本） |
-| `profile new/test/save/list` | 编写、迭代并记住自定义格式 Profile |
-| `init --input <path> --src --dst [--profile]` | 创建工作区 + SQLite |
-| `extract --workspace [--no-knowledge]` | 适配器 → 文本单元 |
-| `translate --workspace [--limit] [--dry-run] [--retry-passthrough]` | 对待译单元调用 LLM，增量保存 |
-| `writeback --workspace [--dry-run] [--no-learn]` | 渲染翻译输出；除非选择退出，否则捕获经验 |
-| `run --input …` | init + extract +（术语表）+ translate + writeback |
-| `status --workspace` | 计数（含 passthrough）+ 按域细分 |
-| `translate-jsonl` / `export-jsonl` / `import-jsonl` | 交换（`--filter` 含 `passthrough`） |
-| `learn summarize/note/pending/review/list/defaults/forget` | 自我改进：从证据学 skip 字段，从 agent 学文风 note |
-| `glossary build/list/add/remove/import/export/check` | 整部作品一致的专有名词译名 |
-
-全局：`--config /path/to/setting.toml`（默认 `./setting.toml` 或 `$ATTX_HOME/setting.toml`）；`--client <name>` 选择非默认的 LLM 客户端。
-
-每个命令都在 stdout 报告机器可读的 JSON；错误以非零退出码输出到 stderr。确切的 JSON 结构固定在 `skills/attx/references/cli-command-contract.md`。
-
----
-
-## 文档
-
-长文档（EN / 中文 / 日本語）：**https://kaecho.github.io/attx/**
-
----
-
-## 贡献
-
-欢迎 PR —— 尤其是新的格式适配器。代码库刻意保持小而朴素；请保持这样。
-
-### 架构
-
-```
-src/
-  main.rs          CLI
-  pipeline.rs      init / extract / translate / writeback / run
-  adapter/         one module per format (+ custom profiles)
-  llm.rs           OpenAI-compatible client, batching, masking
-  store.rs         SQLite workspace
-  knowledge.rs     experience layers (learn)
-  glossary.rs      proper-noun glossary
-  profile.rs       custom format profiles
-```
-
-### 添加新格式适配器
-
-1. 在 `src/adapter/<name>.rs` 实现 `FormatAdapter`（`detect` / `extract` / `writeback`）。
-2. 在 `src/adapter/mod.rs` 注册（顺序 = 检测优先级）。
-3. 加一个带小 fixture 的往返单元测试。
-4. 在 `attx formats` 输出与本 README 中记录该 id。
-
-### PR 检查清单
-
-- [ ] `cargo test` 通过
-- [ ] 仓库中不含 API Key 或受版权保护的示例文本
-- [ ] 新适配器：detect 不会在其他格式上误报
-- [ ] 对用户可见的 README / `formats` 已更新
-
-### 路线图（认领一个）
-
-- 更多文档 / 游戏 / 本地化适配器
-- 更丰富的自定义 Profile 原语
-- 面向非 CLI 主机的可选 MCP 封装
-
----
-
-## 许可证
-
-MIT
+变更记录：[CHANGELOG.md](CHANGELOG.md)。attx 采用 [MIT 许可证](LICENSE)。

@@ -1,43 +1,54 @@
 # RPG Maker MV/MZ
 
-attx 是一个**通用**翻译框架 —— 本页只是 RMMZ 专属说明。主流程见 [用法](usage.md) 与 [Agent](agents.md)。
+`rmmz` 接收游戏目录，检测输入本身、`www/` 或 `game/` 中的内容根，需要能识别游戏的 `data/` 与 `System.json` 或 `js/` 结构。工具处理游戏数据，不修改运行时，也不负责字体、插件兼容性或渲染器问题。
 
-`rmmz` 适配器接收**游戏目录**。它会检测内容根目录 `./`、`www/` 或 `game/`（需要 `data/` 加上 `System.json` 或 `js/`）。
-
-## 流水线
+## 正常运行
 
 ```bash
-attx detect  --input /path/to/game
-attx init    --input /path/to/game --src ja --dst zh      # workspace: /path/to/game/.attx
-attx extract --workspace /path/to/game/.attx
-attx translate --workspace /path/to/game/.attx
-attx writeback --workspace /path/to/game/.attx --dry-run  # preview paths[]
-attx writeback --workspace /path/to/game/.attx
+attx detect --input './game'
+attx run --input './game' --src ja --dst zh
 ```
 
-**写回是原地进行**：`data/*.json` 与 `js/plugins.js` 在游戏目录中被重写，每个被覆盖的文件都会备份一次为 `*.attxbak`。务必先试运行并确认 —— agent 必须在真正写回前征得用户同意。
+默认工作区是内容根的 `.attx`。正常翻译请求包括写回，无须默认先试译或另问一次原地覆盖许可。用户只要求提取/预览时尊重 `--no-translate`、`--no-writeback` 或分步 dry-run。
 
-## 提取了什么
+## 提取范围
 
 | domain | 来源 |
 |--------|------|
-| `dialogue` | 显示文字事件指令（`401`） |
-| `namebox` | MZ 说话人名牌 —— 事件指令 `101` 的 `parameters[4]` |
-| `choices` | 显示选项事件指令（`102`） |
-| `scroll` | 滚动文字事件指令（`405`） |
-| `system` | `System.json` —— 术语、消息、菜单 |
-| `base` | 数据库名称 / 简介 / 描述（`Actors.json`、`Skills.json`、……） |
-| `plugins` | `js/plugins.js` —— 只译插件 `@param` 值，**绝不**改插件源文件 |
+| `dialogue` | 显示文字正文事件指令 `401` |
+| `namebox` | MZ 显示文字 `101` 的 `parameters[4]` 名牌 |
+| `choices` | 选项指令 `102` |
+| `scroll` | 滚动文字指令 `405` |
+| `system` | `System.json` 的菜单、术语、消息等 |
+| `base` | Actors、Skills 等数据库的名称、描述和简介 |
+| `plugins` | `js/plugins.js` 中可识别为玩家文本的插件参数 |
 
-`\N[n]` 名牌引用不会被提取。`data/*.json` 中被其他位置引用的名称会由学到的规则跳过（见内置经验中的 `plugins` 域：`attx learn defaults --format rmmz`）。
+`\N[n]` 是名字引用控制符，不单独翻译为姓名框。插件参数值、文件路径、数据库引用和机器标识不能一律当成玩家文本。内置 RMMZ 经验和机器字面值检查会过滤部分字段；`learn defaults --format rmmz` 可查看内置基线。
 
-## 插件参数
+插件源文件 `js/plugins/*.js` 永不写回。`js/plugins.js` 是启用列表及参数数据，其嵌套 JSON 字符串在提取时解码、写回时重新编码，包含 `/` 的参数键也保留定位。没有新增通用 JavaScript 代码翻译器。
 
-- 只动 `js/plugins.js` —— `.js` 插件源文件永不修改。
-- 值为嵌套 JSON 字符串的参数在提取时解码、写回时重新编码，因此嵌套结构可以完整往返。
-- 包含 `/` 的参数名同样可以往返。
-- 消息行会按显示宽度重新排版，回到原有的 `401` 槽位数量。
+## 源文与输出
 
-## 写回之后
+重提取优先使用有效 `data_origin/` 快照，否则使用已有 `*.attxbak` 原始备份，再读取 live 数据。这样第二次运行不会把已写入中文误当成新的日文源文。写回始终针对 live `data/` 与 `js/plugins.js`，不覆盖 `data_origin/`。
 
-本次运行学到的经验会自动应用到下一个项目（见 README 的 *自我改进的经验层*）。`*.attxbak` 文件可让你恢复翻译前的状态；它们已被 gitignore。
+已有文件首次替换前保留完整文件名后追加 `.attxbak`，例如 `data/Map003.json.attxbak`。后续运行不覆盖首份备份。全部输出先暂存，所有所需备份成功后才开始逐文件替换；中途替换失败可能已有部分文件更新，不能声称整个游戏目录原子提交。
+
+源文身份和写回锚点必须一致。编辑地图事件、更换游戏版本或手工变更备份后，旧缓存不能直接套到新数据上。需要重新提取、翻译变化单元，版本差异较大时使用新工作区。具体恢复见[故障排查](troubleshooting.md)。
+
+## 固定对白槽位
+
+RMMZ 事件中的 `401` 槽位数量及命令列表索引保持不变。工具会按显示宽度重新分配已有槽位，控制符不按普通可见文字计算，分割避免把控制序列拆坏，并考虑标点。
+
+如果首槽是独立说话人标签，例如 `【拉吉】`，它必须保持在首槽；正文不挤进姓名标签，也不增加事件指令来容纳更多文字。两槽的“姓名 + 正文”只能让正文占最后一槽。
+
+默认宽度信号是 44 个半角显示单元。正文太长、固定槽位不足时，最后槽保留完整文字并报告 `overflow_lines`，不会截断、删字或偷偷改命令数量。44 只是机械估算，字体、插件字号和实际窗口尺寸仍会影响显示。
+
+实际成功写回后，规范化及重排译文同步到 SQLite 缓存，后续导出和 review 使用相同内容。dry-run 或被拦截写回不改缓存。
+
+## 试玩检查
+
+查看 `review.namebox_mismatch` 和 writeback 的 `reflowed_units`、`overflow_lines`。即使 status 为 ok，溢出也要报告并在游戏里检查。只修剪输出文件会造成缓存与游戏不一致，应经 JSONL 修改译文再导入和写回。
+
+还应检查菜单、选项宽度、字体可显示性、变量替换、角色称呼、插件逻辑名称，以及游戏读取翻译文件是否成功。这些需要实际运行游戏，机械 review 不证明全部通过。
+
+继续：[质量与审校](quality.md) · [JSONL 校对](usage.md) · [恢复](troubleshooting.md)。

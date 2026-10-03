@@ -11,6 +11,7 @@ use crate::model::{ItemType, TextUnit, Translation, needs_translation};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -244,8 +245,9 @@ fn render_plugins_js(plugins: &[Value]) -> Result<String> {
 }
 
 pub fn extract_plugins(content_root: &Path, source_lang: &str) -> Result<Vec<TextUnit>> {
-    let path = content_root.join("js/plugins.js");
-    if !path.is_file() {
+    let live = content_root.join("js/plugins.js");
+    let path = super::rmmz::source_json_path(&live)?;
+    if path == live && !path.is_file() {
         return Ok(vec![]);
     }
     let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
@@ -315,7 +317,95 @@ pub fn extract_plugins(content_root: &Path, source_lang: &str) -> Result<Vec<Tex
             );
         }
     }
+    let masks = plugin_masks(&units)?;
+    let hash = plugin_anchor_hash(&plugins, &masks);
+    for unit in &mut units {
+        let mut payload: Value = serde_json::from_str(&unit.payload)?;
+        payload["anchor_hash"] = Value::String(hash.clone());
+        unit.payload = payload.to_string();
+    }
     Ok(units)
+}
+
+#[derive(Default)]
+struct AnchorMask {
+    leaf: bool,
+    children: BTreeMap<String, AnchorMask>,
+    indices: BTreeMap<usize, AnchorMask>,
+}
+
+fn plugin_masks(units: &[TextUnit]) -> Result<BTreeMap<usize, BTreeMap<String, AnchorMask>>> {
+    let mut masks = BTreeMap::<usize, BTreeMap<String, AnchorMask>>::new();
+    for unit in units.iter().filter(|unit| unit.domain == DOMAIN) {
+        let (index, param, path) = parse_plugin_location(unit)?;
+        let mut mask = masks.entry(index).or_default().entry(param).or_default();
+        for part in path.split('/').filter(|part| !part.is_empty()) {
+            mask = if let Ok(index) = part.parse::<usize>() {
+                mask.indices.entry(index).or_default()
+            } else {
+                mask.children.entry(part.to_owned()).or_default()
+            };
+        }
+        mask.leaf = true;
+    }
+    Ok(masks)
+}
+
+fn plugin_anchor_hash(plugins: &[Value], masks: &BTreeMap<usize, BTreeMap<String, AnchorMask>>) -> String {
+    let mut hash = Sha256::new();
+    for (index, plugin) in plugins.iter().enumerate() {
+        hash.update(b"plugin\0");
+        super::rmmz::hash_value(&mut hash, &plugin["name"]);
+        super::rmmz::hash_value(&mut hash, &plugin["status"]);
+        if let Some(params) = plugin["parameters"].as_object() {
+            hash.update(b"params{\0");
+            for (param, value) in params {
+                hash.update(param.as_bytes());
+                hash.update(b"\0");
+                hash_plugin_param(&mut hash, value, masks.get(&index).and_then(|params| params.get(param)));
+            }
+            hash.update(b"}\0");
+        } else { super::rmmz::hash_value(&mut hash, &plugin["parameters"]); }
+    }
+    format!("{:x}", hash.finalize())
+}
+
+// Ignore only the extracted string leaves. Non-text values and identity keys
+// distinguish nested indices, including strings wrapping JSON containers.
+fn hash_plugin_param(hash: &mut Sha256, value: &Value, mask: Option<&AnchorMask>) {
+    if mask.is_some_and(|mask| mask.leaf) && value.is_string() {
+        hash.update(b"text\0");
+        return;
+    }
+    let Some(mask) = mask.filter(|mask| !mask.children.is_empty() || !mask.indices.is_empty()) else {
+        super::rmmz::hash_value(hash, value);
+        return;
+    };
+    match value {
+        Value::String(raw) => {
+            if let Some(inner) = decode_json_container(raw) {
+                hash.update(b"encoded\0");
+                hash_plugin_param(hash, &inner, Some(mask));
+            } else { super::rmmz::hash_value(hash, value); }
+        }
+        Value::Array(values) => {
+            hash.update(b"[\0");
+            for (index, value) in values.iter().enumerate() {
+                hash_plugin_param(hash, value, mask.indices.get(&index));
+            }
+            hash.update(b"]\0");
+        }
+        Value::Object(values) => {
+            hash.update(b"{\0");
+            for (key, value) in values {
+                hash.update(key.as_bytes());
+                hash.update(b"\0");
+                hash_plugin_param(hash, value, mask.children.get(key));
+            }
+            hash.update(b"}\0");
+        }
+        _ => super::rmmz::hash_value(hash, value),
+    }
 }
 
 fn is_machine_literal(s: &str) -> bool {
@@ -531,17 +621,7 @@ pub fn writeback_plugins(
     units: &[TextUnit],
     translations: &BTreeMap<String, Translation>,
 ) -> Result<Option<String>> {
-    let mut plugin_units: Vec<(&TextUnit, &Translation)> = Vec::new();
-    for u in units {
-        if u.domain != DOMAIN {
-            continue;
-        }
-        if let Some(tr) = translations.get(&u.id)
-            && !tr.translation_lines.is_empty()
-        {
-            plugin_units.push((u, tr));
-        }
-    }
+    let plugin_units: Vec<&TextUnit> = units.iter().filter(|unit| unit.domain == DOMAIN).collect();
     if plugin_units.is_empty() {
         return Ok(None);
     }
@@ -549,10 +629,22 @@ pub fn writeback_plugins(
     let path = content_root.join("js/plugins.js");
     let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     let mut plugins = parse_plugins_js(&raw)?;
+    let masks = plugin_masks(units)?;
+    let hash = plugin_anchor_hash(&plugins, &masks);
+    for unit in &plugin_units {
+        let payload: Value = serde_json::from_str(&unit.payload)?;
+        let expected = payload.get("anchor_hash").and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing plugin extraction anchor hash at {}", unit.location))?;
+        if expected != hash {
+            bail!("live plugin identities or parameter anchors changed; refusing stale plugin indices");
+        }
+    }
 
-    for (u, tr) in plugin_units {
-        let text = tr.translation_lines.join("\n");
-        apply_one(&mut plugins, u, &text)?;
+    for unit in plugin_units {
+        let lines = translations.get(&unit.id).filter(|tr| !tr.translation_lines.is_empty())
+            .map_or(unit.original_lines.as_slice(), |tr| tr.translation_lines.as_slice());
+        let text = lines.join("\n");
+        apply_one(&mut plugins, unit, &text)?;
     }
 
     Ok(Some(render_plugins_js(&plugins)?))
@@ -572,6 +664,12 @@ fn apply_one(plugins: &mut [Value], unit: &TextUnit, text: &str) -> Result<()> {
         );
     }
     let plug = &mut plugins[idx];
+    let payload: Value = serde_json::from_str(&unit.payload)?;
+    if payload.get("plugin").and_then(Value::as_str) != plug.get("name").and_then(Value::as_str)
+        || plug.get("status").and_then(Value::as_bool) != Some(true)
+    {
+        bail!("live plugin identity changed at {}", unit.location);
+    }
     let params = plug
         .get_mut("parameters")
         .and_then(|v| v.as_object_mut())
@@ -579,8 +677,7 @@ fn apply_one(plugins: &mut [Value], unit: &TextUnit, text: &str) -> Result<()> {
     let cur = params
         .get(param.as_str())
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .ok_or_else(|| anyhow::anyhow!("missing string param `{param}` on plugin {idx}"))?;
     let new_val = if json_path.is_empty() {
         text.to_string()
     } else if cur.is_empty() {
@@ -589,11 +686,11 @@ fn apply_one(plugins: &mut [Value], unit: &TextUnit, text: &str) -> Result<()> {
             unit.location
         );
     } else {
-        set_in_json_string(&cur, &json_path, text).with_context(|| {
+        set_in_json_string(cur, &json_path, text).with_context(|| {
             format!(
                 "nested write failed at {} (plugin {idx} param `{param}` path `{json_path}`, value starts: {})",
                 unit.location,
-                truncate(&cur, 60)
+                truncate(cur, 60)
             )
         })?
     };
@@ -691,6 +788,9 @@ fn descend_set(cur: &mut Value, parts: &[&str], value: Value) -> Result<()> {
     // decode branch so a leaf whose text merely *looks* like JSON is replaced
     // verbatim rather than descended into.
     let Some((part, rest)) = parts.split_first() else {
+        if !cur.is_string() {
+            bail!("translated plugin leaf is no longer a string");
+        }
         *cur = value;
         return Ok(());
     };
@@ -1099,5 +1199,106 @@ var $plugins =
             paths.iter().any(|p| p.ends_with("/Name") || p.ends_with("#0/Name")),
             "visible Name still extracted: {paths:?}"
         );
+    }
+
+    fn repeat_plugin_fixture(name: &str) -> (std::path::PathBuf, String) {
+        let source = format!("var $plugins = {};", json!([
+            {"name": "DemoA", "status": true, "description": "original header", "parameters": {
+                "label": "現在地", "count": "3",
+                "terms": enc(&json!([enc(&json!({"key": "stable-a", "title": "称号", "description": "説明文"}))]))
+            }},
+            {"name": "DemoB", "status": true, "parameters": {"label": "名前", "count": "4"}}
+        ]));
+        (test_root(name, &source), source)
+    }
+
+    fn plugin_translations(units: &[TextUnit]) -> BTreeMap<String, Translation> {
+        units.iter().map(|unit| (unit.id.clone(), Translation {
+            unit_id: unit.id.clone(), translation_lines: vec![format!("译文:{}", unit.original_lines.join("\n"))],
+            source_hash: TextUnit::source_hash(&unit.original_lines), passthrough: false,
+        })).collect()
+    }
+
+    #[test]
+    fn repeat_partial_plugin_write_restores_plain_and_nested_source_leaves() {
+        let (root, source) = repeat_plugin_fixture("repeat-partial");
+        let plugin_source = "/* @param label */\n// Do not rewrite plugin source";
+        fs::write(root.join("js/plugins/DemoA.js"), plugin_source).unwrap();
+        let units = extract_plugins(&root, "ja").unwrap();
+        let full = plugin_translations(&units);
+        let translated = writeback_plugins(&root, &units, &full).unwrap().unwrap();
+        fs::write(root.join("js/plugins.js.attxbak"), &source).unwrap();
+        let mut live = parse_plugins_js(&translated).unwrap();
+        live[0]["description"] = json!("live header change");
+        fs::write(root.join("js/plugins.js"), render_plugins_js(&live).unwrap()).unwrap();
+        let units = extract_plugins(&root, "ja").unwrap();
+        let mut partial = BTreeMap::new();
+        for unit in &units {
+            if unit.location == "js/plugins.js/1/label" {
+                partial.insert(unit.id.clone(), full[&unit.id].clone());
+            } else if unit.location == "js/plugins.js/0/label" {
+                let mut empty = full[&unit.id].clone();
+                empty.translation_lines.clear();
+                partial.insert(unit.id.clone(), empty);
+            }
+        }
+        let output = writeback_plugins(&root, &units, &partial).unwrap().unwrap();
+        let actual = parse_plugins_js(&output).unwrap();
+        let mut expected = parse_plugins_js(&source).unwrap();
+        expected[0]["description"] = json!("live header change");
+        expected[1]["parameters"]["label"] = json!("译文:名前");
+        assert_eq!(actual, expected, "missing and empty translations must restore nested and plain fields without losing metadata");
+        assert_eq!(fs::read_to_string(root.join("js/plugins/DemoA.js")).unwrap(), plugin_source);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeat_plugin_write_rejects_reordered_removed_disabled_or_missing_param_anchors() {
+        let (root, source) = repeat_plugin_fixture("repeat-anchor-conflicts");
+        fs::write(root.join("js/plugins.js.attxbak"), &source).unwrap();
+        for change in 0..5 {
+            let mut live = parse_plugins_js(&source).unwrap();
+            match change {
+                0 => live.swap(0, 1),
+                1 => { live.remove(0); },
+                2 => live[0]["status"] = json!(false),
+                3 => { live[0]["parameters"].as_object_mut().unwrap().remove("label"); },
+                _ => live[0]["parameters"]["terms"] = json!(enc(&json!([enc(&json!({"key": "different-entry", "title": "称号", "description": "説明文"}))]))),
+            }
+            fs::write(root.join("js/plugins.js"), render_plugins_js(&live).unwrap()).unwrap();
+            let units = extract_plugins(&root, "ja").unwrap();
+            assert!(writeback_plugins(&root, &units, &BTreeMap::new()).is_err(), "conflict {change}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rmmz_extraction_propagates_symlinked_plugin_backup_error() {
+        use crate::adapter::FormatAdapter;
+        let (root, source) = repeat_plugin_fixture("symlink-backup");
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("data/System.json"), "{}").unwrap();
+        let external = root.join("outside.js");
+        fs::write(&external, source).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("js/plugins.js.attxbak")).unwrap();
+        assert!(extract_plugins(&root, "ja").unwrap_err().to_string().contains("not a regular file"));
+        assert!(crate::adapter::rmmz::RmmzAdapter.extract(&root, "ja").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rmmz_extraction_propagates_malformed_or_nonfile_plugin_backup_error() {
+        use crate::adapter::FormatAdapter;
+        let (root, _) = repeat_plugin_fixture("malformed-backup");
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("data/System.json"), "{}").unwrap();
+        let backup = root.join("js/plugins.js.attxbak");
+        fs::write(&backup, "var $plugins = [broken];").unwrap();
+        assert!(crate::adapter::rmmz::RmmzAdapter.extract(&root, "ja").is_err());
+        fs::remove_file(&backup).unwrap();
+        fs::create_dir(&backup).unwrap();
+        assert!(crate::adapter::rmmz::RmmzAdapter.extract(&root, "ja").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

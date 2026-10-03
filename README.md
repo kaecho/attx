@@ -1,116 +1,50 @@
 # attx
 
-**English** | [中文](README.zh-CN.md) | [Docs](https://kaecho.github.io/attx/)
+[中文](README.zh-CN.md) | [Documentation](https://kaecho.github.io/attx/) | [Releases](https://github.com/kaecho/attx/releases)
 
-**Agent Translation Toolkit eXtensible** — a pure-Rust, single-binary, format-agnostic AI translation framework for agents and humans.
+Agent Translation Toolkit eXtensible is a Rust command-line translator for games, books, documents, subtitles and localization files. It uses an OpenAI-compatible Chat Completions endpoint and stores progress in a SQLite workspace.
 
+```text
+identify → extract → optional glossary → translate → check and repair → safe writeback
 ```
-extract (format adapter) → translate (LLM core) → writeback (format adapter)
+
+Version 0.10.0 keeps translation and agent automation on the same pipeline. Failed units receive bounded targeted retries; unresolved units remain visible. Normal translation requests no longer require a separate writeback-permission conversation.
+
+## Let an agent handle setup
+
+Copy the complete prompt in [translate with an agent](docs/en/agent-translation.md). The agent reads installation, usage and configuration docs, asks about your API and securely receives the key, explains model/language/budget/parameter choices, then installs, configures and runs attx. You answer questions without editing TOML.
+
+```text
+Use https://github.com/kaecho/attx. Read its installation, usage and configuration
+docs, skills/attx/SKILL.md and skills/attx/references/agent-setup.md first.
+I do not want to configure it manually. Ask me about the translation API,
+receive the key through secure input or a hidden interactive terminal, then
+ask about model, input, languages, budget and parameters. At every step explain
+what it is, what it enables, your recommendation, and cost/risk. Install the tool,
+generate private configuration, verify it and perform the translation yourself.
+Reuse working settings; never echo credentials or add a second writeback approval.
 ```
 
-Translate ebooks, documents, subtitles, localization files, and games with any OpenAI-compatible LLM. Progress is cached in a SQLite workspace, so interrupted runs resume for free. Format support is modeled after [AiNiee](https://github.com/NEKOparapa/AiNiee)'s reader/writer plugin set, reimplemented as Rust adapters.
+## Install
 
-- **19 built-in adapters** — EPUB, HTML, DOCX, XLSX, TXT/MD, SRT/VTT/ASS/LRC, CSV, PO, Ren'Py, RPG Maker MV/MZ, MTool/Paratranz/VNTextPatch/i18next JSON, plus a generic JSONL interchange format.
-- **Custom format profiles** — teach attx any unknown text/JSON format with a small TOML file (`line_regex` / `json_keys` / `json_paths` rules).
-- **Resumable by design** — every run is checkpointed in `attx.db`; stop anytime, continue anytime. Failed units become visible *passthrough* placeholders instead of killing the run.
-- **Self-improving** — successful runs leave extraction experience behind (`skip`/`extract` field judgements), reviewed by you, never applied silently to delete text.
-- **Glossary** — one agreed translation per proper noun across a whole work, injected per batch.
-- **Review** — after translate, a free mechanical scan for leftover source script, identical copies, dropped codes, and namebox drift.
+Download an archive for your platform from [GitHub Releases](https://github.com/kaecho/attx/releases): Linux x86_64, Windows x86_64, macOS Apple Silicon or macOS Intel. Archives contain the binary, example configuration, agent Skill, custom profile examples and documentation sources.
 
----
-
-## Quick start for agents (recommended)
-
-attx is designed so a coding agent can **read the Skill, ask you a few questions, write `setting.toml`, and run the pipeline** — you should not need to hand-edit config first.
-
-### 1. Install the binary
-
-- **Release:** [Releases](https://github.com/kaecho/attx/releases) (tags `v*`)
-- **From source:**
+From source, use Rust 1.89 or newer:
 
 ```bash
 git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
-# optional:
-cargo install --path .
+# Optional installation into Cargo's bin directory:
+cargo install --path . --locked
 ```
 
-### 2. Install the Skill (so the agent knows the protocol)
+The examples below assume `attx` is on `PATH`. On Windows, use `./attx.exe` or the full executable path.
 
-```text
-skills/attx/SKILL.md           # stages, hard stops, Q&A config wizard
-skills/attx/references/        # CLI contract, agent usage, custom-format discovery, recovery, JSONL, feedback
-```
+## First translation
 
-**Claude Code:**
-
-```bash
-# personal, all sessions:
-mkdir -p ~/.claude/skills && cp -a skills/attx ~/.claude/skills/
-# or project-scoped:
-mkdir -p .claude/skills && cp -a skills/attx .claude/skills/
-```
-
-**Any other agent** (Cursor / Codex / OpenCode / …): keep the checkout and say:
-
-```text
-Strictly follow <attx-dir>/skills/attx/SKILL.md
-```
-
-**Why a Skill instead of an MCP server?** attx is a local CLI with JSON on stdout — that is already the native tool surface for coding agents. A Skill is plain markdown any agent can follow; MCP would only wrap the same CLI behind a long-lived process.
-
-### 3. One prompt — agent configures via Q&A, then translates
-
-If `setting.toml` is missing or `attx doctor` fails, the Skill **requires** an interactive wizard. The agent asks, one item at a time:
-
-1. API endpoint (OpenAI / DeepSeek / custom OpenAI-compatible `base_url`)
-2. API key → written only to `setting.toml`, **never echoed** back into chat
-3. Model name
-4. Language pair (`src` / `dst`)
-5. Optional concurrency / glossary
-
-Then it runs `attx doctor --ping` and continues the pipeline.
-
-Copy-paste:
-
-```text
-Use the attx toolkit at <attx-dir>, following skills/attx/SKILL.md.
-
-Help me set up attx if needed (Q&A wizard: endpoint, key, model, languages),
-then translate <input path> from Japanese into Simplified Chinese.
-
-Rules:
-1. Only operate through the attx CLI; never hand-edit inputs, attx.db, or tool source.
-2. If the LLM is not configured, run the Q&A config wizard first; never print my API key.
-3. doctor --ping → detect → init → extract → status → translate --limit 20 → full translate.
-4. Prefer translated copies for files; ask before any in-place overwrite.
-5. Report counts and next step after each stage.
-```
-
-Shorter form also works:
-
-```text
-Help me set up attx, then translate ./novel.epub from Japanese to Simplified Chinese.
-```
-
----
-
-## Quick start (manual)
-
-```bash
-cp setting.example.toml setting.toml   # fill base_url / api_key / model
-attx doctor --ping                     # verify config + LLM connectivity
-attx run --input novel.epub --src ja --dst zh
-# → writes novel.zh.epub next to the input; the original is never touched
-```
-
-For large inputs, use the step-by-step pipeline and trial with a small `--limit` first (see [Usage](#usage)).
-
----
-
-## Configure the LLM
+Copy `setting.example.toml` to `setting.toml`. Fill in `base_url`, `api_key` and `model` locally. Do not send the key through agent chat or commit it.
 
 ```toml
 [llm]
@@ -118,306 +52,183 @@ default_client = "main"
 
 [[llm.clients]]
 name = "main"
-provider_type = "openai"          # OpenAI-compatible Chat Completions
 base_url = "https://your-provider.example/v1"
 api_key = "YOUR_API_KEY"
 model = "your-model-name"
-timeout = 600                     # seconds
-# temperature = 0.3               # omit: translate 0.3, JSON helpers 0.0
-# reasoning_effort = "medium"     # omit: not sent
-# max_tokens = 8192               # omit: not sent
-# stream = true                   # omit: false; SSE delta.content
-# extra = { top_p = 0.9 }         # merged last; cannot replace messages
+```
 
+The endpoint must accept `{base_url}/chat/completions`. This is not a native Anthropic, Gemini or Responses API client. Omitted translation, glossary and learning sections use their defaults.
+
+```bash
+attx --config ./setting.toml doctor --ping --json
+attx --config ./setting.toml run --input "novel.epub" --src ja --dst zh
+```
+
+Check `doctor`'s `llm.configured` and `ping` fields. Its exit code alone does not prove connectivity. `--ping` makes a small paid model request.
+
+The second command writes `novel.zh.epub`; the original stays unchanged. Its workspace is `.attx-novel/` beside the input. A directory normally uses `<input>/.attx/`.
+
+PowerShell:
+
+```powershell
+Copy-Item setting.example.toml setting.toml
+# Edit setting.toml locally before these commands.
+./attx.exe --config ./setting.toml doctor --ping --json
+./attx.exe --config ./setting.toml run --input "C:/Books/novel.epub" --src ja --dst zh
+```
+
+For a trial without writing output:
+
+```bash
+attx run --input "novel.epub" --src ja --dst zh --limit 20 --no-writeback
+attx translate --workspace ".attx-novel"
+attx writeback --workspace ".attx-novel"
+```
+
+A limited trial can exit 2 because other units are still pending. That is a progress report, not a lost cache. Re-running `translate` preserves completed translations.
+
+## Formats and output paths
+
+| Input | Adapter IDs | Output |
+|---|---|---|
+| RPG Maker MV/MZ directory | `rmmz` | Live `data/*.json` and `js/plugins.js`, with first-write backups |
+| EPUB, HTML, Word, Excel | `epub`, `html`, `docx`, `xlsx` | Language-suffixed sibling |
+| Plain text, Markdown | `txt`, `md` | Language-suffixed sibling |
+| SRT, WebVTT, ASS/SSA, LRC | `srt`, `vtt`, `ass`, `lrc` | Language-suffixed sibling |
+| CSV/TSV, gettext PO/POT | `csv`, `po` | Language-suffixed sibling |
+| Ren'Py translation exports | `renpy` | Language-suffixed `.rpy` sibling |
+| MTool, Paratranz, VNTextPatch, i18next JSON | `mtool`, `paratranz`, `vnt`, `i18next` | Language-suffixed JSON sibling |
+| JSONL text packs | `jsonl` | File sibling or directory `translated.jsonl` |
+| Content-sniffed structured text | `auto` | File sibling or directory `translated-<dst>/` tree |
+| Declarative TOML profile | `custom:<name>` | Sibling by default; optional in-place writeback |
+
+```bash
+attx formats
+attx detect --input "input.file"
+attx analyze --input "input.file" --src ja
+```
+
+`auto` recognizes arbitrary JSON string values, strict XML character data, an INI/TOML/simple-YAML scalar subset and confident prose, even with an unknown extension. It protects structural bytes and retains the original encoding when the translated text is representable.
+
+Auto directory mode copies unsupported files unchanged and reports `extract.auto_coverage`. It does not dispatch every built-in document, archive, subtitle or script adapter within that tree. A copied file is not a translated file. Binary containers, encrypted assets, ambiguous scripts and unsupported syntax need a dedicated adapter or external extraction.
+
+For unrecognized textual formats, `run` can ask the configured model for a declarative profile. It validates extraction and a source-preserving no-op roundtrip, forces `overwrite = false` and allows at most three proposals. `--no-infer` disables this extra paid operation. Models can still choose incomplete or semantically wrong fields; validation does not prove complete coverage.
+
+```bash
+attx profile infer --input "scene.scn" --output ./scene.toml --src ja --name scene
+attx profile test --profile ./scene.toml --input "scene.scn" --roundtrip
+attx run --input "scene.scn" --profile ./scene.toml --src ja --dst zh
+attx profile save --profile ./scene.toml
+```
+
+See [format limits](docs/en/formats.md) and [profile authoring](docs/en/profiles.md).
+
+## Quality checks and automatic repair
+
+Before accepting model output, attx checks IDs, line structure and exact protected-token multiplicity. Truncated responses are rejected. Missing or invalid units retry in narrower batches without redoing accepted siblings.
+
+Chinese output receives conservative mechanical normalization: isolated `っ`/`ッ` are removed, `っすよ`/`っす` become `哦`, and `ー` becomes `～` when the surrounding text is convincingly Chinese. Japanese sentences, quoted glyph examples and protected literals are not mechanically erased. `・` remains intact.
+
+RPG Maker message fitting keeps an independent `【speaker】` in slot zero. Dialogue controls remain atomic. The adapter never inserts or removes event commands. If a two-slot message contains a name and an overlong sentence, the body can exceed the 44-cell width estimate; attx reports overflow rather than merging the name into dialogue.
+
+```bash
+attx review --workspace ".attx-novel"
+attx repair --workspace ".attx-novel"
+attx writeback --workspace ".attx-novel" --dry-run
+```
+
+Review reports residual source script, `kana_edge`, `kana_mixed`, `kana_untranslated`, identical copies, protected-token loss, namebox drift and glossary advisories. Samples are capped; repair selection is not capped by report samples. Successful writeback persists normalized and reflowed lines into the cache, so later exports describe the rendered lines.
+
+No model can guarantee a perfect translation of every input in one pass. Checks catch specific structural and script problems; they cannot prove meaning, voice, complete extraction or actual game rendering. [Quality and repair](docs/en/quality.md) describes those limits.
+
+## Configuration and cost
+
+Configuration search order is `--config`, then `$ATTX_HOME/setting.toml` if it exists, then the current directory's `setting.toml`. `--client <name>` selects another configured client.
+
+```toml
 [translation]
-worker_count = 8       # parallel HTTP batches
-rpm = 60               # global request rate limit per minute (0 = unlimited)
+worker_count = 8
+rpm = 60
 retry_count = 3
-retry_delay = 2        # seconds between retries
-batch_chars = 2500     # max source chars per batch
-max_context_items = 6  # max units per batch
+retry_delay = 2
+batch_chars = 2500
+max_context_items = 6
+repair_rounds = 2
+context_chars = 1200
 
 [glossary]
-enabled = false        # build during `attx run` (costs extra LLM calls)
-min_occurrences = 10   # LLM-extracted terms must occur this often to enter
+enabled = false
+min_occurrences = 10
+max_terms = 200
+inject_limit = 30
 
 [learn]
-auto_summarize = true  # capture experience after writeback (free)
-llm_review = false     # also ask the model to check proposals (costs money)
+auto_summarize = true
+llm_review = false
 ```
 
-`setting.toml` is gitignored — never commit API keys. Verify with `attx doctor --ping`.
+Each selected unit enters at most `1 + retry_count` requests per translation pass. `translate` and `run` allow the initial pass plus `repair_rounds` additional passes for unresolved selected units. Set `repair_rounds = 0` to disable extra review passes; request-level retries remain bounded by `retry_count`. `context_chars` is the total preceding/following context budget per request, not the model's context window.
 
-Config search order: `--config` → `$ATTX_HOME/setting.toml` → `./setting.toml`. `--client <name>` switches the LLM client for one invocation.
+Glossary generation is opt-in and costs additional model calls. Existing active terms are injected whenever applicable. Learning summaries are local unless `llm_review` is enabled. Learned skip rules still require approval by index before they may remove extracted text; agents must not bulk-approve them.
 
----
+The [configuration reference](docs/en/configuration.md) covers every setting, optional model parameters, request `extra`, precedence, tuning and environment variables. [Workflows](docs/en/usage.md) covers glossary, preservation and learning commands.
 
-## Usage
+## Safe writeback and honest status
 
-### One-shot
+A normal translation command authorizes its ordinary output path; attx does not prompt again for writeback. Safety comes from checks rather than a conversation loop:
+
+- Invalid or pending units block output by default. `--allow-partial` explicitly writes valid units and keeps unresolved originals.
+- First existing destinations are backed up once as `{path}.attxbak`. Backup failure stops replacement.
+- All output files are staged before replacement. Replacement is atomic per file, not one transaction across a directory.
+- Workspace mutations use an OS lock. A workspace is bound to its input, engine, profile snapshot and language pair.
+- Changed source units or anchors require extraction again. Existing source snapshots and backups keep RPG Maker re-extraction stable.
+- Dry runs never persist normalized translations or replace output files.
+
+| Exit | Meaning |
+|---|---|
+| `0` | Command completed, or a dry-run plan was returned |
+| `1` | Execution, configuration, source integrity or HTTP failure |
+| `2` | Translation remains incomplete, writeback was blocked, or explicit partial output needs attention |
+
+For exit 2, JSON remains on stdout with `status`, counts and review details. `doctor` and advisory `review` have their own reporting semantics. Never infer finished translation from process exit alone.
+
+## Use with an agent
+
+The operational contract is [`skills/attx/SKILL.md`](skills/attx/SKILL.md), with guided setup and CLI/recovery references. Use the [explained setup wizard](docs/en/agent-translation.md) for first-time configuration; working settings skip repeat questions, and normal writeback needs no extra approval.
+
+Example request:
+
+```text
+Use <attx-dir>/skills/attx/SKILL.md and the installed attx CLI.
+Translate <input path> from Japanese to Simplified Chinese.
+Run the normal pipeline, repair detected failures within configured limits,
+and write the result with backups. Report output paths and unresolved issues.
+Do not print credentials or modify inputs/cache by hand.
+```
+
+For Claude Code, a local Skill installation can use:
 
 ```bash
-attx run --input "novel.epub" --src ja --dst zh
-# → novel.zh.epub next to the input
+mkdir -p ~/.claude/skills
+cp -a skills/attx ~/.claude/skills/
 ```
 
-`run` = `init` → `extract` → (optional glossary) → `translate` → `writeback`, reporting each stage as JSON. Add `--limit 20` for a trial, `--no-writeback` to inspect before writing, `--glossary`/`--no-glossary` to override the config.
+Other agents can read the repository Skill directly. No MCP server or bundled autonomous agent runtime is required. Separate permission remains appropriate for unrelated deletions, workspace resets or expanding paid scope beyond the requested task.
 
-### Step-by-step (large inputs — trial 20 units first)
+## Documentation and development
+
+The manual is available in [English](docs/en/index.md), [中文](docs/zh/index.md) and [日本語](docs/ja/index.md). Start with [quick start](docs/en/quickstart.md), then use the [CLI reference](docs/en/cli.md), [workspace guide](docs/en/workspace.md), [architecture](docs/en/architecture.md) and [development guide](docs/en/development.md).
 
 ```bash
-attx detect  --input book.epub
-attx init    --input book.epub --src ja --dst zh      # workspace: .attx-book/
-attx extract --workspace .attx-book
-attx status  --workspace .attx-book
-attx translate --workspace .attx-book --limit 20      # trial
-attx translate --workspace .attx-book                 # full; re-run to resume
-attx writeback --workspace .attx-book --dry-run       # preview planned files
-attx writeback --workspace .attx-book                 # → book.zh.epub
+cargo test -- --test-threads=1
+cargo clippy --all-targets
+cargo build --release
+pip install -r requirements-docs.txt
+mkdocs build --strict
 ```
 
-Workspace layout: a directory input uses `<dir>/.attx`; a file input uses `<parent>/.attx-<stem>` — containing `attx.db` (units + translations + meta), `workspace.json`, and optionally `glossary.toml`, `experience.toml`, `profile.toml`.
+All Rust tests are inline. Adapters implement pure extraction/writeback; the pipeline owns network calls, caching and artifact commits. See the development guide before adding an adapter, profile rule, configuration field or CLI command.
 
-Most file formats write a **translated copy** (`*.<dst>.*`) and leave the source untouched. The `rmmz` game adapter writes **in-place** with one-time `*.attxbak` backups — always `writeback --dry-run` first.
+This release independently implements ideas studied in [LinguaGacha](https://github.com/neavo/LinguaGacha): targeted retry, shared agent/batch translation, bounded context, strict structure and protected text. No upstream code was copied. Its commercial-use notice is not an attx license grant. Format-adapter design also draws on [AiNiee](https://github.com/NEKOparapa/AiNiee).
 
-Real-world validation: a full 4,171-paragraph light novel EPUB (10.9 MB with illustrations) translated ja→zh-Hans in one run — 100% coverage, EPUB structure/images intact, TOC and `dc:title`/`dc:language` localized.
-
-### When the model fails: passthrough
-
-If a unit's translation fails repeatedly, attx stores the original text as a flagged **passthrough** placeholder so the run finishes. `attx status` reports the count; `attx translate --retry-passthrough` re-queues exactly those units.
-
-### Manual / offline review (JSONL)
-
-```bash
-attx export-jsonl --workspace .attx-book --output pending.jsonl --filter pending
-# review/edit translation_lines externally, then:
-attx import-jsonl --workspace .attx-book --input pending.jsonl
-attx writeback    --workspace .attx-book
-```
-
-Standalone, no workspace:
-
-```bash
-attx translate-jsonl --input source.jsonl --output translated.jsonl --src ja --dst zh
-```
-
----
-
-## Supported formats
-
-| id | Input | Notes | Output |
-|----|-------|-------|--------|
-| `epub` | `.epub` | E-books / light novels: paragraph-level, ruby readings (`<rt>`) stripped from source text, images & layout preserved, `dc:language` updated | `<name>.<dst>.epub` |
-| `html` | `.html` `.htm` `.xhtml` | Standalone HTML pages: block-level + `<title>` | translated copy |
-| `docx` | `.docx` | Word documents: paragraph-level over `w:t` runs | `<name>.<dst>.docx` |
-| `xlsx` | `.xlsx` `.xlsm` | Excel workbooks: shared-string table translated, all sheets consistent | translated copy |
-| `txt` | `.txt` | Plain-text novels, one unit per line | `<name>.<dst>.txt` |
-| `md` | `.md` `.markdown` | Markdown: code fences skipped, heading/list/quote prefixes preserved | `<name>.<dst>.md` |
-| `srt` / `vtt` | file | Subtitles: timing lines & headers verbatim, cue text translated | translated copy |
-| `ass` | `.ass` `.ssa` | ASS/SSA subtitles: `{\tag}` overrides & `\N` breaks preserved, Name → speaker | translated copy |
-| `lrc` | `.lrc` | Lyrics: timestamps kept, `[ti:…]` meta tags skipped | translated copy |
-| `csv` | `.csv` `.tsv` | Tables (RFC4180: quotes, embedded newlines); only translated records re-rendered | translated copy |
-| `po` | `.po` `.pot` | Gettext: fills `msgstr`; plural entries & header pass through | translated copy |
-| `renpy` | `.rpy` | Ren'Py `translate` blocks: dialogue + `old`/`new` strings | translated copy |
-| `rmmz` | directory | RPG Maker MV/MZ data + plugin params in `js/plugins.js` (plugin *source* never modified) | in-place + `*.attxbak` |
-| `mtool` | `.json` | MTool `ManualTransFile.json` (content-sniffed) | translated copy |
-| `paratranz` | `.json` | Paratranz export; only empty `translation` fields are filled | translated copy |
-| `vnt` | `.json` | VNTextPatch export (`name`/`message`) | translated copy |
-| `i18next` | `.json` | Nested JSON with string leaves (≥80%) | translated copy |
-| `jsonl` | file/dir | Universal escape hatch: any engine via external extract/write scripts | `translated.jsonl` |
-| `custom:<name>` | file/dir | **Custom profile**: TOML rules an agent (or you) writes for any unknown text/JSON format | copy or in-place |
-
-`attx formats` prints this list as JSON (saved custom profiles included). The four `.json` flavors are distinguished by content sniffing; force with `--engine <id>` when ambiguous.
-
-Text inputs auto-detect their encoding (UTF-8 / UTF-16 BOM / Shift-JIS / GBK via chardetng); output is always UTF-8.
-
-Not yet supported (adapter contributions welcome, see [Contributing](#contributing)): Translator++ projects, PDF, binary archives (use the JSONL escape hatch).
-
-### Unknown format? Teach attx a profile
-
-When `detect` fails, don't stop — attx ships a discovery toolchain built for agents:
-
-```bash
-attx analyze --input ./project         # recon: encoding, structure, samples, JSON shape
-attx profile new --output fmt.toml     # documented rule template (line_regex / json_keys / json_paths)
-attx profile test --profile fmt.toml --input ./project --roundtrip   # iterate until units look right
-attx init --input ./project --profile fmt.toml --src ja --dst zh     # then extract/translate/writeback as usual
-attx profile save --profile fmt.toml   # "remember this format" — detect auto-recognizes it from now on
-```
-
-A profile is a small TOML file: per-line regexes with named `text`/`role` groups, and/or JSON key/path selectors. See `profiles/examples/` (KiriKiri KAG, INI, generic JSON) and `skills/attx/references/custom-format-discovery.md` for the full agent workflow.
-
----
-
-## Glossary
-
-A model translating a long work in batches has no way to be consistent with itself: the same proper noun drifts across chapters. A glossary fixes one agreed translation per term for the whole work.
-
-**Off by default** — building one spends extra LLM calls. Extraction is LLM-based throughout (the LinguaGacha strategy): the model reads the source and proposes terms.
-
-```bash
-attx glossary build --workspace .attx --dry-run              # size the run, spend nothing
-attx glossary build --workspace .attx                        # LLM extraction
-attx glossary build --workspace .attx --min-occurrences 5    # looser recurrence gate
-attx glossary list --workspace .attx
-attx glossary add --workspace .attx --src アレイ --dst 艾蕾 --info "female given name"
-attx glossary import --workspace .attx --file terms.json
-attx glossary check --workspace .attx             # terms the translation ignored
-attx review --workspace .attx                     # residual source, identical copies, dropped codes, namebox drift
-```
-
-One strategy, LLM extraction throughout (the LinguaGacha approach):
-
-```
-source batches → model emits {src,dst,info} → substring gate
-  → min_occurrences gate (real source hits) → vote / max_terms → inject → check
-```
-
-Regex mining is gone: heuristics only see katakana runs and capitalised words,
-so organisations, items, skills and world concepts never surfaced. The model
-reads the raw source and decides what is a term; mechanical gates handle only
-anti-hallucination (`src` must be a real substring of the source) and cost
-control (a term must occur at least `min_occurrences` times in the work, namebox
-speaker plates excepted). Every `src` is voted on across batches; majority wins.
-Spend tracks text batches.
-
-Each entry carries a disambiguating `info` ("female given name", "place"). That is not decoration: without it the model cannot tell how a name should be addressed in context.
-
-In `setting.toml`:
-
-```toml
-[glossary]
-enabled = false        # build during `attx run`
-min_occurrences = 10   # a term must occur this often in the source to enter
-max_terms = 200        # cap on terms kept
-inject_limit = 30      # cap on terms injected into one batch
-```
-
-An explicit `attx glossary build` ignores `enabled` — asking for it is consent. And once a `glossary.toml` exists, `translate` always injects from it: injection is nearly free, so *not* using a glossary you already built would be the surprise.
-
----
-
-## Self-improving experience layer
-
-Adapters decide what to extract with hardcoded heuristics, and those tables are sometimes wrong — a field that looks like UI text may actually be an identifier referenced verbatim by scripts. Translate it and something breaks at runtime. Until now each such fix stayed in the source, so the next project re-discovered it.
-
-attx keeps that judgement as data, and captures it **automatically**: every successful `writeback` summarises the run into experience entries at zero API cost, because the evidence is already sitting in the workspace DB.
-
-```bash
-attx writeback --workspace .attx         # …and learn skip-fields from the run, automatically
-attx writeback --workspace .attx --no-learn   # opt out for one run
-attx learn summarize --workspace .attx   # or trigger it by hand
-attx learn summarize --workspace .attx --llm  # also ask the model (costs money)
-attx learn note --workspace .attx --name honorifics --text "Keep さん/くん after names"
-attx learn pending                       # entries awaiting approval, with evidence
-attx learn review --approve 1,3          # approve; only now do they delete anything
-attx learn list --workspace .attx        # this work's notes
-attx learn defaults --format rmmz        # example: built-in baseline for one format
-attx learn forget --field achievename    # drop a skip/extract entry
-attx learn forget --name honorifics --workspace .attx
-attx extract --no-knowledge              # escape hatch: ignore this file entirely
-```
-
-`summarize` only captures extraction judgements (fields that should not be translated) plus objective signals such as dropped control codes. Translation voice, honorifics, and address terms are not in those statistics. Write them with `learn note`: `topic = "prompt"` (the default) is injected into the next `translate` call. Proper nouns still go in the glossary.
-
-**The file format is open-ended on purpose.** Entries carry a `kind`, and kinds attx does not understand round-trip verbatim — so an agent can invent `kind = "voice-hint"` and attx will hand it back unchanged rather than silently dropping it. Two kinds are acted on today:
-
-```toml
-[[entry]]
-kind = "field"          # a field-name extraction judgement
-field = "key"
-verdict = "skip"        # skip | extract
-scope = "nested"        # nested | top | any
-domain = "plugins"      # restrict to one unit domain; empty = any
-status = "pending"      # approved | pending
-
-[[entry]]
-kind = "note"           # free-form experience; topic="prompt" reaches the model
-topic = "prompt"
-text = "This format loses control codes; keep every [CTRL_n] verbatim."
-```
-
-Four layers merge, later winning: built-in defaults (embedded, see `learn defaults`) → `$ATTX_HOME/knowledge/<format>.toml` → `<workspace>/experience.toml`. Within a layer, an exact field name beats a `*suffix` one and `skip` beats `extract`.
-
-Three safeguards worth knowing:
-
-- **Additions apply themselves; deletions wait for you.** Notes and `extract` entries take effect immediately — the worst case is a longer prompt. `skip` is the only verdict that removes text, so it is written `pending` and does nothing until `learn review --approve`. A missed translation is visible in `status`; a silently dropped line is not.
-- **Learning may override a name heuristic, never the evidence of a value.** An `extract` entry is refused when the value is a number, path or script, so a bad entry cannot send switch ids or filenames to the model.
-- **Entries are domain-scoped.** A rule for one domain cannot fire on another where the same field name means something else.
-
----
-
-## CLI reference
-
-| Command | Role |
-|---------|------|
-| `doctor [--ping] [--json]` | Config check / LLM ping |
-| `formats` | Supported adapters + saved profiles as JSON |
-| `detect --input <path>` | Format probe, saved profiles included (`--game` alias kept) |
-| `analyze --input <path>` | Recon report for unknown inputs (encoding, structure, samples) |
-| `profile new/test/save/list` | Author, iterate, and remember custom format profiles |
-| `init --input <path> --src --dst [--profile]` | Create workspace + SQLite |
-| `extract --workspace [--no-knowledge]` | Adapter → text units |
-| `translate --workspace [--limit] [--dry-run] [--retry-passthrough]` | LLM over pending units, incremental saves |
-| `writeback --workspace [--dry-run] [--no-learn]` | Render translated output; capture experience unless opted out |
-| `run --input …` | init + extract + (glossary) + translate + writeback |
-| `status --workspace` | Counts incl. passthrough + per-domain breakdown |
-| `translate-jsonl` / `export-jsonl` / `import-jsonl` | Interchange (`--filter` incl. `passthrough`) |
-| `learn summarize/note/pending/review/list/defaults/forget` | Self-improvement: skip-fields from evidence, style notes from agents |
-| `glossary build/list/add/remove/import/export/check` | Consistent proper-noun names across a whole work |
-
-Global: `--config /path/to/setting.toml` (default `./setting.toml` or `$ATTX_HOME/setting.toml`); `--client <name>` picks a non-default LLM client.
-
-Every command reports machine-readable JSON on stdout; errors go to stderr with a non-zero exit code. The exact JSON shapes are pinned in `skills/attx/references/cli-command-contract.md`.
-
----
-
-## Docs
-
-Long-form guide (EN / 中文 / 日本語): **https://kaecho.github.io/attx/**
-
----
-
-## Contributing
-
-PRs welcome — new format adapters especially. The codebase is deliberately small and boring; keep it that way.
-
-### Architecture
-
-```
-src/
-  main.rs          CLI
-  pipeline.rs      init / extract / translate / writeback / run
-  adapter/         one module per format (+ custom profiles)
-  llm.rs           OpenAI-compatible client, batching, masking
-  store.rs         SQLite workspace
-  knowledge.rs     experience layers (learn)
-  glossary.rs      proper-noun glossary
-  profile.rs       custom format profiles
-```
-
-### Add a new format adapter
-
-1. Implement `FormatAdapter` in `src/adapter/<name>.rs` (`detect` / `extract` / `writeback`).
-2. Register it in `src/adapter/mod.rs` (order = detect priority).
-3. Add a round-trip unit test with a tiny fixture.
-4. Document the id in `attx formats` output and this README.
-
-### PR checklist
-
-- [ ] `cargo test` green
-- [ ] No API keys or sample copyrighted text in the tree
-- [ ] New adapter: detect does not false-positive on other formats
-- [ ] README / `formats` updated if user-visible
-
-### Roadmap (grab one)
-
-- More document / game / l10n adapters
-- Richer custom-profile primitives
-- Optional MCP wrapper for non-CLI hosts
-
----
-
-## License
-
-MIT
+Changes: [CHANGELOG.md](CHANGELOG.md). attx is licensed under [MIT](LICENSE).

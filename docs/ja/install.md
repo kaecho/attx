@@ -2,79 +2,77 @@
 
 ## リリースバイナリ
 
-[GitHub Releases](https://github.com/kaecho/attx/releases)（タグ `v*`）からお使いの OS 向けアーカイブをダウンロードします。対応ターゲット：Linux x86_64、Windows x86_64、macOS x86_64 + aarch64。`attx` / `attx.exe` を `PATH` に通してください。
+[GitHub Releases](https://github.com/kaecho/attx/releases) の `v0.10.0` から OS と CPU に対応するアーカイブを選びます。配布ターゲットは Linux x86_64、Windows x86_64、macOS aarch64 と x86_64 です。Windows は ZIP、その他は tar.gz です。
+
+配布物には `attx` または `attx.exe`、英語と中国語の README、`CHANGELOG.md`、attx の `LICENSE`、`setting.example.toml`、`skills/`、`profiles/`、`docs/`、`mkdocs.yml`、`requirements-docs.txt` が含まれます。実行ファイルを PATH に入れるか、絶対パスで呼び出します。
+
+POSIX:
+
+```bash
+chmod +x ./attx
+./attx --version
+./attx --help
+```
+
+PowerShell:
+
+```powershell
+.\attx.exe --version
+.\attx.exe --help
+```
+
+PowerShell はカレントディレクトリの実行ファイルを名前だけでは検索しません。PATH に追加していなければ、以後の例の `attx` を `.\attx.exe` に置き換えます。実行時に Python、Node.js、Rust、MCP サーバーを起動する必要はありません。
 
 ## ソースからビルド
+
+Rust の最低対応バージョンは 1.89 です。edition は 2024、nightly は不要です。
 
 ```bash
 git clone https://github.com/kaecho/attx.git
 cd attx
 cargo build --release
 ./target/release/attx --help
-cargo install --path .   # 任意
+cargo install --path .
 ```
 
-最近の安定版 Rust（edition 2024）が必要です。nightly 機能は不要、MSRV の固定もありません。
+Windows のビルド結果は `target\release\attx.exe` です。MSVC ターゲットでは Rust ツールチェーンと対応する C/C++ ビルド環境を用意してください。`cargo install --path .` を使う場合は Cargo の bin ディレクトリを PATH に入れます。ビルドと開発環境の詳細は[開発](development.md)にあります。
 
-## LLM 設定 — 2 つの方法
+## LLM の設定
 
-### A. エージェントの Q&A（推奨）
-
-Skill をインストールし、エージェントに attx のセットアップを依頼します。endpoint → key → model → 言語 の順に進み、キーをエコーせずに `setting.toml` を書き込みます。[Agents](agents.md)（エージェント）を参照。
-
-### B. 手動
+POSIX:
 
 ```bash
 cp setting.example.toml setting.toml
+chmod 600 setting.toml
 ```
 
-```toml
-[llm]
-default_client = "main"
+PowerShell:
 
-[[llm.clients]]
-name = "main"
-provider_type = "openai"          # OpenAI 互換 Chat Completions
-base_url = "https://api.example.com/v1"
-api_key = "YOUR_API_KEY"
-model = "your-model"
-timeout = 600                     # 秒、リクエストごと
-# temperature = 0.3               # 省略時: 翻訳 0.3、JSON ヘルパー 0.0
-# reasoning_effort = "medium"     # 省略時は送らない
-# max_tokens = 8192               # 省略時は送らない
-# stream = true                   # 省略時は false。SSE delta.content を連結
-# extra = { top_p = 0.9 }         # 最後にマージ。messages は上書き不可
-
-[translation]
-worker_count = 8       # 並列 HTTP バッチ数
-rpm = 60               # 1 分あたりのグローバルレート制限（0 = 無制限）
-retry_count = 3
-retry_delay = 2
-batch_chars = 2500     # バッチあたりの最大ソース文字数
-max_context_items = 6  # バッチあたりの最大ユニット数
+```powershell
+Copy-Item .\setting.example.toml .\setting.toml
+notepad .\setting.toml
 ```
 
-そして確認：
+`setting.toml` の `base_url`、`api_key`、`model` を本機で編集します。キーをチャットに貼り付ける必要はありません。Windows ではファイルのアクセス権を確認し、他ユーザーから読めない場所に置いてください。
 
 ```bash
-attx doctor --ping
+attx doctor --json
+attx doctor --json --ping
 ```
 
-`doctor` は設定をチェックし、組み込みアダプターと保存済みプロファイルを一覧表示します；`--ping` は LLM に小さなリクエストを 1 つ送信します。機械可読形式：`attx doctor --json`。
+`--ping` は小さな有料 API 要求を送る場合があります。`llm.configured` と `ping` の内容を確認してください。`doctor` の終了コードやトップレベルの `status: "ok"` だけでは接続成功を判定できません。`doctor` はカレントディレクトリにない場合 `setting.example.toml` を生成することもあります。
 
-### 設定の検索順序
+検出や抽出などネットワーク不要の操作は、設定ファイルなしでも実行できます。設定が存在する場合、無効な TOML は読み込みエラーになります。設定の全キーと検索順序は[設定](configuration.md)を参照してください。
 
-`--config <path>` → `$ATTX_HOME/setting.toml` → `./setting.toml`。
+## データの保存先
 
-- `ATTX_HOME` には保存済みプロファイルと学習済み経験も置かれます：`$ATTX_HOME/profiles/`、`$ATTX_HOME/knowledge/`。
-- `ATTX_HOME` がない場合、プラットフォームの設定ディレクトリが使われます（Linux では `~/.config/attx/`）。
-- `setting.toml` は gitignore されています — **API キーをコミットしてはいけません**。
-- `--client <name>` は、1 回の呼び出しについて非デフォルトの `[[llm.clients]]` エントリに切り替えます。
+- 設定: `--config`、存在する `$ATTX_HOME/setting.toml`、`./setting.toml` の順。
+- 保存済みプロファイル: `$ATTX_HOME/profiles/` と OS のユーザー設定ディレクトリにある `attx/profiles/`。
+- 形式ごとの経験: 同じ基準の `knowledge/`。
+- ワークスペース: 通常は入力内または入力の隣。`--workspace` で別の書き込み可能な場所を指定できます。
 
-## インストールの確認
+Linux のユーザー設定ディレクトリは通常 `~/.config`、macOS は `~/Library/Application Support`、Windows は `%APPDATA%` です。設定ファイル自身の検索に、これらの OS 設定ディレクトリが自動で使われるわけではありません。
 
-```bash
-attx formats                 # 組み込みアダプターの一覧（JSON）
-attx detect --input <file>   # 入力を受け持つアダプターはどれか
-attx --help
-```
+## 次に進む
+
+[クイックスタート](quickstart.md)で実際の入力を翻訳できます。エージェント経由なら[エージェント](agents.md)、特定形式の制約は[フォーマット](formats.md)を先に確認してください。

@@ -81,7 +81,9 @@ impl FormatAdapter for JsonlAdapter {
         } else {
             output_sibling(input, target_lang, "jsonl")
         };
-        Ok(vec![OutputFile::text(dest, body)])
+        let mut output = OutputFile::text(dest, body);
+        output.permissions = Some(fs::metadata(Self::source_file(input)?)?.permissions());
+        Ok(vec![output])
     }
 }
 
@@ -159,7 +161,8 @@ pub fn write_jsonl_translations(
     units: &[TextUnit],
     translations: &BTreeMap<String, Translation>,
 ) -> Result<usize> {
-    let mut f = fs::File::create(path).with_context(|| format!("{}", path.display()))?;
+    let (staged, file) = crate::fileio::StagedFile::open(path)?;
+    let mut f = std::io::BufWriter::new(file);
     let mut n = 0;
     for u in units {
         writeln!(
@@ -169,5 +172,9 @@ pub fn write_jsonl_translations(
         )?;
         n += 1;
     }
+    f.flush()?;
+    f.get_ref().sync_all()?;
+    drop(f);
+    staged.commit()?;
     Ok(n)
 }

@@ -1,44 +1,63 @@
 # attx
 
-**Agent Translation Toolkit eXtensible** — a pure-Rust, single-binary, format-agnostic AI translation framework for coding agents and humans.
-
-```
-extract (format adapter) → translate (LLM core) → writeback (format adapter)
-```
-
-Translate games (RPG Maker MV/MZ, Ren'Py, MTool), ebooks (EPUB), documents (DOCX/XLSX/TXT/MD), subtitles (SRT/VTT/ASS/LRC), and localization files (PO, i18next, Paratranz, VNTextPatch) with **any OpenAI-compatible LLM**. Progress is cached in a SQLite workspace, so interrupted runs resume for free.
-
-## What makes it different
-
-- **Agent-first.** attx is a local CLI that speaks JSON on stdout — the native tool surface for coding agents. The Skill (`skills/attx/`) is the execution protocol: staged pipeline, hard stops, and a Q&A configuration wizard. No MCP server needed.
-- **19 built-in adapters** plus **custom format profiles** (`line_regex` / `json_keys` / `json_paths` TOML rules) for anything else.
-- **Resumable by design.** Every unit is checkpointed in `attx.db`. Re-run `translate` to continue; only pending units are sent to the model.
-- **Honest failure.** Units the model keeps failing become visible *passthrough* placeholders — the run finishes, and `--retry-passthrough` re-queues exactly those.
-- **Self-improving.** Successful runs leave extraction experience behind, reviewed by you before anything is ever deleted.
-
-## Start with an agent (fastest)
-
-1. Install the binary ([Releases](https://github.com/kaecho/attx/releases) or `cargo build --release`)
-2. Install the Skill: `cp -a skills/attx ~/.claude/skills/`
-3. Tell the agent:
+attx (Agent Translation Toolkit eXtensible) is a local translation CLI for humans and coding agents. Version 0.10.0 is a single Rust binary. It extracts text through format adapters, translates through an OpenAI-compatible Chat Completions endpoint, caches results in SQLite, and renders translated artifacts.
 
 ```text
-Strictly follow <attx-dir>/skills/attx/SKILL.md
-Help me set up attx if needed, then translate <input> from Japanese to Simplified Chinese.
+input -> adapter -> text units -> cached translation and bounded repair -> adapter -> output
 ```
 
-The Skill runs a **Q&A wizard** (endpoint, API key, model, languages) when `setting.toml` is missing, writes the key only to disk, then runs `doctor --ping` → detect → extract → trial translate → full run.
+Supported inputs include RPG Maker MV/MZ projects, EPUB, HTML, Word and Excel documents, subtitles, plain text, Markdown, localization files, and declarative custom profiles. The Auto adapter also handles conservative subsets of structured text with unfamiliar extensions. It does not make every file safe to translate.
 
-## Or do it yourself
+## Start here
+
+If you want to answer questions rather than install and configure the tool yourself, start with [Translate with an agent](agent-translation.md). Copy one prompt; a capable coding agent reads the docs, handles secure credential collection, writes the settings, and runs the translation. Each question explains the setting and a recommendation. attx itself does not have an interactive setup command.
+
+Prefer to run the commands yourself? Follow the manual path:
+
+1. [Install](install.md) the binary or build with Rust 1.89 or newer.
+2. Follow the [quick start](quickstart.md) to configure an endpoint and produce your first translated file.
+3. Read [configuration](configuration.md) before increasing concurrency or enabling optional paid requests.
+4. Use [workflows](usage.md) for incremental work, manual review, and terminology.
 
 ```bash
-cp setting.example.toml setting.toml   # fill base_url / api_key / model
-attx doctor --ping
-attx run --input novel.epub --src ja --dst zh   # → novel.zh.epub
+attx --config "./setting.toml" doctor --ping --json
+attx --config "./setting.toml" run --input "./novel.epub" --src ja --dst zh
 ```
 
-## What it covers
+An EPUB input normally produces `novel.zh.epub` beside the source. An RPG Maker project writes into its live data directory with checked backups. [Formats](formats.md) explains these differences.
 
-Ebooks, documents, subtitles, localization JSON/PO, Ren'Py, RPG Maker, custom TOML profiles for unknown formats — see [Formats](formats.md).
+## What completion means
 
-Continue: [Install](install.md) · [Agents](agents.md) · [Usage](usage.md)
+A request can finish with unresolved units. attx reports pending text, source-text placeholders, residual source script, lost protected tokens, name inconsistencies, and layout overflow. Translation and repair are bounded; they do not guarantee literary quality, complete format coverage, or a playable game.
+
+Default writeback blocks incomplete or invalid translations. A deliberate `--allow-partial` writes the valid subset and retains originals for the rest, with exit code 2. `--dry-run` produces a plan, not a translated artifact. Read [quality and repair](quality.md) and [CLI results](cli.md) before automating completion checks.
+
+Completed cache entries survive interruption. Resume with the same workspace and language pair instead of deleting the database. Resumption can still spend requests on unresolved units or newly changed source text. See [workspaces and JSONL](workspace.md).
+
+## Manual map
+
+| Task | Page |
+|---|---|
+| Install binaries and toolchains | [Installation](install.md) |
+| Guided setup and translation by a coding agent | [Translate with an agent](agent-translation.md) |
+| First runnable translation | [Quick start](quickstart.md) |
+| Every configuration key and default | [Configuration](configuration.md) |
+| Run, resume, glossary, preserve, and learning | [Workflows](usage.md) |
+| Supported formats and Auto limits | [Formats](formats.md) |
+| Unknown formats and declarative rules | [Custom profiles](profiles.md) |
+| Game data, plugins, and fixed dialogue slots | [RPG Maker MV/MZ](rmmz.md) |
+| Mechanical checks and bounded repair | [Quality and repair](quality.md) |
+| All commands, flags, reports, and exit codes | [CLI reference](cli.md) |
+| Unattended execution and agent boundaries | [Agents](agents.md) |
+| Cache identity, backups, locks, and interchange | [Workspaces and JSONL](workspace.md) |
+| Technical dataflow and component boundaries | [Architecture](architecture.md) |
+| Adapter development, tests, docs, and release | [Development](development.md) |
+| Symptoms and recovery steps | [Troubleshooting](troubleshooting.md) |
+
+## Privacy and authorization
+
+Translation sends selected source text, bounded context, relevant glossary terms, and prompt notes to your configured endpoint. Paid glossary generation, model-reviewed learning, and unknown-format inference can send additional samples. The API key stays in local configuration and HTTP authentication, not the workspace database. Do not publish private configuration or exported text.
+
+A request to translate a named input authorizes its normal pipeline and writeback under the bundled agent protocol. There is no mandatory second writeback permission prompt. This does not authorize deleting workspaces, modifying unrelated inputs, enabling unrequested paid features, or silently accepting partial output.
+
+Source: [GitHub repository](https://github.com/kaecho/attx). License: [MIT](https://github.com/kaecho/attx/blob/main/LICENSE).

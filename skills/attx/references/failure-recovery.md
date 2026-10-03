@@ -1,53 +1,55 @@
 # 失败恢复
 
-## 配置 / 鉴权
+先读取最终 JSON、退出码和错误类别，再决定下一步。保留工作区和已提交译文；不要把每一种错误都处理成重新跑全量。
 
-| 症状 | 处理 |
+## 配置和网络
+
+| 症状 | 操作 |
 |------|------|
-| `llm client not found` | 创建/修正 `setting.toml`，保证 `default_client` 与 `[[llm.clients]].name` 一致 |
-| `HTTP 401` / Invalid token | 用户更新 api_key；Agent **停止重试**，不要循环刷接口 |
-| `HTTP 404` model | 核对 `model` 名称与服务商文档 |
-| 超时 | 增大 `timeout`；减小 `batch_chars`；降低 `rpm` |
+| client 缺失或配置解析失败 | 检查配置路径及 `default_client` 对应的 client；说明缺失字段 |
+| 401、403 或无效凭据 | 立即停止模型请求，让用户在本机更新 `setting.toml`，不索要聊天密钥 |
+| 错误端点、模型或其他致命请求配置错误 | 停止，不通过拆批或重复提交同一错误请求恢复；核对服务配置 |
+| 暂时限流、网络失败或超时 | 使用配置内有限重试；用已有错误和批次大小判断是否需调低并发或缩小批次 |
 
-## 引擎 / 提取
+不要猜测 API Key、切换到未授权服务，或在无进展时无限重启 `run`。修复配置后需要时只做一次 `doctor --json --ping`，再续跑原工作区。
 
-| 症状 | 处理 |
-|------|------|
-| detect 失败 | 确认目录含 `data/System.json`；或 `--engine rmmz` 强制；或走 `custom-format-discovery.md`（写自定义 Profile） |
-| extracted = 0 | 检查是否译过已是中文、源语言是否选错（en/ja）、路径是否指到 www 子目录 |
-| 编码乱码 | 文本类已自动检测 Shift-JIS/GBK/UTF-16；仍乱码时看 `attx analyze` 的 `encoding` / `encoding_lossy` |
+## 探测和提取
 
-## 翻译
+- 探测失败：用 `analyze`，依次考虑专用适配器、保存的 Profile、`auto` 和有限声明式推断。详见 `custom-format-discovery.md`。
+- 路径错误或 extracted 为零：检查真实输入和源语言。RMMZ 应确认 `data/System.json` 所在内容根目录，不把空提取说成翻译成功。
+- 编码损失：查看 `analyze` 中的 `encoding`、`encoding_lossy`。不要用乱码样本推断规则，也不要无授权覆盖转码源文件。
+- 工作区身份不符：为不同输入、引擎或语向使用新的 `--workspace`。不能改数据库元信息绕过绑定。
+- auto 覆盖不全：报告不可处理或原样复制的文件；未识别脚本和二进制需要安全的外部提取器，不自动执行模型生成代码。
 
-| 症状 | 处理 |
-|------|------|
-| 模型返回非 JSON | 自动会重试；持续失败则换模型或减小 batch |
-| quality failed / 控制符丢失 | 导出该条 JSONL 人工修，`import-jsonl` |
-| 部分成功 partial | `status` 看 pending；再 `translate` 续跑 |
-| `status.passthrough > 0` | 模型拒答留了原文占位；`export-jsonl --filter passthrough` 审查，或 `translate --retry-passthrough` 重试 |
-| 全量太贵/太慢 | `--limit` 分批；调低 `rpm`/`worker` 相关配置 |
+## 翻译和修复
+
+```bash
+attx status --workspace <工作区>
+attx review --workspace <工作区>
+attx repair --workspace <工作区>
+```
+
+共享流水线将成功批次增量保存，继续同一任务会复用源文匹配译文。修复次数由 `[translation].repair_rounds` 限制，模型请求另受 retry 配置限制。达到上限或无进展后停止自动循环。
+
+- pending：尚未完成，续译有效单元即可。
+- passthrough：模型失败或拒答后的原文占位，不是翻译成功。`repair` 会处理候选；专项重试也可用 `translate --retry-passthrough`。
+- 残留假名、控制符丢失、姓名框不一致：先有限修复；剩余项导出 JSONL 校对再导入。`kana_edge`、`kana_mixed`、`kana_untranslated` 不应混为一类，也不能靠删除整句解决。
+- 术语子串告警：人工判断是否误报，不以替换所有子串或全量重译消除告警。
+
+用户未接受部分结果时，不使用 `--allow-partial`。限额任务或达到上限仍有未解决项应报告 `needs_attention`，不要伪造 `ok`。
 
 ## 写回
 
-| 症状 | 处理 |
-|------|------|
-| units_applied=0 | 没有已保存译文；先 translate/import |
-| 游戏打不开 | 用同目录 `*.attxbak` 还原对应文件 |
-| 只想撤销 | 从 `.attxbak` 拷回；或用原版游戏覆盖 data |
+备份、源文一致性或文件替换失败时停止写回，保留错误和路径。默认完整性拦截不是权限问题，不能通过再次问“是否允许写回”掩盖真正的阻塞。
 
-还原示例：
-
-```bash
-cp data/Map001.json.attxbak data/Map001.json
-```
-
-## 工作区损坏
+- `dry_run=true` 只说明计划，不说明文件已生成。
+- 检查 `paths`、`files`、规范化/重排/溢出信号和真实写回状态。
+- 同一文件使用暂存后替换；这不等于整批文件事务。中途失败时如实说明可能已有部分文件写出。
+- 若用户要求撤销，先明确具体文件和备份。恢复是覆盖操作，不默认回滚整个游戏或删除工作区。
 
 ```bash
-# 用户明确同意后：删除工作区并重新 init/extract
-rm -rf <工作区>
-attx init --game <游戏目录> --src ja --dst zh --workspace <工作区>
-attx extract --workspace <工作区>
+# 仅在用户明确要求恢复此文件时
+cp <文件>.attxbak <文件>
 ```
 
-已写回的游戏文件不会自动回滚；需要 bak 或原版。
+已写回文件不会因为删除工作区自动恢复。损坏数据库需要重建时，先说明会丢失的缓存和数据，取得删除/重置许可；普通鉴权、残留或显示问题不需要删库。

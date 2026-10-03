@@ -1,8 +1,9 @@
 [package]
 name = "attx"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
-description = "Agent Translation Toolkit eXtensible — universal AI translation framework: games (RPG Maker MV/MZ, MTool, Ren'Py, VNText), ebooks (EPUB), documents (DOCX/TXT/MD), subtitles (SRT/VTT/LRC), localization files (PO/Paratranz/i18next)"
+rust-version = "1.89"
+description = "Agent Translation Toolkit eXtensible: resumable AI translation for games, documents, subtitles, localization and custom text formats"
 license = "MIT"
 repository = "https://github.com/kaecho/attx"
 readme = "README.md"
@@ -15,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+cap-std = "4"
 chardetng = "0.1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
@@ -26,6 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+same-file = "1"
 toml = "0.8"
 walkdir = "2"
 

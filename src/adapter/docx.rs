@@ -129,6 +129,7 @@ impl FormatAdapter for DocxAdapter {
         Ok(vec![OutputFile {
             path: output_sibling(input, target_lang, "docx"),
             bytes: buf.into_inner(),
+            permissions: Some(std::fs::metadata(input)?.permissions()),
         }])
     }
 }

@@ -1,7 +1,9 @@
-use super::{DetectHit, FormatAdapter, OutputFile, set_json_path};
+use super::{DetectHit, FormatAdapter, OutputFile};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -78,43 +80,39 @@ impl FormatAdapter for RmmzAdapter {
             {
                 continue;
             }
-            let path = entry.path();
+            let path = source_json_path(&entry.path())?;
             let raw =
                 fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             let value: Value =
                 serde_json::from_str(&raw).with_context(|| format!("json {}", path.display()))?;
             extract_commands(&name, &value, source_lang, &mut units)?;
+            attach_anchor_hash(&name, &value, &mut units);
         }
 
         // System.json
-        let system_path = data_dir.join("System.json");
+        let system_path = source_json_path(&data_dir.join("System.json"))?;
         if system_path.is_file() {
             let raw = fs::read_to_string(&system_path)?;
             let system: Value = serde_json::from_str(&raw)?;
             extract_system(&system, source_lang, &mut units);
+            attach_anchor_hash("System.json", &system, &mut units);
         }
 
         // Base DB
         for file in BASE_FILES {
-            let p = data_dir.join(file);
+            let p = source_json_path(&data_dir.join(file))?;
             if !p.is_file() {
                 continue;
             }
             let raw = fs::read_to_string(&p)?;
             let arr: Value = serde_json::from_str(&raw)?;
             extract_base(file, &arr, source_lang, &mut units);
+            attach_anchor_hash(file, &arr, &mut units);
         }
 
         // Plugin parameters (js/plugins.js + header @param types; never rewrite plugin source)
-        match super::rmmz_plugins::extract_plugins(content_root, source_lang) {
-            Ok(mut pu) => {
-                if !pu.is_empty() {
-                    eprintln!("rmmz: extracted {} plugin parameter unit(s)", pu.len());
-                }
-                units.append(&mut pu);
-            }
-            Err(e) => eprintln!("rmmz: plugin extract skipped: {e:#}"),
-        }
+        let mut plugin_units = super::rmmz_plugins::extract_plugins(content_root, source_lang)?;
+        units.append(&mut plugin_units);
 
         Ok(units)
     }
@@ -126,15 +124,12 @@ impl FormatAdapter for RmmzAdapter {
         units: &[TextUnit],
         translations: &BTreeMap<String, Translation>,
     ) -> Result<Vec<OutputFile>> {
-        let data_dir = resolve_data_dir(content_root)?;
+        let data_dir = data_dir_target(content_root);
         let mut files: BTreeMap<String, Value> = BTreeMap::new();
 
         // Load only data/* files we need (skip js/plugins.js locations)
         let mut needed = BTreeMap::<String, ()>::new();
         for u in units {
-            if !translations.contains_key(&u.id) {
-                continue;
-            }
             if u.domain == "plugins" || u.location.starts_with("js/") {
                 continue;
             }
@@ -146,11 +141,21 @@ impl FormatAdapter for RmmzAdapter {
         for file in needed.keys() {
             let p = data_dir.join(file);
             if !p.is_file() {
-                continue;
+                bail!("missing live data {}", p.display());
             }
             let raw =
-                fs::read_to_string(&p).with_context(|| format!("read origin {}", p.display()))?;
+                fs::read_to_string(&p).with_context(|| format!("read live data {}", p.display()))?;
             let v: Value = serde_json::from_str(&raw)?;
+            let live_hash = anchor_hash(file, &v);
+            for unit in units.iter().filter(|unit| unit.location.split('/').next() == Some(file.as_str())) {
+                let payload: Value = serde_json::from_str(&unit.payload)
+                    .with_context(|| format!("missing extraction anchor snapshot for {}", unit.location))?;
+                let expected = payload.get("anchor_hash").and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("missing extraction anchor hash for {}", unit.location))?;
+                if expected != live_hash {
+                    bail!("live anchors changed in {file}; refusing stale source slots");
+                }
+            }
             files.insert(file.clone(), v);
         }
 
@@ -158,13 +163,8 @@ impl FormatAdapter for RmmzAdapter {
             if u.domain == "plugins" || u.location.starts_with("js/") {
                 continue;
             }
-            let Some(tr) = translations.get(&u.id) else {
-                continue;
-            };
-            if tr.translation_lines.is_empty() {
-                continue;
-            }
-            apply_unit(&mut files, u, tr)?;
+            let translation = translations.get(&u.id).filter(|tr| !tr.translation_lines.is_empty());
+            apply_unit(&mut files, u, translation)?;
         }
 
         let mut out = Vec::new();
@@ -193,6 +193,130 @@ impl FormatAdapter for RmmzAdapter {
 /// from a `data_origin` snapshot.
 fn data_dir_target(content_root: &Path) -> PathBuf {
     content_root.join("data")
+}
+
+/// First-write backups retain source text when live data has been translated.
+/// An explicit data_origin snapshot already contains the authoritative source.
+pub(super) fn source_json_path(path: &Path) -> Result<PathBuf> {
+    if path.parent().and_then(Path::file_name).is_some_and(|name| name == "data_origin") {
+        return Ok(path.to_owned());
+    }
+    let mut backup = path.as_os_str().to_os_string();
+    backup.push(".attxbak");
+    let backup = PathBuf::from(backup);
+    match fs::symlink_metadata(&backup) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(backup),
+        Ok(_) => bail!("authoritative source backup is not a regular file: {}", backup.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_owned()),
+        Err(error) => Err(error).with_context(|| format!("inspect source backup {}", backup.display())),
+    }
+}
+
+fn attach_anchor_hash(file: &str, source: &Value, units: &mut [TextUnit]) {
+    let hash = anchor_hash(file, source);
+    for unit in units.iter_mut().filter(|unit| unit.location.split('/').next() == Some(file)) {
+        unit.payload = json!({"anchor_hash": hash}).to_string();
+    }
+}
+
+struct HashWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+pub(super) fn hash_value(hash: &mut Sha256, value: &Value) {
+    serde_json::to_writer(HashWriter(&mut *hash), value).expect("hash writer is infallible");
+    hash.update(b"\0");
+}
+
+fn hash_text_shape(hash: &mut Sha256, value: &Value) {
+    match value {
+        Value::String(_) => hash.update(b"string\0"),
+        Value::Array(values) => {
+            hash.update(b"[\0");
+            for value in values { hash_text_shape(hash, value); }
+            hash.update(b"]\0");
+        }
+        Value::Object(values) => {
+            hash.update(b"{\0");
+            for (key, value) in values {
+                hash.update(key.as_bytes());
+                hash.update(b"\0");
+                hash_text_shape(hash, value);
+            }
+            hash.update(b"}\0");
+        }
+        _ => hash_value(hash, value),
+    }
+}
+
+// Event topology, command order, codes, indentation and non-text parameters
+// are anchors. Coordinates, graphics and other database gameplay values are not.
+fn anchor_hash(file: &str, root: &Value) -> String {
+    let mut hash = Sha256::new();
+    if file == "System.json" {
+        hash_text_shape(&mut hash, &root["gameTitle"]);
+        hash_text_shape(&mut hash, &root["terms"]);
+    } else if BASE_FILES.contains(&file) {
+        if let Some(items) = root.as_array() {
+            for item in items {
+                hash_value(&mut hash, &item["id"]);
+                hash_text_shape(&mut hash, &item["name"]);
+                for field in BASE_FIELDS { hash_text_shape(&mut hash, &item[*field]); }
+            }
+        } else { hash_value(&mut hash, root); }
+    } else {
+        let entities = if file.starts_with("Map") { &root["events"] } else { root };
+        if let Some(entities) = entities.as_array() {
+            for entity in entities {
+                hash_value(&mut hash, &entity["id"]);
+                hash_value(&mut hash, &entity["name"]);
+                if file == "CommonEvents.json" {
+                    hash_command_list(&mut hash, &entity["list"]);
+                } else if let Some(pages) = entity["pages"].as_array() {
+                    hash.update(b"pages[\0");
+                    for page in pages {
+                        // Conditions distinguish otherwise structurally equal pages.
+                        hash_value(&mut hash, &page["conditions"]);
+                        hash_command_list(&mut hash, &page["list"]);
+                    }
+                    hash.update(b"]\0");
+                } else { hash_value(&mut hash, &entity["pages"]); }
+            }
+        } else { hash_value(&mut hash, entities); }
+    }
+    format!("{:x}", hash.finalize())
+}
+
+fn hash_command_list(hash: &mut Sha256, list: &Value) {
+    let Some(commands) = list.as_array() else { hash_value(hash, list); return; };
+    hash.update(b"list[\0");
+    for command in commands {
+        let Some(fields) = command.as_object() else { hash_value(hash, command); continue; };
+        hash.update(b"command{\0");
+        for (key, value) in fields {
+            hash.update(key.as_bytes());
+            hash.update(b"\0");
+            let code = command["code"].as_i64();
+            if key == "parameters" && let Some(params) = value.as_array() {
+                hash.update(b"params[\0");
+                for (index, param) in params.iter().enumerate() {
+                    let text_slot = matches!(code, Some(CODE_TEXT | CODE_SCROLL | CODE_CHOICES)) && index == 0
+                        || code == Some(CODE_NAME) && index == 4;
+                    if text_slot { hash_text_shape(hash, param); }
+                    else { hash_value(hash, param); }
+                }
+                hash.update(b"]\0");
+            } else { hash_value(hash, value); }
+        }
+        hash.update(b"}\0");
+    }
+    hash.update(b"]\0");
 }
 
 fn find_content_root(game_path: &Path) -> Option<PathBuf> {
@@ -565,7 +689,7 @@ fn push_short(
 fn apply_unit(
     files: &mut BTreeMap<String, Value>,
     unit: &TextUnit,
-    tr: &Translation,
+    translation: Option<&Translation>,
 ) -> Result<()> {
     let file = unit
         .location
@@ -575,19 +699,20 @@ fn apply_unit(
     let root = files
         .get_mut(file)
         .ok_or_else(|| anyhow::anyhow!("file not loaded: {file}"))?;
+    let lines = translation.map_or(unit.original_lines.as_slice(), |tr| tr.translation_lines.as_slice());
 
     match unit.item_type {
         ItemType::Array => {
-            write_choices(root, &unit.location, &tr.translation_lines)?;
+            write_choices(root, &unit.location, lines)?;
         }
         ItemType::ShortText if unit.domain == "namebox" => {
-            write_namebox(root, &unit.location, &tr.translation_lines)?;
+            write_namebox(root, &unit.location, lines)?;
         }
         ItemType::ShortText => {
-            write_short(root, &unit.location, &tr.translation_lines)?;
+            write_short(root, &unit.location, lines)?;
         }
         ItemType::LongText => {
-            write_long_text(root, unit, &tr.translation_lines)?;
+            write_long_text_with_reflow(root, unit, lines, translation.is_some())?;
         }
     }
     Ok(())
@@ -600,7 +725,11 @@ fn write_short(root: &mut Value, location: &str, lines: &[String]) -> Result<()>
     if rest.is_empty() {
         bail!("short path missing fields: {location}");
     }
-    set_json_path(root, rest, Value::String(text))?;
+    let slot = navigate_mut(root, rest)?;
+    if !slot.is_string() {
+        bail!("short text anchor is not a string: {location}");
+    }
+    *slot = Value::String(text);
     Ok(())
 }
 
@@ -620,8 +749,8 @@ fn write_namebox(root: &mut Value, location: &str, lines: &[String]) -> Result<(
         .get_mut("parameters")
         .and_then(|v| v.as_array_mut())
         .ok_or_else(|| anyhow::anyhow!("namebox missing parameters at {location}"))?;
-    while params.len() < 5 {
-        params.push(Value::String(String::new()));
+    if params.get(4).and_then(Value::as_str).is_none() {
+        bail!("namebox string anchor missing at {location}");
     }
     params[4] = Value::String(text);
     Ok(())
@@ -631,27 +760,44 @@ fn write_choices(root: &mut Value, location: &str, lines: &[String]) -> Result<(
     let rest = location.split_once('/').map(|(_, r)| r).unwrap_or("");
     // navigate to command object
     let cmd = navigate_mut(root, rest)?;
+    if cmd.get("code").and_then(Value::as_i64) != Some(CODE_CHOICES) {
+        bail!("expected choices code 102 at {location}");
+    }
     let params = cmd
         .get_mut("parameters")
         .and_then(|v| v.as_array_mut())
         .ok_or_else(|| anyhow::anyhow!("choices missing parameters at {location}"))?;
-    if params.is_empty() {
-        bail!("choices empty parameters at {location}");
+    let choices = params.first().and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("choices array anchor missing at {location}"))?;
+    if choices.len() != lines.len() || choices.iter().any(|choice| !choice.is_string()) {
+        bail!("choices slot shape changed at {location}");
     }
     params[0] = Value::Array(lines.iter().cloned().map(Value::String).collect());
     Ok(())
 }
 
+#[cfg(test)]
 fn write_long_text(root: &mut Value, unit: &TextUnit, lines: &[String]) -> Result<()> {
+    write_long_text_with_reflow(root, unit, lines, true)
+}
+
+fn write_long_text_with_reflow(root: &mut Value, unit: &TextUnit, lines: &[String], reflow: bool) -> Result<()> {
     if unit.source_line_paths.is_empty() {
-        return Ok(());
+        bail!("missing source slots at {}", unit.location);
     }
     // ponytail: never insert/delete event commands (shifts later indices).
     // Fit translation into the original number of 401/405 slots.
     let n_src = unit.source_line_paths.len();
-    let fitted = fit_lines(lines, n_src);
+    let fitted = if reflow {
+        fitted_unit_lines(unit, lines, n_src, DEFAULT_MSG_WIDTH)
+    } else {
+        if lines.len() != n_src {
+            bail!("original line count does not match source slots at {}", unit.location);
+        }
+        Cow::Borrowed(lines)
+    };
 
-    for (i, path) in unit.source_line_paths.iter().enumerate() {
+    for (path, text) in unit.source_line_paths.iter().zip(fitted.iter()) {
         let rest = path.split_once('/').map(|(_, r)| r).unwrap_or("");
         let cmd = navigate_mut(root, rest)?;
         let code = cmd.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -662,12 +808,10 @@ fn write_long_text(root: &mut Value, unit: &TextUnit, lines: &[String]) -> Resul
             .get_mut("parameters")
             .and_then(|v| v.as_array_mut())
             .ok_or_else(|| anyhow::anyhow!("missing parameters at {path}"))?;
-        let text = fitted.get(i).cloned().unwrap_or_default();
-        if params.is_empty() {
-            params.push(Value::String(text));
-        } else {
-            params[0] = Value::String(text);
+        if params.first().and_then(Value::as_str).is_none() {
+            bail!("missing text string anchor at {path}");
         }
+        params[0] = Value::String(text.clone());
     }
     Ok(())
 }
@@ -675,51 +819,154 @@ fn write_long_text(root: &mut Value, unit: &TextUnit, lines: &[String]) -> Resul
 /// Default message window display width (half-width cells). CJK ≈ 2.
 const DEFAULT_MSG_WIDTH: usize = 44;
 
-/// Fit translation into exactly `n` 401/405 slots.
-///
-/// When the model returns one long line for a multi-slot box (or any line is
-/// wider than the window), reflow by display width so CJK text is not clipped
-/// with empty trailing slots. Control codes (`\C[n]`, `\N[n]`, …) have width 0
-/// and are never split mid-token.
-fn fit_lines(lines: &[String], n: usize) -> Vec<String> {
-    fit_lines_with_width(lines, n, DEFAULT_MSG_WIDTH)
+/// Changes to the physical message slots, shared by caching and rendering.
+#[derive(Default, Debug)]
+pub struct LayoutChange {
+    pub reflowed: bool,
+    /// Number of emitted slots wider than the default 44 half-width cells.
+    /// Overflow is retained, not truncated, when the available slots cannot fit it.
+    pub overflow_lines: usize,
 }
 
+/// Normalize an RPG Maker message before rendering or saving its translation.
+/// Repeated calls leave fitted lines unchanged, including unavoidable overflow.
+pub fn normalize_for_writeback(unit: &TextUnit, translation: &mut Translation) -> LayoutChange {
+    if unit.engine != "rmmz"
+        || unit.item_type != ItemType::LongText
+        || unit.source_line_paths.is_empty()
+        || translation.translation_lines.is_empty()
+    {
+        return LayoutChange::default();
+    }
+    let fitted = fitted_unit_lines(
+        unit,
+        &translation.translation_lines,
+        unit.source_line_paths.len(),
+        DEFAULT_MSG_WIDTH,
+    );
+    let overflow_lines = fitted.iter().filter(|line| display_width(line) > DEFAULT_MSG_WIDTH).count();
+    let reflowed = fitted.as_ref() != translation.translation_lines.as_slice();
+    if reflowed {
+        translation.translation_lines = fitted.into_owned();
+    }
+    LayoutChange { reflowed, overflow_lines }
+}
+
+fn standalone_name(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let body = text.strip_prefix('【')?.strip_suffix('】')?;
+    (!body.is_empty() && !body.contains(['【', '】', '\n'])).then_some(text)
+}
+
+/// Accept a collapsed label only where the source reserved a name slot.
+/// Leading controls belong to the body, never to the protected label.
+fn collapsed_name(text: &str) -> Option<(&str, &str, &str)> {
+    let mut start = 0;
+    while start < text.len() {
+        let ch = text[start..].chars().next()?;
+        if ch.is_whitespace() {
+            start += ch.len_utf8();
+        } else if let Some(end) = control_token_end(text, start) {
+            start = end;
+        } else {
+            break;
+        }
+    }
+    let tail = text[start..].strip_prefix('【')?;
+    let end = start + '【'.len_utf8() + tail.find('】')? + '】'.len_utf8();
+    let name = standalone_name(&text[start..end])?;
+    Some((name, &text[..start], &text[end..]))
+}
+
+fn fitted_unit_lines<'a>(
+    unit: &TextUnit,
+    lines: &'a [String],
+    n: usize,
+    max_w: usize,
+) -> Cow<'a, [String]> {
+    if n < 2 || lines.is_empty() {
+        return fit_lines_borrowed(lines, n, max_w);
+    }
+    let source_name = unit.original_lines.first().and_then(|line| standalone_name(line));
+    let translated_name = lines.first().and_then(|line| standalone_name(line));
+    if let Some(name) = translated_name {
+        let body = fit_lines_borrowed(&lines[1..], n - 1, max_w);
+        if matches!(&body, Cow::Borrowed(_)) && lines[0] == name {
+            return Cow::Borrowed(lines);
+        }
+        let mut out = Vec::with_capacity(n);
+        out.push(name.to_owned());
+        out.extend(body.into_owned());
+        return Cow::Owned(out);
+    }
+    if let Some(source_name) = source_name {
+        let mut body = Vec::with_capacity(lines.len());
+        let name = if let Some((name, prefix, suffix)) = collapsed_name(&lines[0]) {
+            let mut first_body = String::with_capacity(prefix.len() + suffix.len());
+            first_body.push_str(prefix);
+            first_body.push_str(suffix);
+            if !first_body.is_empty() {
+                body.push(first_body);
+            }
+            body.extend_from_slice(&lines[1..]);
+            name
+        } else {
+            body.extend_from_slice(lines);
+            source_name
+        };
+        let fitted_body = fit_lines_borrowed(&body, n - 1, max_w);
+        let mut out = Vec::with_capacity(n);
+        out.push(name.to_owned());
+        out.extend(fitted_body.into_owned());
+        return Cow::Owned(out);
+    }
+    fit_lines_borrowed(lines, n, max_w)
+}
+
+#[cfg(test)]
 fn fit_lines_with_width(lines: &[String], n: usize, max_w: usize) -> Vec<String> {
+    fit_lines_borrowed(lines, n, max_w).into_owned()
+}
+
+/// Keep safe boundaries and reflow only the suffix needing more room.
+/// The final slot may overflow; event command indices never move.
+fn fit_lines_borrowed(lines: &[String], n: usize, max_w: usize) -> Cow<'_, [String]> {
     if n == 0 {
-        return vec![];
+        return Cow::Owned(Vec::new());
     }
-    let needs_reflow = n >= 2
-        && (lines.iter().any(|l| display_width(l) > max_w)
-            || (lines.iter().filter(|l| !l.is_empty()).count() == 1
-                && lines.first().map(|l| display_width(l) > max_w).unwrap_or(false))
-            || (lines.len() < n
-                && lines
-                    .iter()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| display_width(l))
-                    .sum::<usize>()
-                    > max_w));
-
-    if !needs_reflow {
-        if lines.len() == n {
-            return lines.to_vec();
+    let mut reflow_from = None;
+    for (i, line) in lines.iter().enumerate().take(n.saturating_sub(1)) {
+        if display_width(line) > max_w
+            || lines.get(i + 1).is_some_and(|next| starts_closing_punctuation(next))
+        {
+            reflow_from = Some(i);
+            break;
         }
-        if lines.len() > n {
-            let mut out: Vec<String> = lines[..n - 1].to_vec();
-            out.push(lines[n - 1..].join(""));
-            return out;
+    }
+    if let Some(start) = reflow_from {
+        let mut merged = String::with_capacity(lines[start..].iter().map(String::len).sum());
+        for line in &lines[start..] {
+            merged.push_str(line);
         }
-        let mut out = lines.to_vec();
-        out.resize(n, String::new());
-        return out;
+        let mut out = Vec::with_capacity(n);
+        out.extend_from_slice(&lines[..start]);
+        out.extend(reflow_to_n(&merged, n - start, max_w));
+        return Cow::Owned(out);
     }
-
-    let merged: String = lines.iter().filter(|l| !l.is_empty()).cloned().collect();
-    if merged.is_empty() {
-        return vec![String::new(); n];
+    if lines.len() == n {
+        return Cow::Borrowed(lines);
     }
-    reflow_to_n(&merged, n, max_w)
+    let mut out = Vec::with_capacity(n);
+    out.extend_from_slice(&lines[..lines.len().min(n - 1)]);
+    if lines.len() >= n {
+        let mut last = String::with_capacity(lines[n - 1..].iter().map(String::len).sum());
+        for line in &lines[n - 1..] {
+            last.push_str(line);
+        }
+        out.push(last);
+    }
+    out.resize(n, String::new());
+    Cow::Owned(out)
 }
 
 fn is_actor_name_ref(s: &str) -> bool {
@@ -745,11 +992,9 @@ fn display_width(s: &str) -> usize {
     let mut i = 0;
     let b = s.as_bytes();
     while i < b.len() {
-        if b[i] == b'\\' {
-            if let Some(end) = control_token_end(s, i) {
+        if b[i] == b'\\' && let Some(end) = control_token_end(s, i) {
                 i = end;
                 continue;
-            }
         }
         let ch = s[i..].chars().next().unwrap();
         w += if spawns_half_width(ch) {
@@ -791,10 +1036,8 @@ fn control_token_end(s: &str, i: usize) -> Option<usize> {
     while j < b.len() && b[j].is_ascii_alphabetic() {
         j += 1;
     }
-    if j < b.len() && b[j] == b'[' {
-        if let Some(close) = s[j + 1..].find(']') {
+    if j < b.len() && b[j] == b'[' && let Some(close) = s[j + 1..].find(']') {
             return Some(j + 1 + close + 1);
-        }
     }
     if j > i + 1 {
         return Some(j);
@@ -802,103 +1045,129 @@ fn control_token_end(s: &str, i: usize) -> Option<usize> {
     None
 }
 
-fn tokenize_controls(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
+fn is_closing_punctuation(ch: char) -> bool {
+    matches!(ch, '，' | '。' | '！' | '？' | '、' | '」' | '』' | '；' | '：' | '…'
+        | ',' | '.' | '!' | '?' | ';' | ':' | ')' | '）' | '】' | ']' | '}')
+}
+
+fn starts_closing_punctuation(text: &str) -> bool {
     let mut i = 0;
-    let b = s.as_bytes();
-    while i < b.len() {
-        if b[i] == b'\\'
-            && let Some(end) = control_token_end(s, i)
-        {
-            out.push(s[i..end].to_string());
+    while i < text.len() {
+        if let Some(end) = control_token_end(text, i) {
             i = end;
             continue;
         }
-        let ch = s[i..].chars().next().unwrap();
-        out.push(ch.to_string());
+        let ch = text[i..].chars().next().unwrap();
+        if !ch.is_whitespace() {
+            return is_closing_punctuation(ch);
+        }
         i += ch.len_utf8();
     }
-    out
+    false
 }
 
-fn token_width(tok: &str) -> usize {
-    if tok.starts_with('\\') {
-        return 0;
+struct TokenSpan {
+    start: usize,
+    end: usize,
+    width: usize,
+    visible: Option<char>,
+    next_is_closing: bool,
+}
+
+/// Each token borrows a byte span; no character-sized strings are allocated.
+fn tokenize_controls(text: &str) -> Vec<TokenSpan> {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        if let Some(end) = control_token_end(text, start) {
+            tokens.push(TokenSpan { start, end, width: 0, visible: None, next_is_closing: false });
+            start = end;
+        } else {
+            let ch = text[start..].chars().next().unwrap();
+            let end = start + ch.len_utf8();
+            tokens.push(TokenSpan {
+                start,
+                end,
+                width: if spawns_half_width(ch) { 1 } else { 2 },
+                visible: Some(ch),
+                next_is_closing: false,
+            });
+            start = end;
+        }
     }
-    tok.chars()
-        .map(|c| if spawns_half_width(c) { 1 } else { 2 })
-        .sum()
+    let mut next_is_closing = false;
+    for token in tokens.iter_mut().rev() {
+        token.next_is_closing = next_is_closing;
+        if let Some(ch) = token.visible
+            && !ch.is_whitespace()
+        {
+            next_is_closing = is_closing_punctuation(ch);
+        }
+    }
+    tokens
 }
 
 fn reflow_to_n(text: &str, n: usize, max_w: usize) -> Vec<String> {
-    let text = text.replace('\n', "");
-    if n <= 1 {
-        return vec![text];
+    if n == 0 {
+        return Vec::new();
+    }
+    let text = if text.contains('\n') {
+        Cow::Owned(text.replace('\n', ""))
+    } else {
+        Cow::Borrowed(text)
+    };
+    if n == 1 {
+        return vec![text.into_owned()];
     }
     let tokens = tokenize_controls(&text);
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur: Vec<String> = Vec::new();
-    let mut cur_w = 0usize;
-    let mut i = 0usize;
-
-    while i < tokens.len() {
-        let remaining_slots = n.saturating_sub(lines.len());
-        if remaining_slots <= 1 {
-            cur.extend(tokens[i..].iter().cloned());
-            lines.push(cur.join(""));
-            cur.clear();
+    let mut remaining_width: usize = tokens.iter().map(|token| token.width).sum();
+    let mut lines = Vec::with_capacity(n);
+    let mut start = 0;
+    while start < tokens.len() {
+        if lines.len() + 1 == n {
+            lines.push(text[tokens[start].start..].to_owned());
             break;
         }
-        let tok = &tokens[i];
-        let tw = token_width(tok);
-        if !cur.is_empty() && cur_w + tw > max_w {
-            // Prefer break after CJK/ASCII punctuation already in `cur`.
-            let joined = cur.join("");
-            let mut break_at: Option<usize> = None;
-            for punct in [
-                '。', '！', '？', '；', '，', '、', '…', '：', '.', '!', '?', ';', ',',
-            ] {
-                if let Some(pos) = joined.rfind(punct) {
-                    let end = pos + punct.len_utf8();
-                    if display_width(&joined[..end]) >= max_w / 3 {
-                        break_at = Some(end);
-                        break;
-                    }
+        let mut width = 0;
+        let mut latest_safe = None;
+        let mut latest_punctuation = None;
+        let mut end = start;
+        while end < tokens.len() && width + tokens[end].width <= max_w {
+            let token = &tokens[end];
+            width += token.width;
+            if let Some(ch) = token.visible
+                && !token.next_is_closing
+            {
+                latest_safe = Some((end + 1, width));
+                if is_closing_punctuation(ch) {
+                    latest_punctuation = latest_safe;
                 }
             }
-            if let Some(at) = break_at {
-                lines.push(joined[..at].to_string());
-                let right = &joined[at..];
-                cur = if right.is_empty() {
-                    Vec::new()
-                } else {
-                    tokenize_controls(right)
-                };
-                cur_w = display_width(&cur.join(""));
-            } else {
-                lines.push(joined);
-                cur.clear();
-                cur_w = 0;
-            }
-            continue;
+            end += 1;
         }
-        cur.push(tok.clone());
-        cur_w += tw;
-        i += 1;
+        if end == tokens.len() {
+            lines.push(text[tokens[start].start..].to_owned());
+            break;
+        }
+        let remaining_capacity = (n - lines.len() - 1).saturating_mul(max_w);
+        let preferred = latest_punctuation.filter(|(_, used_width)| {
+            remaining_width.saturating_sub(*used_width) <= remaining_capacity
+                || remaining_width > (n - lines.len()).saturating_mul(max_w)
+        });
+        let Some((split, used_width)) = preferred.or(latest_safe) else {
+            // No width-bounded split can keep closing punctuation with its text.
+            // Preserve the remainder instead of losing content or splitting controls.
+            while lines.len() + 1 < n {
+                lines.push(String::new());
+            }
+            lines.push(text[tokens[start].start..].to_owned());
+            break;
+        };
+        lines.push(text[tokens[start].start..tokens[split - 1].end].to_owned());
+        remaining_width = remaining_width.saturating_sub(used_width);
+        start = split;
     }
-    if !cur.is_empty() {
-        lines.push(cur.join(""));
-    }
-    if lines.len() > n {
-        let head: Vec<String> = lines[..n - 1].to_vec();
-        let tail = lines[n - 1..].join("");
-        lines = head;
-        lines.push(tail);
-    }
-    while lines.len() < n {
-        lines.push(String::new());
-    }
-    lines.truncate(n);
+    lines.resize(n, String::new());
     lines
 }
 
@@ -1104,7 +1373,7 @@ mod tests {
     #[test]
     fn fit_lines_reflows_long_cjk_into_slots() {
         let long = "上午的课就先到这里。下午会进行结合实践的课程，请大家到训练场集合。".to_string();
-        let out = fit_lines_with_width(&[long.clone()], 3, 44);
+        let out = fit_lines_with_width(std::slice::from_ref(&long), 3, 44);
         assert_eq!(out.len(), 3);
         assert!(out.iter().filter(|l| !l.is_empty()).count() >= 2, "out={out:?}");
         assert!(
@@ -1128,6 +1397,333 @@ mod tests {
         let out = fit_lines_with_width(&[s], 2, 20);
         assert!(out.iter().any(|l| l.contains("\\C[27]")), "out={out:?}");
         assert!(!out.iter().any(|l| l.contains("\\C[2") && !l.contains("\\C[27]")));
+    }
+
+    fn layout_unit(source: &[&str], slots: usize) -> TextUnit {
+        TextUnit {
+            id: "report-layout".into(),
+            engine: "rmmz".into(),
+            domain: "dialogue".into(),
+            location: "Map040.json/7/0/315".into(),
+            item_type: ItemType::LongText,
+            role: "旁白".into(),
+            original_lines: source.iter().map(|line| (*line).to_owned()).collect(),
+            source_line_paths: (315..315 + slots).map(|i| format!("Map040.json/7/0/{i}")).collect(),
+            context: String::new(),
+            payload: String::new(),
+        }
+    }
+
+    fn layout_translation(lines: &[&str]) -> Translation {
+        Translation {
+            unit_id: "report-layout".into(),
+            translation_lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+            source_hash: "unchanged-source-hash".into(),
+            passthrough: false,
+        }
+    }
+
+    #[test]
+    fn report_name_slot_and_expression_survive_two_slot_overflow() {
+        let unit = layout_unit(&[
+            "【ラージ】",
+            r"\SE[magao]「いい話なのか不憫な話なのかわからないな……」",
+        ], 2);
+        let mut tr = layout_translation(&[
+            "【拉吉】",
+            r"\SE[magao]「这算温馨往事还是可怜的故事我都分不清了……」",
+        ]);
+        let expected = tr.translation_lines.clone();
+        let change = normalize_for_writeback(&unit, &mut tr);
+        assert!(!change.reflowed);
+        assert_eq!(change.overflow_lines, 1);
+        assert_eq!(tr.translation_lines, expected);
+
+        let mut list = vec![json!({"code": 0, "indent": 0, "parameters": []}); 318];
+        list[314] = json!({"code": 101, "indent": 0, "parameters": ["", 0, 0, 2]});
+        list[315] = json!({"code": 401, "indent": 0, "parameters": [unit.original_lines[0]]});
+        list[316] = json!({"code": 401, "indent": 0, "parameters": [unit.original_lines[1]]});
+        let original_commands = list.clone();
+        let mut events = vec![Value::Null; 8];
+        events[7] = json!({"id": 7, "pages": [{"list": list}]});
+        let mut root = json!({"events": events});
+        write_long_text(&mut root, &unit, &tr.translation_lines).unwrap();
+        let written = root["events"][7]["pages"][0]["list"].as_array().unwrap();
+        assert_eq!(written.len(), original_commands.len());
+        assert_eq!(written[315]["parameters"][0], json!("【拉吉】"));
+        assert_eq!(written[316]["parameters"][0], json!(expected[1]));
+        assert!(written[316]["parameters"][0].as_str().unwrap().starts_with(r"\SE[magao]"));
+        for (i, (before, after)) in original_commands.iter().zip(written).enumerate() {
+            assert_eq!(before["code"], after["code"], "command index {i}");
+            assert_eq!(before["indent"], after["indent"], "command index {i}");
+            if i != 315 && i != 316 {
+                assert_eq!(before, after, "unrelated command index {i}");
+            }
+        }
+        let expected_root = root.clone();
+        let second = normalize_for_writeback(&unit, &mut tr);
+        assert!(!second.reflowed);
+        assert_eq!(second.overflow_lines, 1);
+        write_long_text(&mut root, &unit, &tr.translation_lines).unwrap();
+        assert_eq!(root, expected_root);
+    }
+
+    #[test]
+    fn source_name_slot_recovers_collapsed_or_missing_translated_label() {
+        let unit = layout_unit(&["【ラージ】", "こんにちは。"], 2);
+        for collapsed in [
+            r"【拉吉】\SE[magao]「你好。」",
+            r"\SE[magao]【拉吉】「你好。」",
+        ] {
+            let mut tr = layout_translation(&[collapsed]);
+            assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
+            assert_eq!(tr.translation_lines, vec!["【拉吉】", r"\SE[magao]「你好。」"]);
+            assert!(!normalize_for_writeback(&unit, &mut tr).reflowed);
+        }
+        let mut missing = layout_translation(&[r"\SE[magao]「你好。」"]);
+        assert!(normalize_for_writeback(&unit, &mut missing).reflowed);
+        assert_eq!(missing.translation_lines, vec!["【ラージ】", r"\SE[magao]「你好。」"]);
+        assert!(!normalize_for_writeback(&unit, &mut missing).reflowed);
+
+        let mismatch = layout_unit(&["名前のない台詞。", "次の行。"], 2);
+        let mut named = layout_translation(&["【拉吉】", r"\SE[magao]「这是一句超过消息窗口宽度而且不能挤进名字行的非常长的台词。」"]);
+        assert!(!normalize_for_writeback(&mismatch, &mut named).reflowed);
+        assert_eq!(named.translation_lines[0], "【拉吉】");
+    }
+
+    #[test]
+    fn latest_punctuation_break_wins_over_punctuation_type_order() {
+        let text = "甲。乙，丙丁戊己";
+        let out = reflow_to_n(text, 2, 12);
+        assert_eq!(out, vec!["甲。乙，", "丙丁戊己"]);
+        assert_eq!(out.join(""), text);
+    }
+
+    #[test]
+    fn closing_punctuation_never_starts_a_reflowed_line() {
+        for punctuation in ['，', '。', '！', '？', '、', '」', '』'] {
+            let text = format!("甲乙{punctuation}丙丁");
+            let out = reflow_to_n(&text, 2, 4);
+            assert_eq!(out.join(""), text);
+            assert_eq!(out[0], "甲");
+            assert!(!starts_closing_punctuation(&out[1]));
+        }
+        let out = reflow_to_n("甲。！？乙", 2, 2);
+        assert_eq!(out, vec!["", "甲。！？乙"]);
+    }
+
+    #[test]
+    fn control_spans_are_atomic_and_remain_with_body() {
+        let text = r"\SE[magao]甲乙\C[27]丙丁\I[12]戊己\V[999]庚辛壬癸";
+        let out = reflow_to_n(text, 4, 6);
+        assert_eq!(out.join(""), text);
+        for control in [r"\SE[magao]", r"\C[27]", r"\I[12]", r"\V[999]"] {
+            assert_eq!(out.iter().filter(|line| line.contains(control)).count(), 1);
+        }
+        let unit = layout_unit(&["【ラージ】", "一行。", "二行。", "三行。", "四行。"], 5);
+        let mut tr = layout_translation(&["【拉吉】", text]);
+        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
+        assert_eq!(tr.translation_lines[0], "【拉吉】");
+        assert_eq!(tr.translation_lines[1..].join(""), text);
+        assert!(!normalize_for_writeback(&unit, &mut tr).reflowed);
+    }
+
+    #[test]
+    fn early_punctuation_does_not_force_avoidable_last_slot_overflow() {
+        let text = "甲。乙丙丁戊己庚辛壬";
+        let out = reflow_to_n(text, 2, 12);
+        assert_eq!(out.join(""), text);
+        assert!(out.iter().all(|line| display_width(line) <= 12), "out={out:?}");
+        assert_eq!(out[0], "甲。乙丙丁戊");
+    }
+
+    #[test]
+    fn name_is_not_reused_when_body_exceeds_multiple_available_slots() {
+        let unit = layout_unit(&["【ラージ】", "一行。", "二行。", "三行。"], 4);
+        let text = r"\SE[magao]甲乙丙丁戊己庚辛壬癸".repeat(12);
+        let mut tr = layout_translation(&["【拉吉】", &text]);
+        let first = normalize_for_writeback(&unit, &mut tr);
+        assert!(first.reflowed);
+        assert_eq!(first.overflow_lines, 1);
+        assert_eq!(tr.translation_lines[0], "【拉吉】");
+        assert!(tr.translation_lines[1].starts_with(r"\SE[magao]"));
+        assert_eq!(tr.translation_lines[1..].join(""), text);
+        let fitted = tr.translation_lines.clone();
+        let second = normalize_for_writeback(&unit, &mut tr);
+        assert!(!second.reflowed);
+        assert_eq!(second.overflow_lines, 1);
+        assert_eq!(tr.translation_lines, fitted);
+    }
+
+    #[test]
+    fn safe_prefix_boundaries_and_unavoidable_final_overflow_are_idempotent() {
+        let unit = layout_unit(&["一行。", "二行。", "三行。"], 3);
+        let long = "很长的台词需要重新分行但是最后一行超出窗口宽度时仍必须完整保存内容不能截断或者丢失任何字句。";
+        let mut tr = layout_translation(&["保留这一行。", long]);
+        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
+        assert_eq!(tr.translation_lines[0], "保留这一行。");
+        assert_eq!(tr.translation_lines[1..].join(""), long);
+        let expected = tr.translation_lines.clone();
+        let second = normalize_for_writeback(&unit, &mut tr);
+        assert!(!second.reflowed);
+        assert_eq!(tr.translation_lines, expected);
+        assert_eq!(fitted_unit_lines(&unit, &tr.translation_lines, 3, DEFAULT_MSG_WIDTH).as_ref(), expected.as_slice());
+        assert_eq!(tr.source_hash, "unchanged-source-hash");
+    }
+
+    #[test]
+    fn reextract_uses_first_write_json_backups_and_explicit_origin() {
+        let root = super::super::test_dir("rmmz-source-backups");
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("System.json"), "{}").unwrap();
+        let map = |text: &str| json!({"events": [null, {"id": 1, "pages": [{"list": [
+            {"code": 101, "parameters": ["", 0, 0, 2]},
+            {"code": 401, "parameters": [text]},
+            {"code": 0, "parameters": []}
+        ]}]}]});
+        fs::write(data.join("Map001.json"), map("你好。").to_string()).unwrap();
+        fs::write(data.join("Map001.json.attxbak"), map("こんにちは。").to_string()).unwrap();
+        fs::write(data.join("Actors.json"), json!([null, {"id": 1, "name": "拉吉"}]).to_string()).unwrap();
+        fs::write(data.join("Actors.json.attxbak"), json!([null, {"id": 1, "name": "ラージ"}]).to_string()).unwrap();
+        let units = RmmzAdapter.extract(&root, "ja").unwrap();
+        assert!(units.iter().any(|u| u.original_lines == vec!["こんにちは。"]));
+        assert!(units.iter().any(|u| u.original_lines == vec!["ラージ"]));
+        assert!(!units.iter().any(|u| u.original_lines == vec!["你好。"]));
+        let origin = root.join("data_origin");
+        fs::create_dir_all(&origin).unwrap();
+        fs::write(origin.join("System.json"), "{}").unwrap();
+        fs::write(origin.join("Map001.json"), map("元の台詞。").to_string()).unwrap();
+        fs::write(origin.join("Map001.json.attxbak"), map("古い台詞。").to_string()).unwrap();
+        let units = RmmzAdapter.extract(&root, "ja").unwrap();
+        assert!(units.iter().any(|u| u.original_lines == vec!["元の台詞。"]));
+        assert!(!units.iter().any(|u| u.original_lines == vec!["古い台詞。"]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn repeat_fixture(name: &str) -> (PathBuf, Value) {
+        let root = super::super::test_dir(name);
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("data/System.json"), json!({"gameTitle": "物語", "currencyUnit": "G"}).to_string()).unwrap();
+        fs::write(root.join("data/Actors.json"), json!([null, {"id": 7, "name": "ラージ", "level": 1}]).to_string()).unwrap();
+        let source = json!({"displayName": "unchanged", "events": [null, {"id": 1, "name": "Scene", "x": 3,
+            "pages": [{"conditions": {"switch1Valid": false}, "list": [
+                {"code": 101, "indent": 0, "parameters": ["", 0, 0, 2, "ラージ"]},
+                {"code": 401, "indent": 0, "parameters": ["【ラージ】"]},
+                {"code": 401, "indent": 0, "parameters": [format!("\\SE[magao]{}", "原文の長い台詞。".repeat(12))]},
+                {"code": 401, "indent": 0, "parameters": ["」次の行。"]},
+                {"code": 102, "indent": 0, "parameters": [["はい", "いいえ"], 0, 0, 2, 0]},
+                {"code": 405, "indent": 0, "parameters": ["巻物の一行。"]},
+                {"code": 405, "indent": 0, "parameters": ["巻物の二行。"]},
+                {"code": 0, "indent": 0, "parameters": []}
+            ]}]}]});
+        fs::write(root.join("data/Map001.json"), source.to_string()).unwrap();
+        (root, source)
+    }
+
+    fn publish_test_outputs(outputs: Vec<OutputFile>) {
+        for output in outputs {
+            let mut backup = output.path.as_os_str().to_os_string();
+            backup.push(".attxbak");
+            if !Path::new(&backup).exists() { fs::copy(&output.path, &backup).unwrap(); }
+            fs::write(output.path, output.bytes).unwrap();
+        }
+    }
+
+    fn fixture_translations(units: &[TextUnit]) -> BTreeMap<String, Translation> {
+        units.iter().map(|unit| (unit.id.clone(), Translation {
+            unit_id: unit.id.clone(),
+            translation_lines: unit.original_lines.iter().map(|line| format!("译文:{line}")).collect(),
+            source_hash: TextUnit::source_hash(&unit.original_lines),
+            passthrough: false,
+        })).collect()
+    }
+
+    #[test]
+    fn repeat_partial_write_restores_exact_original_slots_and_base_ids() {
+        let (root, mut source) = repeat_fixture("rmmz-repeat-partial");
+        let units = RmmzAdapter.extract(&root, "ja").unwrap();
+        let full = fixture_translations(&units);
+        publish_test_outputs(RmmzAdapter.writeback(&root, "zh", &units, &full).unwrap());
+        let units = RmmzAdapter.extract(&root, "ja").unwrap();
+        let mut live: Value = serde_json::from_str(&fs::read_to_string(root.join("data/Map001.json")).unwrap()).unwrap();
+        live["displayName"] = json!("live map setting");
+        live["events"][1]["x"] = json!(9);
+        fs::write(root.join("data/Map001.json"), live.to_string()).unwrap();
+        let mut partial = BTreeMap::new();
+        for unit in &units {
+            if unit.domain == "system" { partial.insert(unit.id.clone(), full[&unit.id].clone()); }
+            if unit.domain == "namebox" {
+                let mut empty = full[&unit.id].clone();
+                empty.translation_lines.clear();
+                partial.insert(unit.id.clone(), empty);
+            }
+        }
+        let outputs = RmmzAdapter.writeback(&root, "zh", &units, &partial).unwrap();
+        let map: Value = serde_json::from_slice(&outputs.iter().find(|output| output.path.ends_with("Map001.json")).unwrap().bytes).unwrap();
+        source["displayName"] = json!("live map setting");
+        source["events"][1]["x"] = json!(9);
+        assert_eq!(map, source, "original overflow, name0, body controls and exact command slots must return");
+        let actors: Value = serde_json::from_slice(&outputs.iter().find(|output| output.path.ends_with("Actors.json")).unwrap().bytes).unwrap();
+        assert_eq!(actors[1]["name"], json!("ラージ"), "DB ID is not an array index");
+        let system: Value = serde_json::from_slice(&outputs.iter().find(|output| output.path.ends_with("System.json")).unwrap().bytes).unwrap();
+        assert_eq!(system["gameTitle"], json!("译文:物語"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeat_write_rejects_inserted_reordered_or_reshaped_live_commands() {
+        let (root, source) = repeat_fixture("rmmz-repeat-anchor-conflicts");
+        let units = RmmzAdapter.extract(&root, "ja").unwrap();
+        publish_test_outputs(RmmzAdapter.writeback(&root, "zh", &units, &fixture_translations(&units)).unwrap());
+        for change in 0..6 {
+            let mut live = source.clone();
+            let list = live["events"][1]["pages"][0]["list"].as_array_mut().unwrap();
+            match change {
+                0 => list.insert(1, json!({"code": 401, "indent": 0, "parameters": ["新しい台詞。"]})),
+                1 => list.swap(1, 4),
+                2 => list[1]["code"] = json!(405),
+                3 => list[1]["indent"] = json!(1),
+                4 => list[1]["parameters"] = json!([]),
+                _ => live["events"][1]["pages"][0]["conditions"] = json!({"switch1Valid": true}),
+            }
+            fs::write(root.join("data/Map001.json"), live.to_string()).unwrap();
+            let reextracted = RmmzAdapter.extract(&root, "ja").unwrap();
+            assert_eq!(reextracted.iter().map(|unit| &unit.id).collect::<Vec<_>>(), units.iter().map(|unit| &unit.id).collect::<Vec<_>>());
+            assert!(RmmzAdapter.writeback(&root, "zh", &reextracted, &BTreeMap::new()).is_err(), "conflict {change}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeat_write_rejects_missing_live_base_field_or_file() {
+        let (root, _) = repeat_fixture("rmmz-missing-live-anchors");
+        let units = RmmzAdapter.extract(&root, "ja").unwrap();
+        fs::write(root.join("data/Actors.json"), json!([null, {"id": 7, "level": 1}]).to_string()).unwrap();
+        assert!(RmmzAdapter.writeback(&root, "zh", &units, &BTreeMap::new()).is_err());
+        fs::remove_file(root.join("data/Actors.json")).unwrap();
+        assert!(RmmzAdapter.writeback(&root, "zh", &units, &BTreeMap::new()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_symlinked_authoritative_json_backup() {
+        let (root, source) = repeat_fixture("rmmz-symlink-backup");
+        let external = root.join("outside.json");
+        fs::write(&external, source.to_string()).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("data/Map001.json.attxbak")).unwrap();
+        let error = RmmzAdapter.extract(&root, "ja").unwrap_err();
+        assert!(error.to_string().contains("not a regular file"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extraction_rejects_malformed_authoritative_json_backup() {
+        let (root, _) = repeat_fixture("rmmz-malformed-backup");
+        fs::write(root.join("data/Map001.json.attxbak"), "not JSON").unwrap();
+        assert!(RmmzAdapter.extract(&root, "ja").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

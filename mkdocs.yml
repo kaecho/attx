@@ -37,9 +37,51 @@ plugins:
         - locale: zh
           name: 中文
           build: true
+          nav_translations:
+            Home: 首页
+            Start: 开始使用
+            Install: 安装
+            Quick start: 快速开始
+            Translate with an agent: Agent 翻译向导
+            Configuration: 配置参考
+            Workflows: 工作流程
+            Translation: 翻译
+            Formats: 支持格式
+            Custom profiles: 自定义 Profile
+            RPG Maker: RPG Maker
+            Quality and repair: 质量与修复
+            Workspaces and JSONL: 工作区与 JSONL
+            Reference: 参考
+            CLI: CLI 命令
+            Agents: Agent 协议
+            Troubleshooting: 故障排查
+            Development: 二次开发
+            Architecture: 架构
+            Extending and releasing: 扩展与发版
         - locale: ja
           name: 日本語
           build: true
+          nav_translations:
+            Home: ホーム
+            Start: はじめに
+            Install: インストール
+            Quick start: クイックスタート
+            Translate with an agent: Agent 翻訳ガイド
+            Configuration: 設定
+            Workflows: 使い方
+            Translation: 翻訳
+            Formats: 対応形式
+            Custom profiles: カスタム Profile
+            RPG Maker: RPG Maker
+            Quality and repair: 品質と修復
+            Workspaces and JSONL: ワークスペースと JSONL
+            Reference: リファレンス
+            CLI: CLI コマンド
+            Agents: Agent プロトコル
+            Troubleshooting: トラブルシューティング
+            Development: 開発
+            Architecture: アーキテクチャ
+            Extending and releasing: 拡張とリリース
 
 markdown_extensions:
   - admonition
@@ -53,9 +95,22 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Install: install.md
-  - Usage: usage.md
-  - RPG Maker: rmmz.md
-  - Formats: formats.md
-  - CLI: cli.md
-  - Agents: agents.md
+  - Start:
+      - Install: install.md
+      - Quick start: quickstart.md
+      - Translate with an agent: agent-translation.md
+      - Configuration: configuration.md
+      - Workflows: usage.md
+  - Translation:
+      - Formats: formats.md
+      - Custom profiles: profiles.md
+      - RPG Maker: rmmz.md
+      - Quality and repair: quality.md
+      - Workspaces and JSONL: workspace.md
+  - Reference:
+      - CLI: cli.md
+      - Agents: agents.md
+      - Troubleshooting: troubleshooting.md
+  - Development:
+      - Architecture: architecture.md
+      - Extending and releasing: development.md

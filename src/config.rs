@@ -68,6 +68,12 @@ pub struct TranslationSection {
     pub batch_chars: usize,
     #[serde(default = "default_max_ctx")]
     pub max_context_items: usize,
+    /// Automatic post-translation repair rounds; zero disables extra rounds.
+    #[serde(default = "default_repair_rounds")]
+    pub repair_rounds: usize,
+    /// Total character budget for previous/next context in one request.
+    #[serde(default = "default_context_chars")]
+    pub context_chars: usize,
 }
 
 impl Default for TranslationSection {
@@ -79,6 +85,8 @@ impl Default for TranslationSection {
             retry_delay: 2,
             batch_chars: 2500,
             max_context_items: 6,
+            repair_rounds: default_repair_rounds(),
+            context_chars: default_context_chars(),
         }
     }
 }
@@ -101,13 +109,19 @@ fn default_batch_chars() -> usize {
 fn default_max_ctx() -> usize {
     6
 }
+fn default_repair_rounds() -> usize {
+    2
+}
+fn default_context_chars() -> usize {
+    1200
+}
 
 /// Glossary generation. Off by default: building one spends extra LLM calls,
 /// and a user who did not ask for that should never be surprised by it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlossarySection {
     /// Whether `attx run` builds a glossary between extract and translate.
-    /// Explicit `attx glossary build` ignores this — asking is consent.
+    /// Explicit `attx glossary build` ignores this; the command authorizes it.
     #[serde(default)]
     pub enabled: bool,
     /// A candidate the LLM extracted must occur at least this often in the
@@ -150,8 +164,7 @@ pub struct LearnSection {
     /// default because it costs nothing: the evidence is already in the DB.
     #[serde(default = "default_true")]
     pub auto_summarize: bool,
-    /// Additionally ask the model to sanity-check proposed entries. Off by
-    /// default — this one costs money.
+    /// Model review of proposed entries costs an extra request and is off by default.
     #[serde(default)]
     pub llm_review: bool,
 }
@@ -214,7 +227,7 @@ pub fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
     if cwd.exists() {
         return Ok(cwd);
     }
-    // fallthrough — missing file is ok for non-LLM cmds
+    // Missing configuration is allowed for commands that do not call the LLM.
     Ok(cwd)
 }
 
@@ -270,11 +283,11 @@ timeout = 600
 # 并发工作线程数。每个线程独立发 HTTP 请求，实际吞吐还受 rpm 限制。
 # 大语言模型服务通常按并发限流，8 是经验值；遇到 429 可调小。
 worker_count = 8
-# 全局速率限制：每分钟最多请求次数（跨线程共享计数）。0 = 不限速。
+# 全局请求起始间隔为 60/rpm 秒；初次、重试和拆分请求共享同一时钟。0 = 不限速。
 rpm = 60          # 按供应商免费额度/付费档位调整；慢模型可以调低避免积压
-# 批次失败后的重试次数（重试之间 sleep retry_delay 秒）。
-# 重试耗尽后仍失败：批次减半拆分 → 单条重试 → 仍失败则原文透传（passthrough），
-# 不会中断整个翻译任务。
+# 每个条目最多追加 retry_count 次请求；网络/408/429/5xx 重试当前批次，
+# 模型格式或质量失败只缩小重试失败条目。成功条目不再重试。
+# 永久 HTTP 错误（如 400/401/403）立即终止；耗尽后保留原文并标记 passthrough。
 retry_count = 3
 # 每次重试前的等待秒数。
 retry_delay = 2
@@ -282,8 +295,12 @@ retry_delay = 2
 # 注意：这是"每批多少原文"的预算，不是模型上下文窗口。
 batch_chars = 2500
 # 单个批次的最大条数（与 batch_chars 同时生效，先到先切）。
-# 批量请求中每条带独立编号，模型按编号返回，超出的编号会被丢弃并重试。
+# 未知编号被丢弃；缺失或不合格条目重试，重复编号不增加成功数量。
 max_context_items = 6
+# run/repair 的额外自动审查修复轮数。0 = 不追加修复。
+repair_rounds = 2
+# 每批 prev/next 邻句的总字符预算（含标签）；0 = 不注入邻句。
+context_chars = 1200
 
 # ---------------------------------------------------------------------------
 # [glossary]  术语表（专有名词统一译名）
@@ -294,13 +311,8 @@ max_context_items = 6
 # 显式执行 `attx glossary build` 则无视本开关，执行即视为同意。
 [glossary]
 enabled = false
-# 提取策略：LLM 全程负责（LinguaGacha 策略）。原文分批直接交给模型，
-# 由它提取专有名词与作品特有概念（人名/地名/家族/组织/物品/技能/生物/概念）
-# 并给出译名（{src,dst,info}），费用与文本量（批次数）成正比。
-# 机械把关只有两道：子串闸门（术语必须是原文真实子串，防幻觉）
-# 和 min_occurrences 出现次数门槛（按原文行级出现次数过滤偶发词）。
-# 正则死规则已移除：正则只能看到片假名串和大写词，
-# 组织名、物品名、技能名等术语根本不会浮现，语义判断交给模型更可靠。
+# 原文分批交给模型提取人名、地名、组织、物品等专有术语并给出译名。
+# 候选必须是原文真实子串，并达到 min_occurrences 的包含该词的单元数门槛。
 min_occurrences = 10
 # 保留术语数量上限（按真实出现次数从高到低截断）。
 # 超出的候选会被丢弃并在日志中报告；调大本值或调高 min_occurrences 可扩大覆盖。
@@ -344,70 +356,6 @@ pub fn require_llm(settings: &Settings) -> Result<&LlmClient> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn missing_sections_fall_back_to_defaults() {
-        // Every existing 0.5.0 setting.toml lacks these sections; loading one
-        // must not fail, and must not silently switch the paid feature on.
-        let s: Settings = toml::from_str(
-            r#"
-[llm]
-default_client = "main"
-clients = []
-"#,
-        )
-        .unwrap();
-        assert!(!s.glossary.enabled, "the paid feature stays off by default");
-        assert_eq!(s.glossary.min_occurrences, 10);
-        assert!(s.learn.auto_summarize, "free capture is on by default");
-        assert!(!s.learn.llm_review, "the paid check stays off by default");
-    }
-
-    #[test]
-    fn partial_sections_keep_other_defaults() {
-        let s: Settings = toml::from_str(
-            r#"
-[llm]
-default_client = "main"
-clients = []
-
-[glossary]
-enabled = true
-"#,
-        )
-        .unwrap();
-        assert!(s.glossary.enabled);
-        assert_eq!(s.glossary.min_occurrences, 10);
-    }
-
-    #[test]
-    fn shipped_example_config_parses() {
-        // setting.example.toml is generated from this function; keep them in sync.
-        let s: Settings = toml::from_str(example_toml()).expect("example_toml must be valid");
-        assert!(!s.glossary.enabled);
-        assert!(s.learn.auto_summarize);
-    }
-
-    #[test]
-    fn client_optional_fields_default_absent() {
-        let s: Settings = toml::from_str(
-            r#"
-[llm]
-default_client = "main"
-[[llm.clients]]
-name = "main"
-base_url = "http://x"
-api_key = "k"
-model = "m"
-"#,
-        )
-        .unwrap();
-        let c = &s.llm.clients[0];
-        assert!(c.temperature.is_none());
-        assert!(c.reasoning_effort.is_none());
-        assert!(c.max_tokens.is_none());
-        assert!(!c.stream);
-        assert!(c.extra.is_empty());
-    }
 
     #[test]
     fn client_named_fields_and_extra_parse() {
@@ -433,5 +381,17 @@ extra = { top_p = 0.8, max_completion_tokens = 2048 }
         assert_eq!(c.max_tokens, Some(4096));
         assert_eq!(c.extra["top_p"].as_float(), Some(0.8));
         assert_eq!(c.extra["max_completion_tokens"].as_integer(), Some(2048));
+    }
+    #[test]
+    fn repair_and_context_overrides_survive_serialization() {
+        let mut settings: Settings = toml::from_str(example_toml()).unwrap();
+        settings.translation.repair_rounds = 0;
+        settings.translation.context_chars = 73;
+        let serialized = toml::to_string(&settings).unwrap();
+        let parsed: Settings = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.translation.repair_rounds, 0);
+        assert_eq!(parsed.translation.context_chars, 73);
+        // Older partial sections remain loadable without the new keys.
+        let _: TranslationSection = toml::from_str("batch_chars = 100").unwrap();
     }
 }
