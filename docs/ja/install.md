@@ -2,7 +2,7 @@
 
 ## リリースバイナリ
 
-[GitHub Releases](https://github.com/kaecho/attx/releases) の `v0.10.0` から OS と CPU に対応するアーカイブを選びます。配布ターゲットは Linux x86_64、Windows x86_64、macOS aarch64 と x86_64 です。Windows は ZIP、その他は tar.gz です。
+[GitHub Releases](https://github.com/kaecho/attx/releases) の `v0.10.1` から OS と CPU に対応するアーカイブを選びます。配布ターゲットは Linux x86_64、Windows x86_64、macOS aarch64 と x86_64 です。Windows は ZIP、その他は tar.gz です。
 
 配布物には `attx` または `attx.exe`、英語と中国語の README、`CHANGELOG.md`、attx の `LICENSE`、`setting.example.toml`、`skills/`、`profiles/`、`docs/`、`mkdocs.yml`、`requirements-docs.txt` が含まれます。実行ファイルを PATH に入れるか、絶対パスで呼び出します。
 

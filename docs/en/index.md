@@ -1,6 +1,6 @@
 # attx
 
-attx (Agent Translation Toolkit eXtensible) is a local translation CLI for humans and coding agents. Version 0.10.0 is a single Rust binary. It extracts text through format adapters, translates through an OpenAI-compatible Chat Completions endpoint, caches results in SQLite, and renders translated artifacts.
+attx (Agent Translation Toolkit eXtensible) is a local translation CLI for humans and coding agents. Version 0.10.1 is a single Rust binary. It extracts text through format adapters, translates through an OpenAI-compatible Chat Completions endpoint, caches results in SQLite, and renders translated artifacts.
 
 ```text
 input -> adapter -> text units -> cached translation and bounded repair -> adapter -> output

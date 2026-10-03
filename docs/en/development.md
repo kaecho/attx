@@ -1,6 +1,6 @@
 # Development
 
-attx is a Rust 2024 binary crate, currently 0.10.0, with MSRV 1.89. Start with [architecture](architecture.md) and reuse the existing adapter/pipeline split. Format work belongs in extraction/rendering; network, retries, cache persistence, and durable artifact writes stay shared.
+attx is a Rust 2024 binary crate, currently 0.10.1, with MSRV 1.89. Start with [architecture](architecture.md) and reuse the existing adapter/pipeline split. Format work belongs in extraction/rendering; network, retries, cache persistence, and durable artifact writes stay shared.
 
 ## Source map and setup
 
@@ -200,7 +200,7 @@ Ordinary CI builds release binaries, runs tests, and smoke-checks the CLI on Ubu
 
 Windows packages are ZIP; other packages are tar.gz. Packages include the binary, English/Chinese README, changelog, license, example settings, `skills/`, `profiles/`, `docs/`, `mkdocs.yml`, and docs requirements. Publishing waits for the matrix and attaches its packages to the tag release.
 
-For 0.10.0, package version and release tag must agree (`0.10.0`, `v0.10.0`). Update Cargo metadata/lockfile, changelog, source examples, CLI/skill contracts, and translated manuals before tagging. Do not publish secrets, user workspaces, generated private JSONL, or throwaway fixtures. The workflow definition is [release.yml](https://github.com/kaecho/attx/blob/main/.github/workflows/release.yml), not a promise that a future run cannot fail.
+For 0.10.1, package version and release tag must agree (`0.10.1`, `v0.10.1`). Update Cargo metadata/lockfile, changelog, source examples, CLI/skill contracts, and translated manuals before tagging. Do not publish secrets, user workspaces, generated private JSONL, or throwaway fixtures. The workflow definition is [release.yml](https://github.com/kaecho/attx/blob/main/.github/workflows/release.yml), not a promise that a future run cannot fail.
 
 ## Security invariants and design attribution
 

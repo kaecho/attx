@@ -272,7 +272,7 @@ fn discover_files(input: &Path) -> Result<DiscoveredFiles> {
             if omitted {
                 discovered.excluded_entries += 1;
                 if discovered.excluded_paths.len() < 50 {
-                    discovered.excluded_paths.push(e.path().strip_prefix(input).unwrap_or(e.path()).to_string_lossy().into_owned());
+                    discovered.excluded_paths.push(logical_path(e.path().strip_prefix(input).unwrap_or(e.path())));
                 }
             }
             !omitted
@@ -283,11 +283,22 @@ fn discover_files(input: &Path) -> Result<DiscoveredFiles> {
     Ok(discovered)
 }
 
+/// Interchange locators use '/' independently of the host path separator.
+fn logical_path(path: &Path) -> String {
+    let mut output = String::with_capacity(path.as_os_str().len());
+    for component in path.components() {
+        if !output.is_empty() { output.push('/'); }
+        output.push_str(&component.as_os_str().to_string_lossy());
+    }
+    output
+}
+
 fn relative_file(input: &Path, file: &Path) -> Result<String> {
     let path = if input.is_dir() { file.strip_prefix(input)? } else {
         input.file_name().map(Path::new).context("input has no filename")?
     };
-    let rel = path.to_str().context("auto source filenames must be valid UTF-8")?.to_string();
+    path.to_str().context("auto source filenames must be valid UTF-8")?;
+    let rel = logical_path(path);
     validate_relative(&rel)?;
     Ok(rel)
 }
@@ -1239,5 +1250,19 @@ mod tests {
         let out = AutoAdapter.writeback(&file, "zh", &units, &translate(&units, "欢迎朋友")).unwrap();
         assert!(out[0].bytes.starts_with(&[0xff, 0xfe]));
         assert_eq!(read_document_bytes(out[0].bytes.clone()).unwrap().unwrap().spans[0].text, "欢迎朋友");
+    }
+
+    #[test]
+    fn source_locators_and_excluded_coverage_use_logical_separators() {
+        let (fixture, _file) = Fixture::new(br#"{"message":"Hello traveler"}"#);
+        std::fs::create_dir_all(fixture.0.join("nested/.git")).unwrap();
+        std::fs::write(fixture.0.join("nested/source.odd"), br#"{"message":"Good morning"}"#).unwrap();
+        std::fs::write(fixture.0.join("nested/.git/ignored.json"), br#"{"message":"Ignored source"}"#).unwrap();
+        let units = AutoAdapter.extract(&fixture.0, "en").unwrap();
+        assert!(units.iter().any(|unit| unit.location.starts_with("nested/source.odd#auto:")));
+        assert_eq!(coverage(&fixture.0).unwrap().excluded_paths, ["nested/.git"]);
+        let translated = AutoAdapter.writeback(&fixture.0, "zh", &units, &translate(&units, "欢迎朋友")).unwrap();
+        let nested = translated.iter().find(|output| output.path.ends_with("nested/source.odd")).unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&nested.bytes).unwrap()["message"], "欢迎朋友");
     }
 }

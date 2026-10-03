@@ -2,7 +2,7 @@
 
 ## 下载发行包
 
-从 [GitHub Releases](https://github.com/kaecho/attx/releases) 下载 `v0.10.0` 的对应压缩包。
+从 [GitHub Releases](https://github.com/kaecho/attx/releases) 下载 `v0.10.1` 的对应压缩包。
 
 | 平台 | 构建目标 | 包名 |
 |------|----------|------|

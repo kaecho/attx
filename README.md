@@ -8,7 +8,7 @@ Agent Translation Toolkit eXtensible is a Rust command-line translator for games
 identify → extract → optional glossary → translate → check and repair → safe writeback
 ```
 
-Version 0.10.0 keeps translation and agent automation on the same pipeline. Failed units receive bounded targeted retries; unresolved units remain visible. Normal translation requests no longer require a separate writeback-permission conversation.
+Version 0.10.1 keeps translation and agent automation on the same pipeline. Failed units receive bounded targeted retries; unresolved units remain visible. Normal translation requests no longer require a separate writeback-permission conversation.
 
 ## Let an agent handle setup
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1
+
+- Auto source locators and coverage paths use `/` on Windows as well as Unix, preserving the same interchange format and nested-file identities across platforms.
+- Release packaging runs the applicable native platform tests before building assets. The unpublished 0.10.0 tag remains unchanged; 0.10.1 contains its full translation, safety, documentation and guided-agent setup changes.
+
 ## 0.10.0
 
 ### Bug fixes

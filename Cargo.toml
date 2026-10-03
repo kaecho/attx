@@ -1,6 +1,6 @@
 [package]
 name = "attx"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Agent Translation Toolkit eXtensible: resumable AI translation for games, documents, subtitles, localization and custom text formats"

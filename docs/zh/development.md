@@ -85,7 +85,7 @@ Profile 推断只允许三种声明式规则、最多三次验证、overwrite=fa
 
 包包含二进制、英文/中文 README、CHANGELOG、LICENSE、示例配置、skills、profiles、docs、mkdocs.yml 和 requirements-docs.txt。不包含个人 setting.toml、数据库、真实输入或站点缓存。发布流程等所有包完成后上传 GitHub Release。
 
-正式发布需核对 Cargo.toml 与 Cargo.lock 版本、CHANGELOG、README 和文档一致，验证源文/恢复风险，提交后创建对应 `v0.10.0` tag。CI 文件描述的是应执行的流程，不证明某个具体 Release 已发布或全部 runner 已成功。
+正式发布需核对 Cargo.toml 与 Cargo.lock 版本、CHANGELOG、README 和文档一致，验证源文/恢复风险，提交后创建对应 `v0.10.1` tag。CI 文件描述的是应执行的流程，不证明某个具体 Release 已发布或全部 runner 已成功。
 
 ## 文档与 Skill 贡献
 

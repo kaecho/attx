@@ -1,6 +1,6 @@
 # attx のドキュメント
 
-attx (Agent Translation Toolkit eXtensible) は、ゲーム、電子書籍、文書、字幕、ローカライズファイルを OpenAI 互換 Chat Completions API で翻訳するローカル CLI です。0.10.0 は Rust 2024 の単一バイナリで、SQLite に抽出結果と翻訳を保存します。人間が直接使う場合も、コーディングエージェントに実行させる場合も同じパイプラインを使います。
+attx (Agent Translation Toolkit eXtensible) は、ゲーム、電子書籍、文書、字幕、ローカライズファイルを OpenAI 互換 Chat Completions API で翻訳するローカル CLI です。0.10.1 は Rust 2024 の単一バイナリで、SQLite に抽出結果と翻訳を保存します。人間が直接使う場合も、コーディングエージェントに実行させる場合も同じパイプラインを使います。
 
 ```text
 入力 → アダプターで抽出 → SQLite → 翻訳と有限修復 → 検証 → 出力

@@ -68,6 +68,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Native platform tests
+        if: matrix.os != 'macos-latest' || matrix.target == 'aarch64-apple-darwin'
+        run: cargo test --locked -- --test-threads=1
+
       - name: Build
         shell: bash
         run: |
