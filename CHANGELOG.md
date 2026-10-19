@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.0
+
+### Bug fixes
+
+- Namebox drift no longer blocks writeback. Advisory speaker-name mismatches stay in `review.namebox_mismatch` and remain `repair` targets, but only pending, passthrough, and structurally invalid units hold output back. The writeback `skipped_note` now reports the exact split (pending / passthrough / failed structural checks) instead of the vague "pending or invalid" wording.
+- Namebox comparison joins reflow-split translation slots and folds common Japanese shinjitai and Chinese simplified/traditional variants, so RMMZ message reflow and 汚/污, 桜/樱, 種/种 spelling no longer read as mismatches.
+
+### Translation quality
+
+- Model-emitted line breaks are normalized before structural checks: CRLF/CR collapse to LF, embedded newlines split for long text and arrays, and single-line slots join without inventing separators (Latin word spacing is kept).
+- Lines that contain only engine controls, markup, or placeholders are restored from the source when the model drops them and line counts agree.
+- Subtitle (SRT/VTT) and LRC writeback preserve the source line ending (CRLF or LF).
+- Review adds an advisory `residual_latin` bucket for Latin source fragments left inside a CJK translation. Isolated graphemes and 2–4 uppercase acronyms are exempt, and the bucket never blocks writeback.
+
+### Dynamic extraction rules
+
+- `attx analyze` reports line-shape histograms and ready-to-use JSON text-path globs; directory evidence samples up to three extensions and two files per extension.
+- `attx run --infer` and `attx init --infer` force declarative extraction-rule inference for inputs that would fall back to the generic `auto` adapter. A failed inference falls back to `auto` with the error reported in `profile_inference`; `--no-infer` still disables paid inference.
+- `profile infer` reports `coverage` (`files_scanned`, `files_with_units`) alongside the validated profile.
+
 ## 0.10.1
 
 - Auto source locators and coverage paths use `/` on Windows as well as Unix, preserving the same interchange format and nested-file identities across platforms.

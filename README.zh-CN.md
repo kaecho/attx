@@ -8,7 +8,7 @@ Agent Translation Toolkit eXtensible 是一个 Rust 命令行翻译工具，处�
 识别格式 → 提取 → 可选术语表 → 翻译 → 检查与修复 → 安全写回
 ```
 
-0.10.1 使用同一条管线支持普通 CLI 和 Agent。失败条目会在限定次数内定向重试；仍未解决的问题明确报告。用户要求正常翻译后，不再强制追加一次写回许可问答。
+0.11.0 使用同一条管线支持普通 CLI 和 Agent。失败条目会在限定次数内定向重试；仍未解决的问题明确报告。用户要求正常翻译后，不再强制追加一次写回许可问答。
 
 ## 不想手工配置：复制给 Agent
 
@@ -110,7 +110,7 @@ attx analyze --input "input.file" --src ja
 
 Auto 目录模式会把不支持的文件原样复制，并在 `extract.auto_coverage` 中报告。它不会在目录树中自动调用全部文档、压缩包、字幕或脚本适配器。复制文件不等于翻译文件。二进制封包、加密资产、含糊脚本和不支持的语法仍需要专用适配器或外部提取器。
 
-普通探测失败时，`run` 可以让已配置的模型生成声明式 Profile。程序校验提取结果和保持原文的空操作 roundtrip，强制 `overwrite = false`，最多接受三轮提案。`--no-infer` 关闭这项额外计费操作。模型仍可能选择不完整或语义不对的字段，roundtrip 不能证明覆盖完整。
+普通探测失败时，`run` 可以让已配置的模型生成声明式 Profile。程序校验提取结果和保持原文的空操作 roundtrip，强制 `overwrite = false`，最多接受三轮提案。`--no-infer` 关闭这项额外计费操作；`run --infer` 或 `init --infer` 则相反，在本该由通用 `auto` 处理时强制做一次验证过的推断，失败则回退 `auto` 并把错误写进 `profile_inference`。模型仍可能选择不完整或语义不对的字段，roundtrip 不能证明覆盖完整。
 
 ```bash
 attx profile infer --input "scene.scn" --output ./scene.toml --src ja --name scene

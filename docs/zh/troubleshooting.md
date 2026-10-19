@@ -66,7 +66,7 @@ attx repair --workspace './.attx-book' --dry-run
 attx repair --workspace './.attx-book'
 ```
 
-pending、passthrough、真实残留、控制符或姓名框问题可使默认写回 blocked。有限修复用完或无进展时用 export-jsonl --filter all 人工校对；不能无穷重跑来隐藏问题。术语子串建议可能误报，不能因此机械重译全项目。
+pending、passthrough、结构无效和真实残留可使默认写回 blocked；`review.namebox_mismatch` 与 `review.residual_latin` 只是提示，不会拦截写回，不要因为姓名框样例多就强行部分输出。有限修复用完或无进展时用 export-jsonl --filter all 人工校对；不能无穷重跑来隐藏问题。术语子串建议可能误报，不能因此机械重译全项目。
 
 主动试译 --limit N 时退出2可能只是剩余未处理条目，不代表缓存丢失。继续全量或明确保留样本，不能宣称已经完成。dry-run 返回0也可能携带 blocked 计划，未写文件。
 

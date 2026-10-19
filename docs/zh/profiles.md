@@ -15,6 +15,8 @@ attx profile save --profile './kag-local.toml'
 
 `new` 不覆盖已有输出。`test --roundtrip` 在内存中用标记译文调用写回，不生成真实翻译文件；检查 `roundtrip.ok`，不能只看命令返回 0。`save` 同名存在时需要明确的 `--force`，通常应给不同规则新的名字。
 
+`analyze` 的文件详情包含 `line_shapes` 行骨架直方图（`<w>` 词、`<n>` 数字）和 `json_text_paths` 文本路径（数组下标折叠为 `*`，可直接作为 `json_paths` 规则）；目录详情包含扩展名分布与最多 3 个文本扩展名、每个 2 个文件的 `peeks`。
+
 [示例目录](https://github.com/kaecho/attx/tree/main/profiles/examples)含 KiriKiri KAG、INI 和通用 JSON 规则。它们不是所有版本和脚本语法都经过验证的通用插件。
 
 ## 完整键参考
@@ -83,7 +85,7 @@ attx profile test --profile './inferred.toml' --input './script.scn' --roundtrip
 
 验证包含提取试验和将原文当作译文的 decoded-text 无损 no-op 往返。这可发现结构变化，不证明源编码字节完全一样，不证明模型理解语法，更不证明将来任意译文都能安全嵌入。Profile 输出为 UTF-8，行模式保留源换行。含复杂转义的脚本必须使用真正懂其语法的适配器。
 
-`run` 在没有专用/保存 Profile/auto 匹配且未禁止推断、未跳过翻译时，会将通过验证的规则放在 `<workspace>/profile.toml`，后续运行复用。`--no-infer` 禁止自动付费推断。已有 workspace Profile 的字节内容不能偷偷更换；规则改变需要新工作区。
+`run` 在没有专用/保存 Profile/auto 匹配且未禁止推断、未跳过翻译时，会将通过验证的规则放在 `<workspace>/profile.toml`，后续运行复用。`--no-infer` 禁止自动付费推断。`run --infer` 与 `init --infer` 相反：当探测会落到通用 `auto` 时，先强制做一次验证过的推断；失败则回退 `auto`，并在 `profile_inference` 里报 `status="fallback"` 与错误。专用适配器和已保存 Profile 仍然优先。已有 workspace Profile 的字节内容不能偷偷更换；规则改变需要新工作区。
 
 二进制、不可读、有损解码、模糊或不能可靠定位的语法会停止，并提示使用外部提取器和 JSONL。推断失败不是授权代理生成代码直接改输入。
 

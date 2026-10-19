@@ -32,7 +32,7 @@ clap の引数解析エラーも 2 を使うため、JSON 結果がある不完�
 | `doctor [--ping] [--json]` | 通常は人間向け出力。json は llm、ping、adapters、saved_profiles、status。llm は configured、選択 name/model/base_url または error。キーは出さない。ping は小さな API 要求で、結果文字列を確認する |
 | `formats` | formats[]。各項目は id、label、extensions、input。saved custom は profile path も持つ |
 | `detect --input <path>` | engine、content_root、label、profile。専用、saved profile、auto の順。detect に --engine はない |
-| `analyze --input <path> [--src ja]` | builtin_detect、saved_profile_detect、details、next_steps。file は size、binary/container、encoding、行数、JSON shape、sample。directory は files、extensions、sample_files、peek |
+| `analyze --input <path> [--src ja]` | builtin_detect、saved_profile_detect、details、next_steps。file は size、binary/container、encoding、行数、JSON shape、json_text_paths、line_shapes、sample。directory は files、extensions、sample_files、peeks（最大3拡張子×2ファイル） |
 
 `doctor` は存在しなければカレントディレクトリに setting.example.toml を作ります。detect/analyze はモデルを呼ばず、sample 内の指示を実行しません。
 
@@ -49,7 +49,7 @@ clap の引数解析エラーも 2 を使うため、JSON 結果がある不完�
 report:
 
 - new: `written`、`next`、`status`。
-- infer: `profile`、`engine`、`units`、`attempts`、`output`、`roundtrip`、`overwrite`、`status`。
+- infer: `profile`、`engine`、`units`、`attempts`、`coverage{files_scanned,files_with_units}`、`output`、`roundtrip`、`overwrite`、`status`。
 - test: `profile`、`engine`、`units`、`sample[{location,role,text}]`、`detects`。roundtrip が実行されれば `{ok,output_files,outputs}`、失敗は `{ok:false,error}`。
 - save: `saved`、`status`。
 - list: `profiles[{name,engine,label,extensions,path}]`、`dirs`。
@@ -62,10 +62,10 @@ report:
 
 ```text
 init --input <path> [--engine <id>] [--profile <path-or-name>]
-     [--src ja] [--dst zh] [--workspace <dir>]
+     [--src ja] [--dst zh] [--workspace <dir>] [--infer]
 ```
 
-workspace を作成または同一性を確認して再利用します。report は `workspace`、`status`。engine は形式一覧の ID、保存 profile は `custom:<name>` です。profile を使うと workspace に snapshot をコピーし、digest で内容を固定します。コピー後に overwrite を手で切り替えることも拒否します。入力・engine・語向・profile を別条件へ変更して既存 DB を借用することはできません。
+workspace を作成または同一性を確認して再利用します。report は `workspace`、`profile_inference`（推論実行時のみ）、`status`。`--infer` は profile 未指定かつ汎用 `auto` に落ちる場合だけ、有界の宣言的ルール推論を 1 回実行します。専用アダプターと保存済み Profile は対象外です。engine は形式一覧の ID、保存 profile は `custom:<name>` です。profile を使うと workspace に snapshot をコピーし、digest で内容を固定します。コピー後に overwrite を手で切り替えることも拒否します。入力・engine・語向・profile を別条件へ変更して既存 DB を借用することはできません。
 
 ### `extract`
 
@@ -98,8 +98,8 @@ translate は pending と機械レビュー対象を処理し、retry-passthroug
 | `planned` | 選ばれた初期対象数 |
 | `repaired` | 初期レビュー問題から解決した数 |
 | `repair_rounds` | 実行した修復パス数 |
-| `unresolved` | 最後に残る修復対象数 |
-| `normalized_lines` | Chinese 正規化で変わった行の signal |
+| `unresolved` | 実行後に書き込み不能な単位数（passthrough、構造失敗、対象文字残留）。advisory の namebox ずれは含まない |
+| `normalized_lines` | 改行と Chinese 正規化で変わった行の signal |
 | `review` | 最終機械レビュー |
 
 pending と review の問題は重複し得るため、全値を足して単純な総件数にしません。モデル retry と repair の上限は[設定](configuration.md)にあります。
@@ -110,7 +110,7 @@ pending と review の問題は重複し得るため、全値を足して単純�
 writeback --workspace <dir> [--dry-run] [--no-learn] [--allow-partial]
 ```
 
-source/hash と anchor を検査し、正規化・固定 slot reflow・完全性検査の後に書きます。通常翻訳依頼の書き戻しに追加 permission はありません。未解決があれば既定で block します。allow-partial はユーザーが未解決原文を残す output を認めた場合のみ使用します。no-learn は書き戻し後の経験まとめを省略します。
+source/hash と anchor を検査し、正規化・固定 slot reflow・完全性検査の後に書きます。通常翻訳依頼の書き戻しに追加 permission はありません。未解決があれば既定で block します。block 条件は pending、passthrough、構造検査失敗のみで、`review.namebox_mismatch` と `review.residual_latin` は advisory として writeback を止めません。`skipped_note` は pending / passthrough / 構造失敗の内訳を示します。allow-partial はユーザーが未解決原文を残す output を認めた場合のみ使用します。no-learn は書き戻し後の経験まとめを省略します。
 
 | フィールド | 意味 |
 |---|---|
@@ -120,7 +120,7 @@ source/hash と anchor を検査し、正規化・固定 slot reflow・完全性
 | `dry_run` | true なら output/cache を変更しない |
 | `status` | ok、blocked、needs_attention |
 | `skipped_note` | 未適用理由 |
-| `units_skipped` | pending/invalid などで未適用の数 |
+| `units_skipped` | pending、passthrough、構造検査失敗で未適用の数 |
 | `normalized_lines` | Chinese 正規化 signal |
 | `reflowed_units` | RMMZ fixed slot の再配置数 |
 | `overflow_lines` | 表示幅からはみ出す行の signal |
@@ -135,10 +135,10 @@ backup 失敗時は置換しません。per-file atomic であり、directory tr
 run --input <path> [--engine <id>] [--profile <path-or-name>]
     [--src ja] [--dst zh] [--workspace <dir>] [--limit N]
     [--no-translate] [--no-writeback] [--glossary | --no-glossary]
-    [--no-infer] [--allow-partial]
+    [--no-infer | --infer] [--allow-partial]
 ```
 
-init/extract/任意 glossary/translate/有限 repair/writeback を統合します。`no-translate` は抽出と確認のみで通常 writeback も行いません。`no-writeback` は cache まで。`no-infer` は有料 profile 推論だけを止め、auto は有効です。`glossary` は設定が無効でも有料構築、`no-glossary` は単発無効で、両者は競合します。`limit` は全量完了の意味ではなく、sample は通常 `no-writeback` と使います。run に `dry-run`、`retry-passthrough`、`no-learn` はありません。
+init/extract/任意 glossary/translate/有限 repair/writeback を統合します。`no-translate` は抽出と確認のみで通常 writeback も行いません。`no-writeback` は cache まで。`no-infer` は有料 profile 推論だけを止め、auto は有効です。`infer` は汎用 auto に落ちる入力で宣言的ルール推論を強制し、失敗時は auto に戻して `profile_inference.status="fallback"` と error を報告します。`glossary` は設定が無効でも有料構築、`no-glossary` は単発無効で、両者は競合します。`limit` は全量完了の意味ではなく、sample は通常 `no-writeback` と使います。run に `dry-run`、`retry-passthrough`、`no-learn` はありません。
 
 report は `workspace`、`extracted`、`extract`、`status` と、実行された `profile_inference`、`glossary`、`translate`、`review`、`writeback` です。glossary 通常失敗は `error` を記録し、致命的認証エラーは止まります。最終状態は実際の writeback/translation の blocked または needs_attention を反映します。
 
@@ -151,7 +151,7 @@ review --workspace <dir>
 
 status は `engine`、`game_path`、`source_lang`、`target_lang`、`total`、`translated`、`pending`、`passthrough`、`domains{domain:{total,translated}}`。
 
-review は `total`、`translated`、`pending`、`passthrough`、`glossary` と `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch`。各 bucket は `{count,sample:[{location,unit_id,detail}]}`、最大 40 sample。kana 分類は排他的、他 bucket と集約 residual は重複し得ます。review はモデルを呼ばず、警告があるだけで通常の操作終了コードを変えるものではありません。
+review は `total`、`translated`、`pending`、`passthrough`、`glossary` と `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch`、`residual_latin`。各 bucket は `{count,sample:[{location,unit_id,detail}]}`、最大 40 sample。kana 分類は排他的、他 bucket と集約 residual は重複し得ます。`namebox_mismatch` と `residual_latin` は advisory で、repair 対象にはなるが writeback を止めません。review はモデルを呼ばず、警告があるだけで通常の操作終了コードを変えるものではありません。
 
 ## JSONL コマンド
 

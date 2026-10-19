@@ -45,7 +45,7 @@ Returns `engine`, `content_root`, `label`, and `profile` (null without a profile
 
 ### `analyze --input <path> [--src ja]`
 
-Returns input/language context, `builtin_detect`, `saved_profile_detect`, `details`, and `next_steps`. File details can include size, binary/container clues, encoding/lossiness, line counts, source-language line counts, JSON shape, and `sample_head`. Samples are capped at 40 nonempty lines and 160 characters per line; JSON top keys at 20. Directory details include files, extension counts, at most 15 sample paths, and a representative peek. Directory analysis scans to depth 6 and is not a full extraction contract.
+Returns input/language context, `builtin_detect`, `saved_profile_detect`, `details`, and `next_steps`. File details can include size, binary/container clues, encoding/lossiness, line counts, source-language line counts, JSON shape, `json_text_paths`, `line_shapes`, and `sample_head`. `json_text_paths` lists slash paths whose string leaves need translation, with array positions collapsed to `*`, so the value can be used directly as a `json_paths` rule; `line_shapes` is a `<w>`/`<n>` skeleton histogram with counts and samples. Samples are capped at 40 nonempty lines and 160 characters per line; JSON top keys at 20; at most 20 text paths and 12 shapes. Directory details include files, extension counts, at most 15 sample paths, and `peeks` for up to three text extensions with two files each. Directory analysis scans to depth 6 and is not a full extraction contract.
 
 ## Profiles
 
@@ -57,7 +57,7 @@ Returns input/language context, `builtin_detect`, `saved_profile_detect`, `detai
 | `profile save` | Required `--profile <path>`; optional `--force` |
 | `profile list` | No command-specific options |
 
-`new` returns `written`, `next`, `status` and refuses an existing output. `infer` costs requests and returns `profile`, `engine`, `units`, `attempts`, `output`, `roundtrip=true`, `overwrite=false`, `status` when validated. It permits at most three attempts and never overwrites existing output or executes generated code.
+`new` returns `written`, `next`, `status` and refuses an existing output. `infer` costs requests and returns `profile`, `engine`, `units`, `attempts`, `coverage`, `output`, `roundtrip=true`, `overwrite=false`, `status` when validated. `coverage` reports `files_scanned` and `files_with_units`. It permits at most three attempts and never overwrites existing output or executes generated code.
 
 `test` returns `profile`, `engine`, `units`, `sample[{location,role,text}]`, and `detects`. `--limit` caps displayed samples with effective minimum 1; it does not limit extraction. `--roundtrip` adds in-memory render details with `ok`, `output_files`, and output samples or an error. A false nested roundtrip result must not be ignored because the process itself returned successfully.
 
@@ -65,9 +65,9 @@ Returns input/language context, `builtin_detect`, `saved_profile_detect`, `detai
 
 ## Workspace pipeline
 
-### `init --input <path> [--engine <id>] [--profile <path-or-name>] [--src ja] [--dst zh] [--workspace <dir>]`
+### `init --input <path> [--engine <id>] [--profile <path-or-name>] [--src ja] [--dst zh] [--workspace <dir>] [--infer]`
 
-Registers or reopens a workspace. `--profile` selects a profile and takes precedence when supplied; otherwise `--engine` forces an adapter, including saved `custom:<name>`. Omitted selection uses detection. Returns `workspace` and `status`. Input/engine/language/profile identity cannot change in an existing workspace.
+Registers or reopens a workspace. `--profile` selects a profile and takes precedence when supplied; otherwise `--engine` forces an adapter, including saved `custom:<name>`. Omitted selection uses detection. `--infer` spends one bounded inference run to write and validate a declarative profile when none is supplied and detection would fall back to the generic `auto` adapter; dedicated adapters and saved profiles are left alone. Returns `workspace`, `profile_inference` (null unless inference ran), and `status`. Input/engine/language/profile identity cannot change in an existing workspace.
 
 ### `extract --workspace <dir> [--no-knowledge]`
 
@@ -85,9 +85,9 @@ Targets the shared review candidate set: pending, passthrough, residual source, 
 
 Normalizes in memory, checks completeness/source identity, renders/stages artifacts, checks backups, and replaces per file. `--dry-run` plans only. `--no-learn` skips this invocation's post-writeback experience summary. `--allow-partial` writes valid entries and retains/restores original source for unresolved entries; incomplete output remains exit 2.
 
-Default incomplete writeback reports blocked with no paths/files and makes no output/cache mutation. Actual successful writeback persists normalized/reflowed cache text. There is no mandatory interactive writeback permission prompt.
+Default incomplete writeback reports blocked with no paths/files and makes no output/cache mutation. Blocking is limited to pending units, passthrough entries, and units that fail structural checks; `review.namebox_mismatch` and `review.residual_latin` are advisory and do not block. `skipped_note` splits the skipped count into pending, passthrough, and failed structural checks. Actual successful writeback persists normalized/reflowed cache text. There is no mandatory interactive writeback permission prompt.
 
-### `run --input <path> [--engine <id>] [--profile <path-or-name>] [--src ja] [--dst zh] [--workspace <dir>] [--limit N] [--no-translate] [--no-writeback] [--glossary | --no-glossary] [--no-infer] [--allow-partial]`
+### `run --input <path> [--engine <id>] [--profile <path-or-name>] [--src ja] [--dst zh] [--workspace <dir>] [--limit N] [--no-translate] [--no-writeback] [--glossary | --no-glossary] [--no-infer | --infer] [--allow-partial]`
 
 Runs detection/init, extraction, optional glossary, translation/repair, and optional writeback under one workspace lock. Reuses copied profiles; unmatched safe text can use bounded paid profile inference.
 
@@ -95,6 +95,7 @@ Runs detection/init, extraction, optional glossary, translation/repair, and opti
 - `--no-writeback` retains translated cache without artifact output.
 - `--glossary` forces optional paid construction; `--no-glossary` suppresses it. These two conflict.
 - `--no-infer` suppresses paid profile inference, not local Auto detection.
+- `--infer` forces validated declarative rule inference when the input would otherwise use the generic `auto` adapter; a failed attempt falls back to `auto` and reports `profile_inference.status="fallback"` with the error.
 - `--allow-partial` deliberately permits incomplete artifacts with exit 2.
 
 Returns `workspace`, `extracted`, `extract`, `status`, and each executed stage such as `profile_inference`, `glossary`, `translate`, `review`, and `writeback`. Optional ordinary glossary errors appear under `glossary.error`; fatal credentials/configuration errors stop the run. `--limit N --no-writeback` is a trial, not a full-run success.
@@ -123,8 +124,8 @@ Used by `translate`, `repair`, and `translate-jsonl`; `run.translate` embeds it.
 | `planned` | Units selected within the limit |
 | `repaired` | Initially flagged units successfully repaired |
 | `repair_rounds` | Extra/explicit repair passes executed |
-| `unresolved` | Mechanical repair-candidate count after work |
-| `normalized_lines` | Lines changed by normalization on this path |
+| `unresolved` | Unwritable units after work (passthrough, structural failure, target-script residue); advisory namebox drift is excluded |
+| `normalized_lines` | Line-break and Chinese-target normalization changes on this path |
 | `review` | Full mechanical review report |
 
 Standalone JSONL uses no workspace repair passes, so `repaired` and `repair_rounds` are zero. Its output file can still contain unresolved records.
@@ -136,9 +137,9 @@ Standalone JSONL uses no workspace repair passes, so `repaired` and `repair_roun
 | `files`, `units_applied`, `paths` | Written artifacts/applied units; planned values during dry-run |
 | `dry_run` | True means no artifact or normalized-cache write |
 | `status` | `ok`, `blocked`, or `needs_attention` |
-| `skipped_note` | Explanation when units cannot be applied |
-| `units_skipped` | Pending/invalid units omitted from the applied subset |
-| `normalized_lines` | Chinese-target normalization signal |
+| `skipped_note` | Explanation when units cannot be applied; splits pending, passthrough, and failed structural checks |
+| `units_skipped` | Pending, passthrough, or invalid units omitted from the applied subset |
+| `normalized_lines` | Line-break and Chinese-target normalization changes |
 | `reflowed_units` | RMMZ fixed-slot layout changes |
 | `overflow_lines` | Unavoidable layout overflow, not silently truncated text |
 | `review` | Mechanical report using normalized candidate text |
@@ -148,7 +149,7 @@ Read `dry_run` with the counts; the same path array can describe a plan rather t
 
 ## Review report fields
 
-Each bucket is `{count, sample:[{location,unit_id,detail}]}`, with at most 40 samples. Buckets are `residual_source`, `kana_edge`, `kana_mixed`, `kana_untranslated`, `identical`, `control_loss`, and `namebox_mismatch`. The kana buckets are disjoint, but aggregates and other categories overlap. Do not sum them as a unique-unit count.
+Each bucket is `{count, sample:[{location,unit_id,detail}]}`, with at most 40 samples. Buckets are `residual_source`, `kana_edge`, `kana_mixed`, `kana_untranslated`, `identical`, `control_loss`, `namebox_mismatch`, and `residual_latin`. The kana buckets are disjoint, but aggregates and other categories overlap. `namebox_mismatch` and `residual_latin` are advisory: they drive `repair` but never block writeback. Do not sum them as a unique-unit count.
 
 `glossary` contains `active_terms`, `terms_seen`, `terms_fully_applied`, and `violations[{src,dst,occurrences,applied}]`. These substring warnings are advisory. Repair selection is not limited to the visible sample arrays. Full text requires JSONL export.
 

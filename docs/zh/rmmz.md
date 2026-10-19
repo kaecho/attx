@@ -47,7 +47,7 @@ RMMZ 事件中的 `401` 槽位数量及命令列表索引保持不变。工具�
 
 ## 试玩检查
 
-查看 `review.namebox_mismatch` 和 writeback 的 `reflowed_units`、`overflow_lines`。即使 status 为 ok，溢出也要报告并在游戏里检查。只修剪输出文件会造成缓存与游戏不一致，应经 JSONL 修改译文再导入和写回。
+查看 `review.namebox_mismatch` 和 writeback 的 `reflowed_units`、`overflow_lines`。namebox_mismatch 是提示项，不拦截写回。即使 status 为 ok，溢出也要报告并在游戏里检查。只修剪输出文件会造成缓存与游戏不一致，应经 JSONL 修改译文再导入和写回。
 
 还应检查菜单、选项宽度、字体可显示性、变量替换、角色称呼、插件逻辑名称，以及游戏读取翻译文件是否成功。这些需要实际运行游戏，机械 review 不证明全部通过。
 

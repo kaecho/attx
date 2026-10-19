@@ -82,7 +82,9 @@ fn writeback_cues(
     units: &[TextUnit],
     translations: &BTreeMap<String, Translation>,
 ) -> Result<Vec<OutputFile>> {
-    let mut cues = parse_blocks(&read_utf8(input)?);
+    let source = read_utf8(input)?;
+    let crlf = source.contains("\r\n");
+    let mut cues = parse_blocks(&source);
     for u in units {
         let Some(tr) = translations.get(&u.id) else {
             continue;
@@ -99,13 +101,14 @@ fn writeback_cues(
         block.truncate(ti + 1);
         block.extend(tr.translation_lines.iter().cloned());
     }
+    let sep = if crlf { "\r\n" } else { "\n" };
     let body = cues
         .blocks
         .iter()
-        .map(|b| b.join("\n"))
+        .map(|b| b.join(sep))
         .collect::<Vec<_>>()
-        .join("\n\n")
-        + "\n";
+        .join(&format!("{sep}{sep}"))
+        + sep;
     Ok(vec![OutputFile::text(
         output_sibling(input, target_lang, ext),
         body,
@@ -208,6 +211,7 @@ impl FormatAdapter for LrcAdapter {
         translations: &BTreeMap<String, Translation>,
     ) -> Result<Vec<OutputFile>> {
         let body = read_utf8(input)?;
+        let crlf = body.contains("\r\n");
         let mut lines: Vec<String> = body
             .lines()
             .map(|l| l.trim_end_matches('\r').to_string())
@@ -226,8 +230,9 @@ impl FormatAdapter for LrcAdapter {
             let prefix = slot.get(..prefix_len).unwrap_or("").to_string();
             *slot = format!("{prefix}{}", tr.translation_lines.join(" "));
         }
-        let mut out = lines.join("\n");
-        out.push('\n');
+        let sep = if crlf { "\r\n" } else { "\n" };
+        let mut out = lines.join(sep);
+        out.push_str(sep);
         Ok(vec![OutputFile::text(
             output_sibling(input, target_lang, "lrc"),
             out,
@@ -296,6 +301,25 @@ mod tests {
             body,
             "1\n00:00:01,000 --> 00:00:03,000\n中文字幕\n\n2\n00:00:04,000 --> 00:00:05,000\n[music]\n"
         );
+    }
+
+    #[test]
+    fn crlf_subtitles_keep_their_line_ending() {
+        let dir = super::super::test_dir("srtcrlf");
+        let input = dir.join("crlf.srt");
+        std::fs::write(
+            &input,
+            "1\r\n00:00:01,000 --> 00:00:03,000\r\nこんにちは\r\n\r\n",
+        )
+        .unwrap();
+        let units = SrtAdapter.extract(&input, "ja").unwrap();
+        assert_eq!(units.len(), 1);
+        let outs = SrtAdapter
+            .writeback(&input, "zh", &units, &fake_tr(&units))
+            .unwrap();
+        let body = String::from_utf8(outs[0].bytes.clone()).unwrap();
+        assert!(body.contains("\r\n中文字幕\r\n"), "{body:?}");
+        assert!(!body.replace("\r\n", "").contains('\n'), "no bare LF: {body:?}");
     }
 
     #[test]

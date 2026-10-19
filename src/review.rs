@@ -55,6 +55,8 @@ pub struct Report {
     pub identical: Bucket,
     pub control_loss: Bucket,
     pub namebox_mismatch: Bucket,
+    /// Source Latin text left inside a CJK translation. Advisory only.
+    pub residual_latin: Bucket,
 }
 
 pub fn review(workspace: &Path) -> Result<Report> {
@@ -88,6 +90,7 @@ pub fn inspect(
     let mut kana_untranslated = Vec::new();
     let mut identical = Vec::new();
     let mut control_loss = Vec::new();
+    let mut residual_latin = Vec::new();
     let mut passthrough = 0usize;
     let mut translated = 0usize;
     let source = quality::language(source_lang);
@@ -142,6 +145,16 @@ pub fn inspect(
         if let Some(detail) = detail {
             residual.push(hit(u, detail));
         }
+        if !tr.passthrough && matches!(target.as_str(), "zh" | "ja" | "ko") && source != target {
+            let fragments = latin_residue_fragments(&dst, &src);
+            if !fragments.is_empty() {
+                residual_latin.push(Hit {
+                    location: u.location.clone(),
+                    unit_id: u.id.clone(),
+                    detail: format!("translation retains source Latin text: {}", fragments.join(", ")),
+                });
+            }
+        }
         let map = quality::protected_tokens(&u.original_lines, preserve);
         let lost = preserve::lost_token_count(lines, &map);
         if lost > 0 {
@@ -171,9 +184,101 @@ pub fn inspect(
         identical: Bucket::from_hits(identical),
         control_loss: Bucket::from_hits(control_loss),
         namebox_mismatch: Bucket::from_hits(namebox_mismatch),
+        residual_latin: Bucket::from_hits(residual_latin),
     }
 }
 
+/// LinguaGacha-style foreign residue: aggregate Latin-word runs in a CJK
+/// translation, exempt isolated graphemes and 2–4 uppercase acronyms, and keep
+/// only fragments that also occur in the source (so translator-invented product
+/// names are not reported). Advisory only — never blocks writeback.
+fn latin_residue_fragments<'a>(dst: &'a str, src: &str) -> Vec<&'a str> {
+    let src_lower = src.to_ascii_lowercase();
+    let src_bytes = src_lower.as_bytes();
+    let mut fragments: Vec<&str> = Vec::new();
+    for run in dst.split(|c: char| !c.is_ascii_alphabetic()) {
+        // ASCII-only run, so byte length is grapheme length.
+        if run.len() < 2 || (run.len() <= 4 && run.bytes().all(|b| b.is_ascii_uppercase())) {
+            continue;
+        }
+        let bytes = run.as_bytes();
+        if !src_bytes.windows(bytes.len()).any(|window| window.eq_ignore_ascii_case(bytes)) {
+            continue;
+        }
+        if !fragments.iter().any(|seen| seen.eq_ignore_ascii_case(run)) {
+            fragments.push(run);
+            if fragments.len() == 3 {
+                break;
+            }
+        }
+    }
+    fragments
+}
+
+/// Japanese shinjitai/kyūjitai and Chinese simplified/traditional variants that
+/// a translator may legitimately use in place of the namebox spelling. Folding
+/// is only for comparison; writeback never rewrites the translation.
+fn fold_variant(c: char) -> char {
+    match c {
+        '汚' => '污',
+        '櫻' | '桜' => '樱',
+        '種' => '种',
+        '實' => '实',
+        '寶' => '宝',
+        '國' => '国',
+        '廣' => '广',
+        '舊' => '旧',
+        '眞' => '真',
+        '劍' => '剑',
+        '龍' => '龙',
+        '鳳' => '凤',
+        '戰' => '战',
+        '鬥' => '斗',
+        '氣' => '气',
+        '樂' => '乐',
+        '藥' => '药',
+        '髮' => '发',
+        '齒' => '齿',
+        '歲' => '岁',
+        '萬' => '万',
+        '與' => '与',
+        '為' => '为',
+        '會' => '会',
+        '來' => '来',
+        '個' => '个',
+        '們' => '们',
+        '時' => '时',
+        '說' => '说',
+        '對' => '对',
+        '現' => '现',
+        '懷' => '怀',
+        '爺' => '爷',
+        '譯' => '译',
+        '該' => '该',
+        '難' => '难',
+        '覺' => '觉',
+        '愛' => '爱',
+        '開' => '开',
+        '這' => '这',
+        '麼' => '么',
+        '嗎' => '吗',
+        '妳' => '你',
+        '裡' | '裏' => '里',
+        '隣' => '邻',
+        '靜' => '静',
+        '淨' => '净',
+        '燒' => '烧',
+        other => other,
+    }
+}
+
+/// Fold variants and drop whitespace so `そら ♥ 桜月` and `空♥樱月` compare.
+fn fold_name(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(fold_variant)
+        .collect()
+}
 
 fn namebox_hits(
     units: &[TextUnit],
@@ -188,15 +293,22 @@ fn namebox_hits(
             continue;
         }
         let src_name = nb.joined_text();
-        let dst_name = nb_tr.translation_lines.join("\n");
+        // RMMZ reflow can split a name across 401 slots, so compare against the
+        // joined translation rather than individual physical lines.
+        let dst_name = nb_tr.translation_lines.concat();
         if src_name.trim().is_empty() || dst_name.trim().is_empty() {
+            continue;
+        }
+        let folded_src = fold_name(&src_name);
+        let folded_dst = fold_name(&dst_name);
+        if folded_src.is_empty() || folded_dst.is_empty() {
             continue;
         }
         for u in units {
             if u.id == nb.id || u.context != nb.context {
                 continue;
             }
-            if !u.original_lines.iter().any(|l| l.contains(&src_name)) {
+            if !u.original_lines.iter().any(|l| fold_name(l).contains(folded_src.as_str())) {
                 continue;
             }
             let Some(tr) = translations.get(&u.id) else {
@@ -205,7 +317,8 @@ fn namebox_hits(
             if tr.passthrough {
                 continue;
             }
-            if !tr.translation_lines.iter().any(|l| l.contains(&dst_name)) {
+            let joined = tr.translation_lines.concat();
+            if !fold_name(&joined).contains(folded_dst.as_str()) {
                 hits.push(Hit {
                     location: u.location.clone(),
                     unit_id: u.id.clone(),
@@ -231,8 +344,30 @@ fn hit(unit: &TextUnit, detail: &str) -> Hit {
     }
 }
 
+/// Units that cannot be written: the cached text is a passthrough placeholder,
+/// fails structural/quality checks, or still carries target-script residue.
+/// Namebox drift is deliberately absent — it is advisory and must never block a
+/// writeback (a name may legitimately be rendered as a pronoun or split by
+/// RMMZ message reflow).
+pub fn blocking_unit_ids(
+    units: &[TextUnit],
+    translations: &BTreeMap<String, Translation>,
+    source_lang: &str,
+    target_lang: &str,
+    preserve: &PreserveSet,
+) -> BTreeSet<String> {
+    units.iter().filter_map(|unit| {
+        let tr = translations.get(&unit.id)?;
+        (tr.passthrough || quality::check_translation(
+            unit, &tr.translation_lines, source_lang, target_lang, preserve,
+        ).is_err() || quality::kana_kind(&tr.translation_lines, target_lang, preserve).is_some())
+            .then(|| unit.id.clone())
+    }).collect()
+}
+
 /// Uncapped repair candidates. Glossary substring misses remain advisory because
 /// inflected target forms can be correct without containing the exact glossary text.
+/// Namebox drift is included so `repair` can still target it.
 pub fn repair_unit_ids(
     units: &[TextUnit],
     translations: &BTreeMap<String, Translation>,
@@ -241,13 +376,7 @@ pub fn repair_unit_ids(
     target_lang: &str,
     preserve: &PreserveSet,
 ) -> BTreeSet<String> {
-    let mut ids: BTreeSet<String> = units.iter().filter_map(|unit| {
-        let tr = translations.get(&unit.id)?;
-        (tr.passthrough || quality::check_translation(
-            unit, &tr.translation_lines, source_lang, target_lang, preserve,
-        ).is_err() || quality::kana_kind(&tr.translation_lines, target_lang, preserve).is_some())
-            .then(|| unit.id.clone())
-    }).collect();
+    let mut ids = blocking_unit_ids(units, translations, source_lang, target_lang, preserve);
     ids.extend(namebox_hits(units, translations).into_iter().map(|hit| hit.unit_id));
     ids
 }
@@ -390,6 +519,92 @@ mod tests {
         let report = inspect(&units, &translations, &Glossary::default(), "en", "zh", PreserveSet::core());
         assert_eq!(report.control_loss.count, 1);
         assert!(report.control_loss.sample[0].detail.contains("1/3"));
+    }
+
+    #[test]
+    fn namebox_drift_is_repair_only_not_blocking() {
+        let units = vec![
+            unit("nb", "namebox", "map1", "アレイ"),
+            unit("d1", "dialogue", "map1", "アレイは村を出た"),
+        ];
+        let translations = BTreeMap::from([
+            ("nb".into(), tr("nb", "艾蕾", false)),
+            ("d1".into(), tr("d1", "她离开了村子", false)),
+        ]);
+        let blocking = blocking_unit_ids(&units, &translations, "ja", "zh", PreserveSet::core());
+        assert!(blocking.is_empty(), "advisory namebox drift must not block writeback");
+        let repair = repair_unit_ids(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
+        assert_eq!(repair, BTreeSet::from(["d1".to_string()]));
+        let report = inspect(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
+        assert_eq!(report.namebox_mismatch.count, 1, "drift is still reported");
+    }
+
+    #[test]
+    fn namebox_matches_across_reflow_split_lines() {
+        let units = vec![
+            unit("nb", "namebox", "map1", "アレイ"),
+            unit("d1", "dialogue", "map1", "アレイは村を出た"),
+        ];
+        let mut dialogue = tr("d1", "艾蕾", false);
+        dialogue.translation_lines.push("离开了村子".into());
+        let translations = BTreeMap::from([
+            ("nb".into(), tr("nb", "艾蕾", false)),
+            ("d1".into(), dialogue),
+        ]);
+        let report = inspect(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
+        assert_eq!(report.namebox_mismatch.count, 0, "name split by reflow still matches");
+    }
+
+    #[test]
+    fn namebox_variant_folding_matches_simplified_forms() {
+        let units = vec![
+            unit("nb", "namebox", "map1", "矢理汚"),
+            unit("nb2", "namebox", "map2", "桜月"),
+            unit("d1", "dialogue", "map1", "矢理汚は笑った"),
+            unit("d2", "dialogue", "map2", "そら♥桜月の大好きな乳首虐められてイケ♥"),
+        ];
+        let translations = BTreeMap::from([
+            ("nb".into(), tr("nb", "矢理污", false)),
+            ("nb2".into(), tr("nb2", "樱月", false)),
+            ("d1".into(), tr("d1", "矢理污笑了", false)),
+            ("d2".into(), tr("d2", "来吧♥你最喜欢的乳头被玩弄着……", false)),
+        ]);
+        let report = inspect(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
+        assert_eq!(report.namebox_mismatch.count, 1, "only the intentionally pronominal rendering drifts");
+        assert_eq!(report.namebox_mismatch.sample[0].unit_id, "d2");
+    }
+
+    #[test]
+    fn pending_and_passthrough_still_block() {
+        let units = vec![
+            unit("pending", "dialogue", "m", "こんにちは"),
+            unit("pass", "dialogue", "m", "こんばんは"),
+        ];
+        let translations = BTreeMap::from([("pass".into(), tr("pass", "こんばんは", true))]);
+        let blocking = blocking_unit_ids(&units, &translations, "ja", "zh", PreserveSet::core());
+        assert_eq!(blocking, BTreeSet::from(["pass".to_string()]), "passthrough blocks; pending is counted separately");
+        let units_with_bad = vec![unit("bad", "dialogue", "m", "こんにちは")];
+        let bad = BTreeMap::from([("bad".into(), tr("bad", "こんにちは", false))]);
+        assert_eq!(
+            blocking_unit_ids(&units_with_bad, &bad, "ja", "zh", PreserveSet::core()),
+            BTreeSet::from(["bad".to_string()])
+        );
+    }
+
+    #[test]
+    fn latin_residue_is_advisory_and_exempts_acronyms() {
+        let units = vec![
+            unit("d", "dialogue", "m", "The ancient sword"),
+            unit("a", "dialogue", "m", "HP restore"),
+        ];
+        let translations = BTreeMap::from([
+            ("d".into(), tr("d", "古老的剑 sword", false)),
+            ("a".into(), tr("a", "HP 恢复", false)),
+        ]);
+        let report = inspect(&units, &translations, &Glossary::default(), "en", "zh", PreserveSet::core());
+        assert_eq!(report.residual_latin.count, 1);
+        assert_eq!(report.residual_latin.sample[0].unit_id, "d");
+        assert!(blocking_unit_ids(&units, &translations, "en", "zh", PreserveSet::core()).is_empty());
     }
 
     #[test]

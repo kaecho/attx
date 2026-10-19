@@ -84,7 +84,7 @@ attx writeback --workspace .attx-input
 
 | 症状 | 確認と対処 |
 |---|---|
-| writeback blocked | pending/invalid/residual を解決する。追加 permission の不足ではない |
+| writeback blocked | pending/passthrough/構造不正を解決する。namebox_mismatch と residual_latin は advisory で block 要因ではない。追加 permission の不足ではない |
 | 部分 output が必要 | ユーザーが原文残留を受け入れた場合のみ --allow-partial。有効 subset を書き、exit2 を保持 |
 | backup failure | permission、disk、backup path が普通 file か確認。backup を勝手に削除して上書きしない |
 | dry-run 後に file がない | 予定だけの仕様。実 writeback して paths を読む |

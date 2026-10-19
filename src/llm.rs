@@ -709,9 +709,8 @@ fn parse_model_json(raw: &str) -> Result<Vec<ModelItem>> {
 
 fn accept_lines(unit: &TextUnit, masked: Vec<String>, map: &[(String, String)], source: &str, target: &str, preserve: &PreserveSet) -> Result<Vec<String>> {
     preserve::check_masked_tokens(&masked, map)?;
-    let lines = masked.iter().map(|line| preserve::unmask_line(line, map)).collect();
-    let mut lines = quality::sanitize_lines(unit, lines);
-    quality::normalize_target_lines(&mut lines, target, preserve);
+    let mut lines: Vec<String> = masked.iter().map(|line| preserve::unmask_line(line, map)).collect();
+    quality::normalize_lines(unit, &mut lines, target, preserve);
     quality::check_translation(unit, &lines, source, target, preserve)?;
     Ok(lines)
 }

@@ -64,7 +64,7 @@ run が detect/init/extract、設定で opt-in した glossary、translate、rev
 - `--no-writeback`: ユーザーが訳 cache のみを求めた場合。
 - `--no-translate`: 抽出と診断だけの場合。
 - `--limit N`: sample/限額依頼の場合。全量完了とは表示しない。
-- `--no-infer`: 有料 profile 推論を禁止する場合。auto の本機探測は有効。
+- `--no-infer`: 有料 profile 推論を禁止する場合。auto の本機探測は有効。逆に `--infer` は汎用 auto に落ちる入力へ宣言的推論を 1 回強制し、失敗時は auto に戻して `profile_inference` に fallback を報告します。
 - `--no-glossary`: 今回の追加有料語彙構築を止める場合。
 - `--allow-partial`: ユーザーが未解決原文を含む subset 出力を受け入れた場合だけ。
 
@@ -86,7 +86,7 @@ attx review --workspace .attx-novel
 attx repair --workspace .attx-novel
 ```
 
-review の residual_source、kana_edge/mixed/untranslated、identical、control_loss、namebox_mismatch、glossary advisory を読むことが必要です。pending=0 や passthrough の保存を翻訳成功と解釈しません。repair は上限/進展停止で終わり、再実行を無限 loop にしません。
+review の residual_source、kana_edge/mixed/untranslated、identical、control_loss、namebox_mismatch、residual_latin、glossary advisory を読むことが必要です。namebox_mismatch と residual_latin は advisory で writeback を止めません。pending=0 や passthrough の保存を翻訳成功と解釈しません。repair は上限/進展停止で終わり、再実行を無限 loop にしません。
 
 ユーザーに提示する最終摘要には input/workspace、実際の output paths、成功/未解決数、書き戻したか、normalization/reflow/overflow、copy-only coverage、次の具体的操作を含めます。dry-run の paths は予定です。status ok は今回操作が完了したという値であり、完璧な訳の宣言ではありません。
 

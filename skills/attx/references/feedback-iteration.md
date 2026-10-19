@@ -9,7 +9,7 @@ attx status --workspace <工作区>
 attx review --workspace <工作区>
 ```
 
-读取 `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch` 及 `glossary.violations`。每类 sample 有上限，不能把样例数当全量数量。
+读取 `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch`、`residual_latin` 及 `glossary.violations`。每类 sample 有上限，不能把样例数当全量数量。`namebox_mismatch` 与 `residual_latin` 是 advisory，只进 repair 候选，不拦截 writeback。
 
 已有截图、原文、位置或审校样例够用就自行定位。只在缺少定位信息时问场景、地图、角色、原文片段或具体显示问题，不要求用户重新提供工具已有的数据。
 

@@ -9,7 +9,7 @@ attx detect --input <输入>
 attx analyze --input <输入> --src ja
 ```
 
-读取 `engine`、`content_root`、`profile`。`analyze` 提供编码、结构、样本、源语言密度，目录还提供扩展名分布与抽样。`detect` 没有 `--engine`；需要强制已知引擎时用 `run` 或 `init`。
+读取 `engine`、`content_root`、`profile`。`analyze` 提供编码、结构、样本、源语言密度、`line_shapes` 行骨架直方图与 `json_text_paths` 文本路径；目录还提供扩展名分布与多个抽样 `peeks`。`json_text_paths` 的下标已折叠为 `*`，可直接写进 `json_paths`。`detect` 没有 `--engine`；需要强制已知引擎时用 `run` 或 `init`。
 
 `auto` 根据内容处理可识别的 JSON、XML、标量配置和正文，不依赖固定扩展名。它只翻译可靠定位的文本，保留非正文结构。目录中不支持的文件可能原样复制，必须报告覆盖情况，不能说成全部内容已翻译。
 
@@ -23,7 +23,7 @@ attx run --input <输入> --engine auto --src ja --dst zh
 
 ## 有限模型推断
 
-`run` 没有匹配适配器时可自动推断 Profile；`--no-infer` 可关闭这个模型步骤。自动推断有额外请求，但属于默认格式处理流程，不等于自动开启付费 glossary。
+`run` 没有匹配适配器时可自动推断 Profile；`--no-infer` 可关闭这个模型步骤。`run --infer` / `init --infer` 则相反：当输入本来会落到通用 `auto` 时，强制先做一次声明式规则推断，失败再回退 `auto`，并在 `profile_inference` 里报 `status: "fallback"` 与错误。自动推断有额外请求，但属于默认格式处理流程，不等于自动开启付费 glossary。
 
 也可独立推断，先查看结果：
 
@@ -31,7 +31,7 @@ attx run --input <输入> --engine auto --src ja --dst zh
 attx profile infer --input <输入> --output ./fmt.toml --src ja --name myformat
 ```
 
-固定最多 3 次提案和验证尝试。输出已存在时拒绝覆盖。每个提案只含声明式规则，不执行代码；强制 `overwrite=false`，经过试提取及源文无损/no-op 往返验证。成功报告 `profile`、`engine`、`units`、`attempts`、`output`、`roundtrip`、`overwrite` 和 `status`。
+固定最多 3 次提案和验证尝试。输出已存在时拒绝覆盖。每个提案只含声明式规则，不执行代码；强制 `overwrite=false`，经过试提取及源文无损/no-op 往返验证。成功报告 `profile`、`engine`、`units`、`attempts`、`coverage`、`output`、`roundtrip`、`overwrite` 和 `status`；`coverage` 给出 `files_scanned` 与 `files_with_units`，用来说明规则覆盖了多少候选文件。
 
 失败时说明无法安全处理的具体结构，不能反复启动推断或执行模型建议的任意脚本。二进制、加密、偏移表封包需要已有外部提取器或用户提供的 JSONL，见 `jsonl-workflow.md`。
 

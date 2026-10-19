@@ -49,7 +49,7 @@ Agent 先查真实 CLI、已有配置和 doctor 结果，再按[问答配置协�
 - 普通全文翻译与配置范围内的有限修复属于已授权任务。
 - glossary 构建默认关闭，不额外启用 --glossary；已有配置明确启用或用户主动要求时可执行。
 - LLM 经验复核默认关闭，不自行添加 --llm 或改 llm_review。
-- run 无法识别格式时可自动付费推断 Profile；用户不接受这项费用时用 --no-infer。已知格式和 auto 的本地识别不产生推断请求。
+- run 无法识别格式时可自动付费推断 Profile；用户不接受这项费用时用 --no-infer。已知格式和 auto 的本地识别不产生推断请求。`--infer` 相反：对本来会落到通用 auto 的输入强制做一次声明式推断，失败回退 auto 并在 `profile_inference` 里报 fallback。
 - --allow-partial 需要明确接受部分输出，不能作为自动绕过 blocked 的办法。
 
 不知道模型价格或吞吐时，不编造费用和时长。dry-run 只是规模计划，不是精确报价。

@@ -469,6 +469,11 @@ impl CustomAdapter {
             .with_context(|| format!("custom text capture missing at {location}"))
     }
 
+    /// Number of candidate files scanned by `extract` (directory coverage).
+    pub fn scanned_files(&self, input: &Path) -> Result<usize> {
+        Ok(self.candidate_files(input)?.len())
+    }
+
     /// Apply extension, content signatures and trial extraction to the requested language.
     pub fn detects_source(&self, input: &Path, src: &str) -> bool {
         let Ok(files) = self.candidate_files(input) else { return false; };

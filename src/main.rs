@@ -98,6 +98,9 @@ enum Commands {
         /// Workspace dir (default: <dir>/.attx or <parent>/.attx-<stem>)
         #[arg(long)]
         workspace: Option<PathBuf>,
+        /// Infer declarative extraction rules with the configured LLM before init
+        #[arg(long)]
+        infer: bool,
     },
     /// Extract texts from the input into the workspace DB
     Extract {
@@ -178,6 +181,9 @@ enum Commands {
         /// Disable paid declarative profile inference for unrecognized text
         #[arg(long)]
         no_infer: bool,
+        /// Force declarative rule inference when the generic auto adapter matches
+        #[arg(long, conflicts_with = "no_infer")]
+        infer: bool,
         /// Permit incomplete output, with unresolved units left unchanged
         #[arg(long)]
         allow_partial: bool,
@@ -498,7 +504,36 @@ fn run() -> Result<()> {
             src,
             dst,
             workspace,
+            infer,
         } => {
+            let mut profile = profile;
+            let mut inference = None;
+            if infer && engine.is_none() && profile.is_none() {
+                let candidate = pipeline::workspace_profile_path(&input, workspace.as_deref());
+                if candidate.is_file() {
+                    profile = Some(candidate.display().to_string());
+                } else {
+                    // Dedicated adapters and saved profiles stay authoritative;
+                    // inference only replaces the generic content sniffer.
+                    let detected = pipeline::detect_any(&input);
+                    let generic = detected.as_ref().map_or(true, |hit| hit.engine == "auto");
+                    if generic {
+                        match pipeline::profile_infer(&input, &candidate, &src, "auto-profile", &settings) {
+                            Ok(report) => {
+                                profile = Some(candidate.display().to_string());
+                                inference = Some(report);
+                            }
+                            Err(error) => {
+                                if detected.is_err() {
+                                    return Err(error);
+                                }
+                                eprintln!("profile infer: {error:#}; continuing with the detected format");
+                                inference = Some(serde_json::json!({"status": "fallback", "error": format!("{error:#}")}));
+                            }
+                        }
+                    }
+                }
+            }
             let ws = pipeline::init_workspace(
                 &input,
                 engine.as_deref(),
@@ -511,6 +546,7 @@ fn run() -> Result<()> {
                 "{}",
                 serde_json::json!({
                     "workspace": ws,
+                    "profile_inference": inference,
                     "status": "ok",
                 })
             );
@@ -562,6 +598,7 @@ fn run() -> Result<()> {
             glossary: force_glossary,
             no_glossary,
             no_infer,
+            infer,
             allow_partial,
         } => {
             let mut profile = profile;
@@ -570,9 +607,29 @@ fn run() -> Result<()> {
                 let candidate = pipeline::workspace_profile_path(&input, workspace.as_deref());
                 if candidate.is_file() {
                     profile = Some(candidate.display().to_string());
-                } else if !no_infer && !no_translate && pipeline::detect_any(&input).is_err() {
-                    inference = Some(pipeline::profile_infer(&input, &candidate, &src, "auto-profile", &settings)?);
-                    profile = Some(candidate.display().to_string());
+                } else if !no_infer && (infer || !no_translate) {
+                    let detected = pipeline::detect_any(&input);
+                    // The generic auto adapter is the last-resort content sniffer.
+                    // Replace its hardcoded heuristics with validated declarative
+                    // rules when inference is requested (or when nothing matched).
+                    // An explicit --infer still applies under --no-translate,
+                    // because extraction quality is the point of that mode.
+                    let generic = detected.as_ref().map_or(true, |hit| hit.engine == "auto");
+                    if detected.is_err() || (infer && generic) {
+                        match pipeline::profile_infer(&input, &candidate, &src, "auto-profile", &settings) {
+                            Ok(report) => {
+                                inference = Some(report);
+                                profile = Some(candidate.display().to_string());
+                            }
+                            Err(error) => {
+                                if detected.is_err() {
+                                    return Err(error);
+                                }
+                                eprintln!("profile infer: {error:#}; falling back to the generic auto adapter");
+                                inference = Some(serde_json::json!({"status": "fallback", "error": format!("{error:#}")}));
+                            }
+                        }
+                    }
                 }
             }
             let ws = pipeline::init_workspace(

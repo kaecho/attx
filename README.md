@@ -8,7 +8,7 @@ Agent Translation Toolkit eXtensible is a Rust command-line translator for games
 identify → extract → optional glossary → translate → check and repair → safe writeback
 ```
 
-Version 0.10.1 keeps translation and agent automation on the same pipeline. Failed units receive bounded targeted retries; unresolved units remain visible. Normal translation requests no longer require a separate writeback-permission conversation.
+Version 0.11.0 keeps translation and agent automation on the same pipeline. Failed units receive bounded targeted retries; unresolved units remain visible. Normal translation requests no longer require a separate writeback-permission conversation.
 
 ## Let an agent handle setup
 
@@ -112,7 +112,7 @@ attx analyze --input "input.file" --src ja
 
 Auto directory mode copies unsupported files unchanged and reports `extract.auto_coverage`. It does not dispatch every built-in document, archive, subtitle or script adapter within that tree. A copied file is not a translated file. Binary containers, encrypted assets, ambiguous scripts and unsupported syntax need a dedicated adapter or external extraction.
 
-For unrecognized textual formats, `run` can ask the configured model for a declarative profile. It validates extraction and a source-preserving no-op roundtrip, forces `overwrite = false` and allows at most three proposals. `--no-infer` disables this extra paid operation. Models can still choose incomplete or semantically wrong fields; validation does not prove complete coverage.
+For unrecognized textual formats, `run` can ask the configured model for a declarative profile. It validates extraction and a source-preserving no-op roundtrip, forces `overwrite = false` and allows at most three proposals. `--no-infer` disables this extra paid operation; `run --infer` or `init --infer` forces one validated proposal even when the generic `auto` adapter would otherwise handle the input, falling back to `auto` with the error in `profile_inference` if inference fails. Models can still choose incomplete or semantically wrong fields; validation does not prove complete coverage.
 
 ```bash
 attx profile infer --input "scene.scn" --output ./scene.toml --src ja --name scene

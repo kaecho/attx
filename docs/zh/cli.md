@@ -44,7 +44,7 @@ attx [--config <path>] [--client <name>] <command> [options]
 ## 工作区流水线
 
 ```text
-init --input <path> [--engine <id>] [--profile <path或name>] [--src ja] [--dst zh] [--workspace <dir>]
+init --input <path> [--engine <id>] [--profile <path或name>] [--src ja] [--dst zh] [--workspace <dir>] [--infer]
 extract --workspace <dir> [--no-knowledge]
 translate --workspace <dir> [--limit N] [--dry-run] [--retry-passthrough]
 repair --workspace <dir> [--limit N] [--dry-run]
@@ -53,11 +53,11 @@ status --workspace <dir>
 review --workspace <dir>
 ```
 
-- init 创建/打开工作区，输出 workspace、status。保存 Profile 可用 `--engine custom:<name>`，显式 --profile 复制为工作区快照。默认目录为内容根 `.attx` 或文件父目录 `.attx-<stem>`。
+- init 创建/打开工作区，输出 workspace、status。保存 Profile 可用 `--engine custom:<name>`，显式 --profile 复制为工作区快照。--infer 在未指定 Profile 且探测会落到通用 `auto` 时花一次有界推断，写入并验证声明式规则；专用适配器和已保存 Profile 不受影响。默认目录为内容根 `.attx` 或文件父目录 `.attx-<stem>`。
 - extract 输出 extracted、skipped_by_knowledge、rules_applied、status，auto 可附 auto_coverage。--no-knowledge 忽略所有经验过滤，仅用于诊断；不是禁用机器数据保护。
 - translate 处理 pending 及已有被机械标记的单元，--retry-passthrough 先重新排队失败占位，--limit 限制本轮单元。初译后可自动有限修复。
 - repair 按全量候选集合处理机械问题，--limit 限制候选，--dry-run 不发 HTTP 或改缓存。
-- writeback 默认完整性门禁，--allow-partial 明确保留未解决原文，--no-learn 跳过本轮成功写回后的经验总结。
+- writeback 默认完整性门禁，--allow-partial 明确保留未解决原文，--no-learn 跳过本轮成功写回后的经验总结。门禁只看待译、passthrough 和结构检查失败；`review.namebox_mismatch` 与 `review.residual_latin` 仅为提示，不拦截写回。`skipped_note` 分别给出待译、passthrough 和结构失败数量。
 - status 输出 engine、game_path、source_lang、target_lang、total、translated、pending、passthrough、domains（按域 total/translated）。passthrough 不算成功。
 - review 返回[质量页](quality.md)的 Report，不发 HTTP，问题本身不使此离线命令退出 2。
 
@@ -75,8 +75,8 @@ review --workspace <dir>
 | `planned` | 本轮计划处理数量 |
 | `repaired` | 操作前已有缓存但被标记、最终通过的单元数量；与本轮新完成的 translated 单元集合不重叠 |
 | `repair_rounds` | 本次实际修复轮数 |
-| `unresolved` | 最终唯一未解决候选数量 |
-| `normalized_lines` | 中文规范化行数信号 |
+| `unresolved` | 本轮结束后不可写回的单元数（passthrough、结构失败、目标文字残留）；advisory 的姓名框漂移不计入 |
+| `normalized_lines` | 换行与中文规范化改动行数信号 |
 | `review` | 完整机械审校报告 |
 
 `translate-jsonl` 也用该结构，但没有工作区修复循环，repaired/repair_rounds 为 0。
@@ -85,17 +85,17 @@ review --workspace <dir>
 
 `files`、`units_applied`、`paths[]` 是实际写回规模，dry-run 时仅为计划。`dry_run`、`status`、`skipped_note`、`units_skipped` 说明完整性；`normalized_lines`、`reflowed_units`、`overflow_lines` 说明规范化/布局；`review` 为审校，运行经验总结时才附 `learned`。blocked 通常 files=0、paths=[]，不会生成输出或修改规范化缓存。
 
-review 含 total、translated、pending、passthrough、glossary 和 residual_source/kana_edge/kana_mixed/kana_untranslated/identical/control_loss/namebox_mismatch。每类 count 加最多 40 个 `{location,unit_id,detail}` 样例。auto_coverage 含 supported_files、copied_files、unsupported_total、unsupported_paths、excluded_entries、excluded_paths；两个路径样例各最多50项，排除目录根计1。这些是报告样例上限，不是质量检查范围上限。
+review 含 total、translated、pending、passthrough、glossary 和 residual_source/kana_edge/kana_mixed/kana_untranslated/identical/control_loss/namebox_mismatch/residual_latin。每类 count 加最多 40 个 `{location,unit_id,detail}` 样例。namebox_mismatch 与 residual_latin 是提示项：会进入 repair 候选，但不拦截写回。auto_coverage 含 supported_files、copied_files、unsupported_total、unsupported_paths、excluded_entries、excluded_paths；两个路径样例各最多50项，排除目录根计1。这些是报告样例上限，不是质量检查范围上限。
 
 ## run
 
 ```text
 run --input <path> [--engine <id>] [--profile <path或name>] [--src ja] [--dst zh]
     [--workspace <dir>] [--limit N] [--no-translate] [--no-writeback]
-    [--glossary | --no-glossary] [--no-infer] [--allow-partial]
+    [--glossary | --no-glossary] [--no-infer | --infer] [--allow-partial]
 ```
 
-按实际阶段返回 workspace、extracted、extract、可选 profile_inference/glossary/translate/writeback、review 和 status。--no-translate 不调用模型翻译、不写回，也不触发正常自动推断。--no-writeback 保留缓存；--no-infer 只禁止模型格式推断。run 没有 --dry-run 和 --no-learn。--glossary 与 --no-glossary 冲突。
+按实际阶段返回 workspace、extracted、extract、可选 profile_inference/glossary/translate/writeback、review 和 status。--no-translate 不调用模型翻译、不写回，也不触发正常自动推断。--no-writeback 保留缓存；--no-infer 只禁止模型格式推断。--infer 在本应落到通用 auto 的输入上强制做一次声明式规则推断；失败则回退 auto，并在 profile_inference 里给出 status=fallback 和错误。run 没有 --dry-run 和 --no-learn。--glossary 与 --no-glossary 冲突。
 
 未知输入的推断只在无法检测且允许翻译时执行，复用工作区规则。术语构建失败可以报告 glossary.error 并继续，但致命鉴权/配置错误停止整个任务。正常输入的完整翻译及写回不需要额外强制权限步骤。
 

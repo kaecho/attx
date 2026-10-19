@@ -75,6 +75,9 @@ attx review --workspace './.attx-novel'
 | `identical` | 需要翻译的原文原样复制；不算完成 |
 | `control_loss` | 保护符/变量丢失，应修复，不能关闭保护蒙混通过 |
 | `namebox_mismatch` | 同场景姓名框与正文姓名用法不一致；检查称呼和上下文 |
+| `residual_latin` | 中文、日文或韩文译文中残留的源语言拉丁片段；单字母和 2–4 位大写缩写不计 |
+
+`namebox_mismatch` 与 `residual_latin` 都只是提示：会进入 repair 候选，但不会拦截写回。姓名框比较会先合并 reflow 拆开的译行，并折叠常见日文新字体与中文简繁写法（汚/污、桜/樱、種/种、說/说），所以有意的名字本地化或拆行不再被当成不可写回。
 
 三个 kana 分类对同一单元互斥，但会和聚合残留及 identical 等重叠。不能把所有 count 相加当作唯一问题单元数。源语言检测包含常见 Latin、CJK、Hangul、Cyrillic、Arabic、Devanagari、Thai 的启发式，不是真正的语言识别。引用、专名、中文与日文共有汉字可能误报或漏报。
 
@@ -92,6 +95,8 @@ attx repair --workspace './.attx-novel'
 达上限或无进展后，报告 `unresolved`，再用全量 JSONL 人工审校。不要不断重新运行 repair 把有限预算变成无限调用。默认 writeback 拦截待译和无效单元；明确使用 `--allow-partial` 才写有效子集，未解决位置保留原文，返回 2。
 
 ## 写回规范化与布局
+
+模型返回的换行会先规范化再做结构检查：CRLF 和单独 CR 统一为 LF；array/long_text 中内嵌的换行拆成多行；short_text 被拆行时合并，两侧都是 CJK 就直接相连，拉丁边界保留一个空格。只含保护符、标记或空白的行，在模型丢弃且行数一致时从原文恢复。SRT/VTT 与 LRC 写回沿用源文件的行尾（CRLF 或 LF）。
 
 writeback 在内存中规范化中文缓存并重排 RMMZ 固定槽位，然后 review、验证源文、暂存和替换。实际成功写回后才把变更译文保存回缓存。dry-run 和 blocked 不改缓存或输出。
 

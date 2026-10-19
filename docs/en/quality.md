@@ -33,12 +33,19 @@ This uses no HTTP. It returns overall counts and these buckets, each containing 
 | `identical` | Source text copied unchanged where translation is needed |
 | `control_loss` | Missing, changed, reordered, or incorrectly repeated protected tokens |
 | `namebox_mismatch` | Speaker/name relationship inconsistent between namebox and body |
+| `residual_latin` | Latin source fragment left inside a Chinese, Japanese, or Korean target |
+
+`namebox_mismatch` and `residual_latin` are advisory: `repair` targets them, but they never block writeback. Namebox comparison joins reflow-split translation slots and folds common Japanese shinjitai and Chinese simplified/traditional variants (汚/污, 桜/樱, 種/种, 說/说) before matching, so a deliberate localization of a name or a split speaker line is reported for review, not treated as unwritable. `residual_latin` ignores isolated single Latin graphemes and 2–4 character uppercase acronyms, and only reports fragments that also occur in the source line.
 
 The three kana categories are disjoint classifications. Other buckets can overlap the aggregate or each other, so summing counts is not a unique unresolved-unit total. `review.glossary` has active/seen/applied term counts and `violations`; exact target-substring misses are advisory and can be false positives for inflected languages.
 
 `status.pending=0` does not imply clean translations. Passthrough is separate from successful translation; it is a source placeholder after failed/refused attempts. `status` measures cache progress, while `review` adds quality signals. Sample caps do not cap the repair candidate set. Use `export-jsonl --filter all` for full records.
 
 Source-language detection is a script heuristic covering common Latin, CJK, Hangul, Cyrillic, Arabic, Devanagari, and Thai ranges. Shared scripts, short strings, names, and same-script translation pairs limit its accuracy. Tags select prompts and heuristics; they are not an automatic language-identification service.
+
+## Line-break normalization
+
+Model output is normalized before structural checks. CRLF and lone CR collapse to LF. Embedded newlines split into separate lines for `array` and `long_text` units, and a `short_text` response that arrives split is joined: adjacent CJK text joins with no separator, while a Latin boundary keeps one space. A line that contains only protected tokens, markup, or whitespace is restored from the source when the model drops it and the line counts agree. Subtitle (SRT/VTT) and LRC writeback reuse the source file's line ending.
 
 ## Chinese target cleanup
 

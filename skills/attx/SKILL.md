@@ -46,7 +46,7 @@ attx --config <配置> run --input <输入> --src ja --dst zh
 - `--limit N` 用于用户要求的样本或预算限制，不意味着全量已完成。
 - `--no-glossary` 可单次关闭配置中的付费术语构建；不要自动添加 `--glossary`。
 - 默认拒绝未完成任务的部分写回。只有用户明确接受部分输出时使用 `--allow-partial`，并逐项报告剩余问题。
-- 未知格式的模型 Profile 推断可用 `--no-infer` 关闭。这不关闭 `auto` 的本地文本探测。
+- 未知格式的模型 Profile 推断可用 `--no-infer` 关闭。这不关闭 `auto` 的本地文本探测。用户要求“不要硬编码规则、按输入生成提取规则”时用 `--infer`，它只替换通用 `auto` 的兜底，专用适配器仍然优先。
 
 报告提取规模和费用风险，但用户已授权全量时继续执行，不再因条目数较大强制问一次。没有模型价格和吞吐证据时，不编造费用或时长。
 
@@ -74,7 +74,7 @@ attx repair --workspace <工作区>
 
 修复有配置上限，针对 pending、passthrough、残留源文、控制符和姓名框问题；术语子串告警只作审阅辅助。不要把有限修复扩成无穷重试。停止进展或达到上限后，导出具体条目人工修正，或诚实报告未解决项。
 
-审校读取 `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch` 和 `glossary.violations`。`pending=0` 不代表没有残留，`passthrough` 也不是成功译文。
+审校读取 `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch`、`residual_latin` 和 `glossary.violations`。`pending=0` 不代表没有残留，`passthrough` 也不是成功译文。`namebox_mismatch` 与 `residual_latin` 是提示项：会进入 repair 候选，但不拦截 writeback；写回门禁只看 pending、passthrough 和结构检查失败。
 
 中文目标的机械假名尾屑清理，以及 RMMZ 固定对白槽位重排，会同步到缓存后再用于写回和审校。不要直接编辑输出以制造缓存与游戏不一致，也不要删掉真实日文句子掩盖漏翻。写回报告中的规范化、重排和溢出信号应如实报告。
 

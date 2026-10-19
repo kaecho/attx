@@ -42,14 +42,117 @@ pub fn check_unit(unit: &TextUnit, translation_lines: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Trim irrelevant trailing long-text blanks without inventing missing translations.
-pub fn sanitize_lines(unit: &TextUnit, mut lines: Vec<String>) -> Vec<String> {
-    if unit.item_type == ItemType::LongText && lines.iter().any(|l| !l.trim().is_empty()) {
-        while lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.pop();
+/// Normalize sanitized target lines, restore preserved-only source lines, then
+/// apply mechanical kana cleanup. Returns the number of changed lines so callers
+/// can report cache normalization.
+pub fn normalize_lines(unit: &TextUnit, lines: &mut Vec<String>, target_lang: &str, preserve: &PreserveSet) -> usize {
+    let mut changed = sanitize_in_place(unit, lines);
+    changed += restore_preserved_lines(unit, lines, preserve);
+    changed += normalize_target_lines(lines, target_lang, preserve);
+    changed
+}
+
+/// Model-emitted line-break normalization. Models occasionally return `\r\n`
+/// or embed a line break inside one JSON string; the writeback slots are
+/// single-line, so the break is structural damage, not formatting.
+fn sanitize_in_place(unit: &TextUnit, lines: &mut Vec<String>) -> usize {
+    let mut changed = 0;
+    for line in lines.iter_mut() {
+        if line.contains('\r') {
+            *line = line.replace("\r\n", "\n").replace('\r', "\n");
+            changed += 1;
         }
     }
-    lines
+    match unit.item_type {
+        ItemType::ShortText if lines.iter().any(|line| line.contains('\n')) => {
+            for line in lines.iter_mut() {
+                *line = join_short_line(line);
+            }
+            changed += 1;
+        }
+        ItemType::Array | ItemType::LongText if lines.iter().any(|line| line.contains('\n')) => {
+            let mut expanded = Vec::with_capacity(lines.len());
+            for line in lines.drain(..) {
+                expanded.extend(line.split('\n').map(str::to_string));
+            }
+            *lines = expanded;
+            changed += 1;
+        }
+        _ => {}
+    }
+    if unit.item_type == ItemType::LongText && lines.len() > 1 && lines.iter().any(|line| !line.trim().is_empty()) {
+        while lines.len() > 1 && lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// A single-line slot must stay single: CJK breaks join directly, while Latin
+/// words keep a space so `Hello\nworld` does not become `Helloworld`.
+fn join_short_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for (index, part) in line.split('\n').enumerate() {
+        if index > 0 {
+            let previous = out.chars().next_back();
+            let next = part.chars().next();
+            let keep_whitespace = previous.is_some_and(char::is_whitespace) || next.is_some_and(char::is_whitespace);
+            if !keep_whitespace && !(previous.is_some_and(is_wide) && next.is_some_and(is_wide)) {
+                out.push(' ');
+            }
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+fn is_wide(c: char) -> bool {
+    model::is_kana(c)
+        || model::is_cjk(c)
+        || matches!(c,
+            '\u{AC00}'..='\u{D7AF}' | '\u{1100}'..='\u{11FF}' |
+            '\u{3000}'..='\u{303F}' | '\u{FF01}'..='\u{FF60}' | '\u{FFE0}'..='\u{FFE6}'
+        )
+}
+
+/// Restore source lines that carry no translatable text — engine controls,
+/// markup or placeholders only. They are evidence, not translation targets, and
+/// models sometimes drop them entirely. Restoration is deliberately narrow: line
+/// counts must agree and the target slot must be blank, so an intentional reflow
+/// or model-written content is never overwritten.
+pub fn restore_preserved_lines(unit: &TextUnit, lines: &mut [String], preserve: &PreserveSet) -> usize {
+    if lines.len() != unit.original_lines.len() {
+        return 0;
+    }
+    let mut restored = 0;
+    for (target, source) in lines.iter_mut().zip(&unit.original_lines) {
+        let (masked, map) = preserve.mask_line(source);
+        if map.is_empty() || !only_mask_tokens(&masked) {
+            continue;
+        }
+        if !target.trim().is_empty() {
+            continue;
+        }
+        *target = source.clone();
+        restored += 1;
+    }
+    restored
+}
+
+fn only_mask_tokens(masked: &str) -> bool {
+    let mut rest = masked;
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let Some(close) = trimmed.find(']') else { return false };
+        if !trimmed.starts_with("[CTRL_") || !trimmed[6..close].bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        rest = &trimmed[close + 1..];
+    }
 }
 
 /// Normalize only mechanical kana in lines with positive Chinese-language evidence.
@@ -461,20 +564,54 @@ mod tests {
 
     #[test]
     fn missing_choices_and_wrong_structure_are_not_sanitized_into_success() {
+        let sanitized = |unit: &TextUnit, candidate: Vec<String>| {
+            let mut candidate = candidate;
+            sanitize_in_place(unit, &mut candidate);
+            candidate
+        };
         let choices = unit(ItemType::Array, &["はい", "いいえ"]);
         for candidate in [vec![], lines(&["是"]), lines(&["是", ""]), lines(&["是", "否", "多余"])] {
-            let sanitized = sanitize_lines(&choices, candidate.clone());
-            assert_eq!(sanitized, candidate);
-            assert!(check_unit(&choices, &sanitized).is_err());
+            let out = sanitized(&choices, candidate.clone());
+            assert_eq!(out, candidate);
+            assert!(check_unit(&choices, &out).is_err());
         }
         let short = unit(ItemType::ShortText, &["はい"]);
         for candidate in [vec![], lines(&[""]), lines(&["是", "否"])] {
-            let sanitized = sanitize_lines(&short, candidate.clone());
-            assert_eq!(sanitized, candidate);
-            assert!(check_unit(&short, &sanitized).is_err());
+            let out = sanitized(&short, candidate.clone());
+            assert_eq!(out, candidate);
+            assert!(check_unit(&short, &out).is_err());
         }
         let blanks = unit(ItemType::Array, &["", "はい"]);
         assert!(check_unit(&blanks, &lines(&["", "是"])).is_ok());
+    }
+
+    #[test]
+    fn embedded_newlines_are_normalized_without_inventing_structure() {
+        let sanitized = |unit: &TextUnit, candidate: Vec<String>| {
+            let mut candidate = candidate;
+            assert!(sanitize_in_place(unit, &mut candidate) > 0);
+            candidate
+        };
+        let short = unit(ItemType::ShortText, &["はい"]);
+        assert_eq!(sanitized(&short, lines(&["第一行\n第二行"])), lines(&["第一行第二行"]));
+        let latin = unit(ItemType::ShortText, &["Hello"]);
+        assert_eq!(sanitized(&latin, lines(&["Hello\nworld"])), lines(&["Hello world"]));
+        let long = unit(ItemType::LongText, &["一行目", "二行目"]);
+        assert_eq!(sanitized(&long, lines(&["第一行\r\n第二行"])), lines(&["第一行", "第二行"]));
+        let choices = unit(ItemType::Array, &["はい", "いいえ"]);
+        assert_eq!(sanitized(&choices, lines(&["是\n否"])), lines(&["是", "否"]));
+    }
+
+    #[test]
+    fn preserved_only_source_lines_are_restored_verbatim() {
+        let source = unit(ItemType::LongText, &[r"\C[1]", "こんにちは"]);
+        let mut target = lines(&["", "你好"]);
+        assert_eq!(normalize_lines(&source, &mut target, "zh", PreserveSet::core()), 1);
+        assert_eq!(target, lines(&[r"\C[1]", "你好"]));
+        // A genuine long-text reflow changes the line count; leave it alone.
+        let mut reflowed = lines(&[r"\C[1]你好"]);
+        assert_eq!(normalize_lines(&source, &mut reflowed, "zh", PreserveSet::core()), 0);
+        assert_eq!(reflowed, lines(&[r"\C[1]你好"]));
     }
 
     #[test]

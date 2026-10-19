@@ -52,7 +52,10 @@ API を呼ばず、各 bucket に `count` と最大 40 件の `sample` を返し
 | `identical` | 翻訳が必要なのに visible 原文と同一 |
 | `control_loss` | 保護された control・変数の損失 |
 | `namebox_mismatch` | 姓名框と本文先頭の話者名関係の不一致 |
+| `residual_latin` | 中国語・日本語・韓国語の訳に残った原文 Latin の断片。単一 grapheme と 2–4 文字の大文字略語は除外 |
 | `glossary.violations` | 指定訳名の substring が見当たらない助言 |
+
+`namebox_mismatch` と `residual_latin` は advisory です。repair の候補にはなりますが writeback を止めません。namebox 比較は reflow で分割された訳行を連結し、日本語の新字体と中国語の簡繁（汚/污、桜/樱、種/种、說/说）を折りたたんでから照合します。意図的な名前の現地化や分割話者行は報告のみで、書き込み不能扱いにはなりません。
 
 3 種の kana 分類は同一項目に対する排他的な分類です。一方 residual_source、identical、control_loss などの集約 bucket とは重複できます。全 count を足して unique 問題数にしないでください。sample の 40 件上限は修復対象の上限ではありません。
 
@@ -83,6 +86,8 @@ attx review --workspace .attx-novel
 attx writeback --workspace .attx-novel
 ```
 
-既定では pending や invalid が残れば出力を block します。ユーザーが未解決原文を含む出力を受け入れたときだけ `writeback --allow-partial` または `run --allow-partial` を使います。有効な訳のみ適用し、その他は原文を保ち、結果は needs_attention と終了 2 です。
+既定では pending や invalid が残れば出力を block します。block 条件は pending、passthrough、構造検査失敗のみです。`namebox_mismatch` と `residual_latin` は advisory なので含みません。ユーザーが未解決原文を含む出力を受け入れたときだけ `writeback --allow-partial` または `run --allow-partial` を使います。有効な訳のみ適用し、その他は原文を保ち、結果は needs_attention と終了 2 です。
+
+モデル出力の改行は構造検査の前に正規化します。CRLF と単独 CR は LF にし、array/long_text の埋め込み改行は行に分割し、short_text が分割された場合は CJK 同士なら連結し、Latin 境界なら空白 1 つを保ちます。保護 token・markup・空白のみの行は、モデルが落とし行数が一致する場合に原文から復元します。SRT/VTT と LRC の writeback は元ファイルの改行コード（CRLF/LF）を引き継ぎます。
 
 RMMZ は固定スロットへ再配置し、`reflowed_units` と `overflow_lines` を報告します。[RPG Maker](rmmz.md)と[ワークスペース](workspace.md)で source hash、backup、cache 同期を確認してください。

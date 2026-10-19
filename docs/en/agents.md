@@ -65,7 +65,7 @@ The request does not authorize deleting/resetting caches, editing unrelated inpu
 
 The normal local order is dedicated adapter, saved profile, then Auto. Auto can copy unsupported directory files unchanged; report copy-only and excluded coverage honestly. It is not automatic translation of every archive, subtitle, or script in a mixed directory.
 
-When no detector matches and translation is enabled, `run` can infer a declarative profile in at most three attempts. It never executes generated code and forces copied output. Use `--no-infer` when the user does not want inference requests. A copied validated profile stays fixed for that workspace.
+When no detector matches and translation is enabled, `run` can infer a declarative profile in at most three attempts. It never executes generated code and forces copied output. Use `--no-infer` when the user does not want inference requests. `run --infer` / `init --infer` go the other way: for input that would otherwise use the generic `auto` adapter, force one validated inference pass and fall back to `auto` (with `profile_inference.status="fallback"`) if it fails. A copied validated profile stays fixed for that workspace.
 
 Binary, encrypted, lossy, or ambiguous data needs an external extractor and JSONL route. The agent should explain the missing format-specific prerequisite instead of guessing delimiters or treating code as prose. Read [profiles](profiles.md) and [formats](formats.md).
 
