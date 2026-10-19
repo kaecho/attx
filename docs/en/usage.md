@@ -64,7 +64,7 @@ attx --config "./setting.toml" glossary build --workspace "./book workspace" --d
 attx --config "./setting.toml" glossary build --workspace "./book workspace" --min-occurrences 10
 ```
 
-The dry-run is a plan, not a quotation or a glossary. Construction has at most 40 extraction batches and a term cap. Real occurrence counts mean units containing the term, not repeated matches within one unit. Speaker/namebox names have special handling. `truncated` reports candidates dropped by the term cap. A finite sample can miss terms.
+The dry-run is a plan, not a quotation or a glossary. Construction has at most 40 extraction batches and a term cap. Real occurrence counts mean units containing the term, not repeated matches within one unit. Nothing bypasses `min_occurrences`; add a rare but important name with `glossary add`. `truncated` reports candidates dropped by the term cap. A finite sample can miss terms.
 
 For a normal pipeline, `run --glossary` forces construction and `run --no-glossary` suppresses configured construction. They conflict. Glossary generation is off by default. Existing active terms can still be used in translation even when new construction is off.
 

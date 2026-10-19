@@ -72,9 +72,9 @@ attx review --workspace <工作区>
 attx repair --workspace <工作区>
 ```
 
-修复有配置上限，针对 pending、passthrough、残留源文、控制符和姓名框问题；术语子串告警只作审阅辅助。不要把有限修复扩成无穷重试。停止进展或达到上限后，导出具体条目人工修正，或诚实报告未解决项。
+修复有配置上限，针对 pending、passthrough、残留源文和控制符问题；术语子串告警只作审阅辅助。不要把有限修复扩成无穷重试。停止进展或达到上限后，导出具体条目人工修正，或诚实报告未解决项。
 
-审校读取 `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch`、`residual_latin` 和 `glossary.violations`。`pending=0` 不代表没有残留，`passthrough` 也不是成功译文。`namebox_mismatch` 与 `residual_latin` 是提示项：会进入 repair 候选，但不拦截 writeback；写回门禁只看 pending、passthrough 和结构检查失败。
+审校读取 `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`residual_latin` 和 `glossary.violations`。`pending=0` 不代表没有残留，`passthrough` 也不是成功译文。`residual_latin` 是提示项：会进入 repair 候选，但不拦截 writeback；写回门禁只看 pending、passthrough 和结构检查失败。译名一致性由术语表负责，程序不做按格式的姓名检查。
 
 中文目标的机械假名尾屑清理，以及 RMMZ 固定对白槽位重排，会同步到缓存后再用于写回和审校。不要直接编辑输出以制造缓存与游戏不一致，也不要删掉真实日文句子掩盖漏翻。写回报告中的规范化、重排和溢出信号应如实报告。
 

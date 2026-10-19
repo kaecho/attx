@@ -86,7 +86,7 @@ attx review --workspace .attx-novel
 attx repair --workspace .attx-novel
 ```
 
-review の residual_source、kana_edge/mixed/untranslated、identical、control_loss、namebox_mismatch、residual_latin、glossary advisory を読むことが必要です。namebox_mismatch と residual_latin は advisory で writeback を止めません。pending=0 や passthrough の保存を翻訳成功と解釈しません。repair は上限/進展停止で終わり、再実行を無限 loop にしません。
+review の residual_source、kana_edge/mixed/untranslated、identical、control_loss、residual_latin、glossary advisory を読むことが必要です。residual_latin は advisory で writeback を止めません。訳名の一貫性は glossary が担います。pending=0 や passthrough の保存を翻訳成功と解釈しません。repair は上限/進展停止で終わり、再実行を無限 loop にしません。
 
 ユーザーに提示する最終摘要には input/workspace、実際の output paths、成功/未解決数、書き戻したか、normalization/reflow/overflow、copy-only coverage、次の具体的操作を含めます。dry-run の paths は予定です。status ok は今回操作が完了したという値であり、完璧な訳の宣言ではありません。
 

@@ -2,7 +2,7 @@
 
 attx（Agent Translation Toolkit eXtensible）是一个 Rust 命令行翻译工具。它把格式处理、模型翻译和写回分开，用 SQLite 保存工作区进度。人可以直接运行命令，编程 agent 也可以按仓库中的 Skill 自动执行。
 
-本手册对应 0.11.0。运行模型需要 OpenAI 兼容的 Chat Completions 服务；格式检测、提取、状态查询和机械审校可以离线完成。它不是游戏运行时补丁，也不承诺一次得到没有漏译、语义错误或排版问题的成品。
+本手册对应 0.11.1。运行模型需要 OpenAI 兼容的 Chat Completions 服务；格式检测、提取、状态查询和机械审校可以离线完成。它不是游戏运行时补丁，也不承诺一次得到没有漏译、语义错误或排版问题的成品。
 
 ```text
 输入 → 适配器提取 → 工作区缓存 → 模型翻译与有限修复 → 校验并写回
@@ -20,7 +20,7 @@ attx（Agent Translation Toolkit eXtensible）是一个 Rust 命令行翻译工�
 | 确认格式、编码和输出范围 | [格式与未知输入](formats.md) |
 | 定义或推断新格式 | [自定义 Profile](profiles.md) |
 | 翻译 RPG Maker 游戏 | [RPG Maker MV/MZ](rmmz.md) |
-| 理解残留、姓名框和溢出报告 | [质量与审校](quality.md) |
+| 理解残留、译名与溢出报告 | [质量与审校](quality.md) |
 | 查命令、默认参数和 JSON 字段 | [CLI 参考](cli.md) |
 | 让 agent 无人值守完成任务 | [Agent 自动化](agents.md) |
 | 管理缓存、术语、保护规则和经验 | [工作区与持久化数据](workspace.md) |

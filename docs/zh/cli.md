@@ -57,7 +57,7 @@ review --workspace <dir>
 - extract 输出 extracted、skipped_by_knowledge、rules_applied、status，auto 可附 auto_coverage。--no-knowledge 忽略所有经验过滤，仅用于诊断；不是禁用机器数据保护。
 - translate 处理 pending 及已有被机械标记的单元，--retry-passthrough 先重新排队失败占位，--limit 限制本轮单元。初译后可自动有限修复。
 - repair 按全量候选集合处理机械问题，--limit 限制候选，--dry-run 不发 HTTP 或改缓存。
-- writeback 默认完整性门禁，--allow-partial 明确保留未解决原文，--no-learn 跳过本轮成功写回后的经验总结。门禁只看待译、passthrough 和结构检查失败；`review.namebox_mismatch` 与 `review.residual_latin` 仅为提示，不拦截写回。`skipped_note` 分别给出待译、passthrough 和结构失败数量。
+- writeback 默认完整性门禁，--allow-partial 明确保留未解决原文，--no-learn 跳过本轮成功写回后的经验总结。门禁只看待译、passthrough 和结构检查失败；`review.residual_latin` 仅为提示，不拦截写回。`skipped_note` 分别给出待译、passthrough 和结构失败数量。
 - status 输出 engine、game_path、source_lang、target_lang、total、translated、pending、passthrough、domains（按域 total/translated）。passthrough 不算成功。
 - review 返回[质量页](quality.md)的 Report，不发 HTTP，问题本身不使此离线命令退出 2。
 
@@ -75,7 +75,7 @@ review --workspace <dir>
 | `planned` | 本轮计划处理数量 |
 | `repaired` | 操作前已有缓存但被标记、最终通过的单元数量；与本轮新完成的 translated 单元集合不重叠 |
 | `repair_rounds` | 本次实际修复轮数 |
-| `unresolved` | 本轮结束后不可写回的单元数（passthrough、结构失败、目标文字残留）；advisory 的姓名框漂移不计入 |
+| `unresolved` | 本轮结束后不可写回的单元数（passthrough、结构失败、目标文字残留） |
 | `normalized_lines` | 换行与中文规范化改动行数信号 |
 | `review` | 完整机械审校报告 |
 
@@ -85,7 +85,7 @@ review --workspace <dir>
 
 `files`、`units_applied`、`paths[]` 是实际写回规模，dry-run 时仅为计划。`dry_run`、`status`、`skipped_note`、`units_skipped` 说明完整性；`normalized_lines`、`reflowed_units`、`overflow_lines` 说明规范化/布局；`review` 为审校，运行经验总结时才附 `learned`。blocked 通常 files=0、paths=[]，不会生成输出或修改规范化缓存。
 
-review 含 total、translated、pending、passthrough、glossary 和 residual_source/kana_edge/kana_mixed/kana_untranslated/identical/control_loss/namebox_mismatch/residual_latin。每类 count 加最多 40 个 `{location,unit_id,detail}` 样例。namebox_mismatch 与 residual_latin 是提示项：会进入 repair 候选，但不拦截写回。auto_coverage 含 supported_files、copied_files、unsupported_total、unsupported_paths、excluded_entries、excluded_paths；两个路径样例各最多50项，排除目录根计1。这些是报告样例上限，不是质量检查范围上限。
+review 含 total、translated、pending、passthrough、glossary 和 residual_source/kana_edge/kana_mixed/kana_untranslated/identical/control_loss/residual_latin。每类 count 加最多 40 个 `{location,unit_id,detail}` 样例。residual_latin 是提示项：会进入 repair 候选，但不拦截写回；译名一致性由术语表负责，不做按格式的专项规则。auto_coverage 含 supported_files、copied_files、unsupported_total、unsupported_paths、excluded_entries、excluded_paths；两个路径样例各最多50项，排除目录根计1。这些是报告样例上限，不是质量检查范围上限。
 
 ## run
 

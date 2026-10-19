@@ -83,10 +83,9 @@ attx review --workspace <工作区>
 | `kana_untranslated` | 日文片段未译 |
 | `identical` | 需要翻译的原文被原样复制 |
 | `control_loss` | 保护控制符或变量丢失 |
-| `namebox_mismatch` | 姓名框与正文姓名关系不一致 |
 | `residual_latin` | 中文/日文/韩文译文里残留的源语言拉丁片段；单字母和 2–4 位大写缩写除外 |
 
-每类为 `{count, sample:[{location,unit_id,detail}]}`，sample 最多 40。分类可能与聚合 bucket 重叠，不能直接相加为唯一问题数。`glossary.violations` 是子串匹配建议，可能误报，不是结构性门禁。`namebox_mismatch` 与 `residual_latin` 只作提示并进入 repair 候选，不拦截 writeback。
+每类为 `{count, sample:[{location,unit_id,detail}]}`，sample 最多 40。分类可能与聚合 bucket 重叠，不能直接相加为唯一问题数。`glossary.violations` 是子串匹配建议，可能误报，不是结构性门禁。`residual_latin` 只作提示并进入 repair 候选，不拦截 writeback；译名一致性由 glossary 负责，不做按格式的专项检查。
 
 全量源文/译文用 `export-jsonl`。repair 候选不受 review 样例上限限制。
 
@@ -99,7 +98,7 @@ attx repair --workspace <工作区> [--limit N] [--dry-run]
 
 `translate` 处理 pending；`--retry-passthrough` 将原文占位重新排队。成功批次增量写入缓存。`--limit` 用于明确的限额或样本要求，不是所有任务的必经步骤。`--dry-run` 只返回计划，不调用模型。
 
-`repair` 使用共享翻译/审校流程，有限处理 pending、passthrough、残留、控制符和姓名框问题；术语 advisory 不作为无穷重译理由。额外自动修复轮数由 `[translation].repair_rounds` 控制。达到上限或无进展时报告未解决项，不无限调用命令重置上限。
+`repair` 使用共享翻译/审校流程，有限处理 pending、passthrough、残留和控制符问题；术语 advisory 不作为无穷重译理由。额外自动修复轮数由 `[translation].repair_rounds` 控制。达到上限或无进展时报告未解决项，不无限调用命令重置上限。
 
 翻译报告保留 `pending_before`、`translated`、`pending_after`、`passthrough`、`dry_run`、`skipped_note`，增加 `status`、`planned`、`repaired`、`repair_rounds`、`unresolved`、`normalized_lines` 和 `review`。成功数量不含 passthrough。读取 skipped_note 和最终 review，不能以请求完成替代质量判断。
 
@@ -113,7 +112,7 @@ attx repair --workspace <工作区> [--limit N] [--dry-run]
 attx writeback --workspace <工作区> [--dry-run] [--no-learn] [--allow-partial]
 ```
 
-默认 pending 或无效译文尚存时阻止输出。门禁只看 pending、passthrough 和结构检查失败；`namebox_mismatch` 与 `residual_latin` 是 advisory，不拦截。只有用户明确接受部分输出才加 `--allow-partial`；此时仅写有效子集，报告 `needs_attention`，返回 2。
+默认 pending 或无效译文尚存时阻止输出。门禁只看 pending、passthrough 和结构检查失败；`residual_latin` 是 advisory，不拦截。只有用户明确接受部分输出才加 `--allow-partial`；此时仅写有效子集，报告 `needs_attention`，返回 2。
 
 目标依适配器：RMMZ 原地写回，文档类通常生成翻译副本，JSONL 目录输出 `translated.jsonl`、文件输入输出语言后缀副本，custom 由 Profile 决定，auto 由其内容处理决定。不要承诺所有适配器都写同一种文件名或编码。
 
@@ -196,7 +195,7 @@ attx glossary check --workspace <工作区>
 
 `build` 有额外模型费用，默认关闭；显式请求或已有启用配置可执行，不需要重复同一授权。未授权时不自动启用。`--dry-run` 可选，用来查看批次计划，不保证精确费用。
 
-模型从真实源文提取术语，机械验证源文子串和出现次数，按配置限制数量。`min_occurrences` 约束偶发词，姓名框术语有特定处理。报告 `candidates`、`above_threshold`、`truncated`、`asked`、`added`、`rejected`、`total_active`、`min_occurrences`、`sample`。truncated 非零要说明覆盖不全。
+模型从真实源文提取术语，机械验证源文子串和出现次数，按配置限制数量。`min_occurrences` 约束偶发词，没有豁免通道；低频但重要的名字用 `glossary add` 显式加入。报告 `candidates`、`above_threshold`、`truncated`、`asked`、`added`、`rejected`、`total_active`、`min_occurrences`、`sample`。truncated 非零要说明覆盖不全。
 
 `check` 的 `violations` 包含 `src`、`dst`、`occurrences`、`applied`，是子串审阅辅助，不保证语义错误。import 接受 `[{"src":"...","dst":"...","info":"..."}]` 或原文到译名的 JSON 对象。
 

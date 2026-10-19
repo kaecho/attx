@@ -61,8 +61,7 @@ attx review --workspace './.attx-novel'
   "identical": {"count": 1, "sample": [
     {"location": "scene#3", "unit_id": "example-original", "detail": "translation identical to source"}
   ]},
-  "control_loss": {"count": 0, "sample": []},
-  "namebox_mismatch": {"count": 0, "sample": []}
+  "control_loss": {"count": 0, "sample": []}
 }
 ```
 
@@ -74,10 +73,11 @@ attx review --workspace './.attx-novel'
 | `kana_untranslated` | 仍是日文片段或日文原文占位；需翻译/修复 |
 | `identical` | 需要翻译的原文原样复制；不算完成 |
 | `control_loss` | 保护符/变量丢失，应修复，不能关闭保护蒙混通过 |
-| `namebox_mismatch` | 同场景姓名框与正文姓名用法不一致；检查称呼和上下文 |
 | `residual_latin` | 中文、日文或韩文译文中残留的源语言拉丁片段；单字母和 2–4 位大写缩写不计 |
 
-`namebox_mismatch` 与 `residual_latin` 都只是提示：会进入 repair 候选，但不会拦截写回。姓名框比较会先合并 reflow 拆开的译行，并折叠常见日文新字体与中文简繁写法（汚/污、桜/樱、種/种、說/说），所以有意的名字本地化或拆行不再被当成不可写回。
+`residual_latin` 只是提示：会进入 repair 候选，但不拦截写回。
+
+译名一致性走数据驱动，不做按格式的专项检查：术语表用 `glossary.violations` 报告已建立译名缺失，属于建议；preserve 规则负责字面量精确与结构保护。review 不检查说话人姓名，所以用代词处理名字不会被当成不可写回。
 
 三个 kana 分类对同一单元互斥，但会和聚合残留及 identical 等重叠。不能把所有 count 相加当作唯一问题单元数。源语言检测包含常见 Latin、CJK、Hangul、Cyrillic、Arabic、Devanagari、Thai 的启发式，不是真正的语言识别。引用、专名、中文与日文共有汉字可能误报或漏报。
 
@@ -90,7 +90,7 @@ attx repair --workspace './.attx-novel' --dry-run
 attx repair --workspace './.attx-novel'
 ```
 
-修复候选包括 pending、passthrough、源文残留、控制符和姓名框问题，候选集合不受 report 40 条样例上限影响。`translate`/`run` 最多附加配置的修复轮数；显式 repair 至少一轮。HTTP 重试和修复轮不是同一个设置，准确预算见[配置](configuration.md)。
+修复候选包括 pending、passthrough、源文残留和控制符问题，候选集合不受 report 40 条样例上限影响。`translate`/`run` 最多附加配置的修复轮数；显式 repair 至少一轮。HTTP 重试和修复轮不是同一个设置，准确预算见[配置](configuration.md)。
 
 达上限或无进展后，报告 `unresolved`，再用全量 JSONL 人工审校。不要不断重新运行 repair 把有限预算变成无限调用。默认 writeback 拦截待译和无效单元；明确使用 `--allow-partial` 才写有效子集，未解决位置保留原文，返回 2。
 

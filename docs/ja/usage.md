@@ -46,7 +46,7 @@ attx glossary add --workspace .attx-novel --src "アレイ" --dst "艾蕾" --inf
 attx glossary check --workspace .attx-novel
 ```
 
-model が実原文から候補を挙げ、原文 substring とその語を含むユニット数を検証して保持します。複数行ユニットで何度出ても 1 件です。既定は min_occurrences=10、max_terms=200、inject_limit=30、最大 40 抽出 batch です。姓名框の名前には専用処理があります。候補が保持数上限を超えれば `truncated` を報告します。40 batch の原文 coverage 上限は別の限界であり、語彙表があるだけで固有名詞の全使用を保証しません。
+model が実原文から候補を挙げ、原文 substring とその語を含むユニット数を検証して保持します。複数行ユニットで何度出ても 1 件です。既定は min_occurrences=10、max_terms=200、inject_limit=30、最大 40 抽出 batch です。閾値を迂回する例外はなく、低頻度でも重要な名前は `glossary add` で追加します。候補が保持数上限を超えれば `truncated` を報告します。40 batch の原文 coverage 上限は別の限界であり、語彙表があるだけで固有名詞の全使用を保証しません。
 
 保存 schema は `glossary.toml` です。
 

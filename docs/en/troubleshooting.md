@@ -89,7 +89,7 @@ attx --config "./setting.toml" repair --workspace "./workspace" --dry-run
 attx --config "./setting.toml" repair --workspace "./workspace"
 ```
 
-A dry-run can exit 0 while the plan still says blocked. It does not fix anything. Explicit `--allow-partial` writes valid units and keeps/restores originals for unresolved text, still exiting 2. Use it only when that partial result is actually acceptable. Blocking is limited to pending, passthrough and structurally invalid units; `review.namebox_mismatch` and `review.residual_latin` are advisory and never block, so a report full of namebox drift is not a reason to force partial output.
+A dry-run can exit 0 while the plan still says blocked. It does not fix anything. Explicit `--allow-partial` writes valid units and keeps/restores originals for unresolved text, still exiting 2. Use it only when that partial result is actually acceptable. Blocking is limited to pending, passthrough and structurally invalid units; `review.residual_latin` is advisory and never blocks, and entity naming is handled by the glossary rather than a blocking rule.
 
 Chinese kana cleanup is narrow and does not delete full Japanese passages. Do not add broad preserve regexes or remove text to make residual counters zero. Glossary substring misses are advisory; inspect inflection before rewriting a correct term.
 

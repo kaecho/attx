@@ -59,7 +59,7 @@ attx glossary import --workspace './.attx-book' --file './terms.json'
 
 JSON 导入支持 `[{"src":"...","dst":"...","info":"..."}]` 或 `{ "原文": "译名" }`。模型构建筛选真实源文子串、出现次数及术语数量；每批只注入相关 active 且有 dst 的术语。rejected 保留以免重复付费询问，list --all 可看。
 
-glossary check 是译名子串审阅辅助，可能误报，不是硬拒绝。构建默认关闭、有费用，最多 40 源批次，不保证全文覆盖；truncated 只报告被 max_terms 截掉的候选，不报告源批次覆盖。min_occurrences=10（实际至少1）、max_terms=200、inject_limit=30 可配置，姓名框候选优先。损坏术语文件会报告 stderr 并按空术语表处理，不应忽略该诊断。
+glossary check 是译名子串审阅辅助，可能误报，不是硬拒绝。构建默认关闭、有费用，最多 40 源批次，不保证全文覆盖；truncated 只报告被 max_terms 截掉的候选，不报告源批次覆盖。min_occurrences=10（实际至少1）、max_terms=200、inject_limit=30 可配置，没有豁免门槛的特例，低频名字用 `glossary add`。损坏术语文件会报告 stderr 并按空术语表处理，不应忽略该诊断。
 
 ## 保护规则 schema 1
 

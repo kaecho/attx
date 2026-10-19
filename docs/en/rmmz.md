@@ -72,7 +72,7 @@ attx --config "./setting.toml" repair --workspace "./My Game translation"
 attx export-jsonl --workspace "./My Game translation" --output "./game review.jsonl" --filter all
 ```
 
-Inspect speaker plates, menu labels, choices, scrolling text, and long dialogue using the game's real font and plugins. Review reports check controls, source-script residue, and speaker/name relationships, but cannot exercise the game runtime or verify semantics.
+Inspect speaker plates, menu labels, choices, scrolling text, and long dialogue using the game's real font and plugins. Review reports check controls and source-script residue; speaker names are extracted and written as their own units, and term consistency comes from the glossary, not from a per-format name rule. Review cannot exercise the game runtime or verify semantics.
 
 For human corrections, edit only JSONL translation fields, import them, and run writeback again. Do not directly edit cached SQLite rows or manually delete Japanese strings to clear a warning. Add concrete workspace prompt notes or glossary mappings before future requests when they express a reusable requirement.
 

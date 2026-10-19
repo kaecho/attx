@@ -33,7 +33,7 @@ attx repair --workspace <工作区>
 
 - pending：尚未完成，续译有效单元即可。
 - passthrough：模型失败或拒答后的原文占位，不是翻译成功。`repair` 会处理候选；专项重试也可用 `translate --retry-passthrough`。
-- 残留假名、控制符丢失、姓名框不一致：先有限修复；剩余项导出 JSONL 校对再导入。`kana_edge`、`kana_mixed`、`kana_untranslated` 不应混为一类，也不能靠删除整句解决。
+- 残留假名、控制符丢失：先有限修复；剩余项导出 JSONL 校对再导入。`kana_edge`、`kana_mixed`、`kana_untranslated` 不应混为一类，也不能靠删除整句解决。译名不一致先补 glossary 词条，程序不做按格式的姓名检查。
 - 术语子串告警：人工判断是否误报，不以替换所有子串或全量重译消除告警。
 
 用户未接受部分结果时，不使用 `--allow-partial`。限额任务或达到上限仍有未解决项应报告 `needs_attention`，不要伪造 `ok`。

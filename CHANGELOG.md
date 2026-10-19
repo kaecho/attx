@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.1
+
+### Changed
+
+- Removed the format-specific speaker-name review. The `review.namebox_mismatch` bucket, the hand-written Japanese shinjitai / Chinese simplified-traditional folding table, the cross-unit name scan and the glossary's namebox exemption are gone. Term and entity consistency is data-driven instead: the glossary reports advisory `glossary.violations`, preserve rules keep literals exact, and a name legitimately rendered as a pronoun is never treated as unwritable.
+- `min_occurrences` now applies to every mined glossary term. A rare but important name is added explicitly with `glossary add` instead of bypassing the floor.
+- `repair` and writeback share one candidate set: passthrough, structural/quality failure, and target-script residue. Only pending, passthrough and structurally invalid units hold output back.
+
 ## 0.11.0
 
 ### Bug fixes

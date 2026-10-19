@@ -8,7 +8,7 @@ Agent Translation Toolkit eXtensible is a Rust command-line translator for games
 identify → extract → optional glossary → translate → check and repair → safe writeback
 ```
 
-Version 0.11.0 keeps translation and agent automation on the same pipeline. Failed units receive bounded targeted retries; unresolved units remain visible. Normal translation requests no longer require a separate writeback-permission conversation.
+Version 0.11.1 keeps translation and agent automation on the same pipeline. Failed units receive bounded targeted retries; unresolved units remain visible. Normal translation requests no longer require a separate writeback-permission conversation.
 
 ## Let an agent handle setup
 
@@ -137,7 +137,7 @@ attx repair --workspace ".attx-novel"
 attx writeback --workspace ".attx-novel" --dry-run
 ```
 
-Review reports residual source script, `kana_edge`, `kana_mixed`, `kana_untranslated`, identical copies, protected-token loss, namebox drift and glossary advisories. Samples are capped; repair selection is not capped by report samples. Successful writeback persists normalized and reflowed lines into the cache, so later exports describe the rendered lines.
+Review reports residual source script, `kana_edge`, `kana_mixed`, `kana_untranslated`, identical copies, protected-token loss, leftover Latin fragments in a CJK target, and glossary advisories. Samples are capped; repair selection is not capped by report samples. Entity naming and terminology come from the glossary, not from a per-format rule. Successful writeback persists normalized and reflowed lines into the cache, so later exports describe the rendered lines.
 
 No model can guarantee a perfect translation of every input in one pass. Checks catch specific structural and script problems; they cannot prove meaning, voice, complete extraction or actual game rendering. [Quality and repair](docs/en/quality.md) describes those limits.
 

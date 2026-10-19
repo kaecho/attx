@@ -1,8 +1,9 @@
 //! Mechanical post-translate review. No LLM.
 //!
-//! Surfaces leftover source script, identical copies, dropped preserve tokens,
-//! namebox/body drift, and glossary misses so an agent can fix via JSONL
-//! instead of guessing.
+//! Surfaces leftover source script, identical copies, dropped preserve tokens
+//! and glossary misses so an agent can fix via JSONL instead of guessing.
+//! Entity/term consistency is data-driven: it comes from the glossary and
+//! preserve rules, not from per-format heuristics.
 
 use crate::glossary::{self, Glossary};
 use crate::model::{TextUnit, Translation};
@@ -54,7 +55,6 @@ pub struct Report {
     pub kana_untranslated: Bucket,
     pub identical: Bucket,
     pub control_loss: Bucket,
-    pub namebox_mismatch: Bucket,
     /// Source Latin text left inside a CJK translation. Advisory only.
     pub residual_latin: Bucket,
 }
@@ -166,8 +166,6 @@ pub fn inspect(
         }
     }
 
-    let namebox_mismatch = namebox_hits(units, translations);
-
     Report {
         total: units.len(),
         translated,
@@ -183,7 +181,6 @@ pub fn inspect(
         kana_untranslated: Bucket::from_hits(kana_untranslated),
         identical: Bucket::from_hits(identical),
         control_loss: Bucket::from_hits(control_loss),
-        namebox_mismatch: Bucket::from_hits(namebox_mismatch),
         residual_latin: Bucket::from_hits(residual_latin),
     }
 }
@@ -215,127 +212,6 @@ fn latin_residue_fragments<'a>(dst: &'a str, src: &str) -> Vec<&'a str> {
     fragments
 }
 
-/// Japanese shinjitai/kyūjitai and Chinese simplified/traditional variants that
-/// a translator may legitimately use in place of the namebox spelling. Folding
-/// is only for comparison; writeback never rewrites the translation.
-fn fold_variant(c: char) -> char {
-    match c {
-        '汚' => '污',
-        '櫻' | '桜' => '樱',
-        '種' => '种',
-        '實' => '实',
-        '寶' => '宝',
-        '國' => '国',
-        '廣' => '广',
-        '舊' => '旧',
-        '眞' => '真',
-        '劍' => '剑',
-        '龍' => '龙',
-        '鳳' => '凤',
-        '戰' => '战',
-        '鬥' => '斗',
-        '氣' => '气',
-        '樂' => '乐',
-        '藥' => '药',
-        '髮' => '发',
-        '齒' => '齿',
-        '歲' => '岁',
-        '萬' => '万',
-        '與' => '与',
-        '為' => '为',
-        '會' => '会',
-        '來' => '来',
-        '個' => '个',
-        '們' => '们',
-        '時' => '时',
-        '說' => '说',
-        '對' => '对',
-        '現' => '现',
-        '懷' => '怀',
-        '爺' => '爷',
-        '譯' => '译',
-        '該' => '该',
-        '難' => '难',
-        '覺' => '觉',
-        '愛' => '爱',
-        '開' => '开',
-        '這' => '这',
-        '麼' => '么',
-        '嗎' => '吗',
-        '妳' => '你',
-        '裡' | '裏' => '里',
-        '隣' => '邻',
-        '靜' => '静',
-        '淨' => '净',
-        '燒' => '烧',
-        other => other,
-    }
-}
-
-/// Fold variants and drop whitespace so `そら ♥ 桜月` and `空♥樱月` compare.
-fn fold_name(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_whitespace())
-        .map(fold_variant)
-        .collect()
-}
-
-fn namebox_hits(
-    units: &[TextUnit],
-    translations: &BTreeMap<String, Translation>,
-) -> Vec<Hit> {
-    let mut hits = Vec::new();
-    for nb in units.iter().filter(|u| is_namebox(u)) {
-        let Some(nb_tr) = translations.get(&nb.id) else {
-            continue;
-        };
-        if nb_tr.passthrough {
-            continue;
-        }
-        let src_name = nb.joined_text();
-        // RMMZ reflow can split a name across 401 slots, so compare against the
-        // joined translation rather than individual physical lines.
-        let dst_name = nb_tr.translation_lines.concat();
-        if src_name.trim().is_empty() || dst_name.trim().is_empty() {
-            continue;
-        }
-        let folded_src = fold_name(&src_name);
-        let folded_dst = fold_name(&dst_name);
-        if folded_src.is_empty() || folded_dst.is_empty() {
-            continue;
-        }
-        for u in units {
-            if u.id == nb.id || u.context != nb.context {
-                continue;
-            }
-            if !u.original_lines.iter().any(|l| fold_name(l).contains(folded_src.as_str())) {
-                continue;
-            }
-            let Some(tr) = translations.get(&u.id) else {
-                continue;
-            };
-            if tr.passthrough {
-                continue;
-            }
-            let joined = tr.translation_lines.concat();
-            if !fold_name(&joined).contains(folded_dst.as_str()) {
-                hits.push(Hit {
-                    location: u.location.clone(),
-                    unit_id: u.id.clone(),
-                    detail: format!(
-                        "namebox `{src_name}` → `{dst_name}` not used in this unit"
-                    ),
-                });
-            }
-        }
-    }
-    hits
-}
-
-pub fn is_namebox(u: &TextUnit) -> bool {
-    u.domain == "namebox" || u.role == "namebox"
-}
-
 fn hit(unit: &TextUnit, detail: &str) -> Hit {
     Hit {
         location: unit.location.clone(),
@@ -344,11 +220,11 @@ fn hit(unit: &TextUnit, detail: &str) -> Hit {
     }
 }
 
-/// Units that cannot be written: the cached text is a passthrough placeholder,
-/// fails structural/quality checks, or still carries target-script residue.
-/// Namebox drift is deliberately absent — it is advisory and must never block a
-/// writeback (a name may legitimately be rendered as a pronoun or split by
-/// RMMZ message reflow).
+/// Units that cannot be written or that `repair` must target: the cached text is
+/// a passthrough placeholder, fails the structural/quality contract, or still
+/// carries target-script residue. Entity naming, terminology and speaker
+/// consistency are not checked here; that belongs to the data-driven glossary
+/// and preserve rules, which are advisory or literal-exact respectively.
 pub fn blocking_unit_ids(
     units: &[TextUnit],
     translations: &BTreeMap<String, Translation>,
@@ -365,22 +241,6 @@ pub fn blocking_unit_ids(
     }).collect()
 }
 
-/// Uncapped repair candidates. Glossary substring misses remain advisory because
-/// inflected target forms can be correct without containing the exact glossary text.
-/// Namebox drift is included so `repair` can still target it.
-pub fn repair_unit_ids(
-    units: &[TextUnit],
-    translations: &BTreeMap<String, Translation>,
-    _glossary: &Glossary,
-    source_lang: &str,
-    target_lang: &str,
-    preserve: &PreserveSet,
-) -> BTreeSet<String> {
-    let mut ids = blocking_unit_ids(units, translations, source_lang, target_lang, preserve);
-    ids.extend(namebox_hits(units, translations).into_iter().map(|hit| hit.unit_id));
-    ids
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,11 +253,7 @@ mod tests {
             domain: domain.into(),
             location: id.into(),
             item_type: ItemType::ShortText,
-            role: if domain == "namebox" {
-                "namebox".into()
-            } else {
-                String::new()
-            },
+            role: String::new(),
             original_lines: vec![text.into()],
             source_line_paths: vec![],
             context: context.into(),
@@ -415,14 +271,12 @@ mod tests {
     }
 
     #[test]
-    fn residual_kana_and_identical_and_namebox() {
+    fn residual_kana_and_identical() {
         let units = vec![
-            unit("nb", "namebox", "map1", "アレイ"),
             unit("d1", "dialogue", "map1", "アレイは村を出た"),
             unit("d2", "dialogue", "map1", "今日はいい天気"),
         ];
         let mut translations = BTreeMap::new();
-        translations.insert("nb".into(), tr("nb", "艾蕾", false));
         translations.insert("d1".into(), tr("d1", "アレイ离开了村子", false));
         translations.insert("d2".into(), tr("d2", "今日はいい天気", false));
         let g = Glossary::default();
@@ -438,9 +292,8 @@ mod tests {
         assert_eq!(report.kana_mixed.count, 1);
         assert_eq!(report.kana_untranslated.count, 1);
         assert_eq!(report.identical.count, 1, "d2 copied source");
-        assert_eq!(report.namebox_mismatch.count, 1, "d1 did not use 艾蕾");
         assert_eq!(report.passthrough, 0);
-        assert_eq!(report.translated, 3);
+        assert_eq!(report.translated, 2);
     }
 
     #[test]
@@ -522,59 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn namebox_drift_is_repair_only_not_blocking() {
-        let units = vec![
-            unit("nb", "namebox", "map1", "アレイ"),
-            unit("d1", "dialogue", "map1", "アレイは村を出た"),
-        ];
-        let translations = BTreeMap::from([
-            ("nb".into(), tr("nb", "艾蕾", false)),
-            ("d1".into(), tr("d1", "她离开了村子", false)),
-        ]);
-        let blocking = blocking_unit_ids(&units, &translations, "ja", "zh", PreserveSet::core());
-        assert!(blocking.is_empty(), "advisory namebox drift must not block writeback");
-        let repair = repair_unit_ids(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
-        assert_eq!(repair, BTreeSet::from(["d1".to_string()]));
-        let report = inspect(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
-        assert_eq!(report.namebox_mismatch.count, 1, "drift is still reported");
-    }
-
-    #[test]
-    fn namebox_matches_across_reflow_split_lines() {
-        let units = vec![
-            unit("nb", "namebox", "map1", "アレイ"),
-            unit("d1", "dialogue", "map1", "アレイは村を出た"),
-        ];
-        let mut dialogue = tr("d1", "艾蕾", false);
-        dialogue.translation_lines.push("离开了村子".into());
-        let translations = BTreeMap::from([
-            ("nb".into(), tr("nb", "艾蕾", false)),
-            ("d1".into(), dialogue),
-        ]);
-        let report = inspect(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
-        assert_eq!(report.namebox_mismatch.count, 0, "name split by reflow still matches");
-    }
-
-    #[test]
-    fn namebox_variant_folding_matches_simplified_forms() {
-        let units = vec![
-            unit("nb", "namebox", "map1", "矢理汚"),
-            unit("nb2", "namebox", "map2", "桜月"),
-            unit("d1", "dialogue", "map1", "矢理汚は笑った"),
-            unit("d2", "dialogue", "map2", "そら♥桜月の大好きな乳首虐められてイケ♥"),
-        ];
-        let translations = BTreeMap::from([
-            ("nb".into(), tr("nb", "矢理污", false)),
-            ("nb2".into(), tr("nb2", "樱月", false)),
-            ("d1".into(), tr("d1", "矢理污笑了", false)),
-            ("d2".into(), tr("d2", "来吧♥你最喜欢的乳头被玩弄着……", false)),
-        ]);
-        let report = inspect(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
-        assert_eq!(report.namebox_mismatch.count, 1, "only the intentionally pronominal rendering drifts");
-        assert_eq!(report.namebox_mismatch.sample[0].unit_id, "d2");
-    }
-
-    #[test]
     fn pending_and_passthrough_still_block() {
         let units = vec![
             unit("pending", "dialogue", "m", "こんにちは"),
@@ -608,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_candidates_are_uncapped_and_exclude_pending() {
+    fn blocking_candidates_are_uncapped_and_exclude_pending() {
         let mut units = Vec::new();
         let mut translations = BTreeMap::new();
         for i in 0..45 {
@@ -619,7 +419,7 @@ mod tests {
         units.push(unit("pending", "dialogue", "m", "こんにちは"));
         units.push(unit("protected", "dialogue", "m", r"\SE[カナ]"));
         translations.insert("protected".into(), tr("protected", r"\SE[カナ]", false));
-        let ids = repair_unit_ids(&units, &translations, &Glossary::default(), "ja", "zh", PreserveSet::core());
+        let ids = blocking_unit_ids(&units, &translations, "ja", "zh", PreserveSet::core());
         assert_eq!(ids.len(), 45);
         assert!(!ids.contains("pending"));
         assert!(!ids.contains("protected"));

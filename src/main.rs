@@ -193,7 +193,7 @@ enum Commands {
         #[arg(long)]
         workspace: PathBuf,
     },
-    /// Mechanical post-translate review (no LLM): residual source, identical copies, preserve loss, namebox drift, glossary
+    /// Mechanical post-translate review (no LLM): residual source, identical copies, preserve loss, glossary
     Review {
         #[arg(long)]
         workspace: PathBuf,

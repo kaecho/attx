@@ -125,7 +125,8 @@ pub struct GlossarySection {
     #[serde(default)]
     pub enabled: bool,
     /// A candidate the LLM extracted must occur at least this often in the
-    /// real source text to enter the glossary (namebox speaker plates excepted).
+    /// real source text to enter the glossary. Nothing bypasses this floor; a
+    /// rare but important name is added explicitly with `glossary add`.
     #[serde(default = "default_min_occurrences")]
     pub min_occurrences: usize,
     /// Cap on terms kept after extraction (highest occurrence count first).

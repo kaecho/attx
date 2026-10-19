@@ -85,7 +85,7 @@ Targets the shared review candidate set: pending, passthrough, residual source, 
 
 Normalizes in memory, checks completeness/source identity, renders/stages artifacts, checks backups, and replaces per file. `--dry-run` plans only. `--no-learn` skips this invocation's post-writeback experience summary. `--allow-partial` writes valid entries and retains/restores original source for unresolved entries; incomplete output remains exit 2.
 
-Default incomplete writeback reports blocked with no paths/files and makes no output/cache mutation. Blocking is limited to pending units, passthrough entries, and units that fail structural checks; `review.namebox_mismatch` and `review.residual_latin` are advisory and do not block. `skipped_note` splits the skipped count into pending, passthrough, and failed structural checks. Actual successful writeback persists normalized/reflowed cache text. There is no mandatory interactive writeback permission prompt.
+Default incomplete writeback reports blocked with no paths/files and makes no output/cache mutation. Blocking is limited to pending units, passthrough entries, and units that fail structural checks; `review.residual_latin` is advisory and does not block. `skipped_note` splits the skipped count into pending, passthrough, and failed structural checks. Actual successful writeback persists normalized/reflowed cache text. There is no mandatory interactive writeback permission prompt.
 
 ### `run --input <path> [--engine <id>] [--profile <path-or-name>] [--src ja] [--dst zh] [--workspace <dir>] [--limit N] [--no-translate] [--no-writeback] [--glossary | --no-glossary] [--no-infer | --infer] [--allow-partial]`
 
@@ -124,7 +124,7 @@ Used by `translate`, `repair`, and `translate-jsonl`; `run.translate` embeds it.
 | `planned` | Units selected within the limit |
 | `repaired` | Initially flagged units successfully repaired |
 | `repair_rounds` | Extra/explicit repair passes executed |
-| `unresolved` | Unwritable units after work (passthrough, structural failure, target-script residue); advisory namebox drift is excluded |
+| `unresolved` | Unwritable units after work (passthrough, structural failure, target-script residue) |
 | `normalized_lines` | Line-break and Chinese-target normalization changes on this path |
 | `review` | Full mechanical review report |
 
@@ -149,7 +149,7 @@ Read `dry_run` with the counts; the same path array can describe a plan rather t
 
 ## Review report fields
 
-Each bucket is `{count, sample:[{location,unit_id,detail}]}`, with at most 40 samples. Buckets are `residual_source`, `kana_edge`, `kana_mixed`, `kana_untranslated`, `identical`, `control_loss`, `namebox_mismatch`, and `residual_latin`. The kana buckets are disjoint, but aggregates and other categories overlap. `namebox_mismatch` and `residual_latin` are advisory: they drive `repair` but never block writeback. Do not sum them as a unique-unit count.
+Each bucket is `{count, sample:[{location,unit_id,detail}]}`, with at most 40 samples. Buckets are `residual_source`, `kana_edge`, `kana_mixed`, `kana_untranslated`, `identical`, `control_loss`, and `residual_latin`. The kana buckets are disjoint, but aggregates and other categories overlap. `residual_latin` is advisory: it drives `repair` but never blocks writeback. Entity naming and terminology are checked only through the data-driven glossary, not by a per-format rule. Do not sum counts as a unique-unit count.
 
 `glossary` contains `active_terms`, `terms_seen`, `terms_fully_applied`, and `violations[{src,dst,occurrences,applied}]`. These substring warnings are advisory. Repair selection is not limited to the visible sample arrays. Full text requires JSONL export.
 

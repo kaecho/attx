@@ -66,7 +66,7 @@ attx repair --workspace './.attx-book' --dry-run
 attx repair --workspace './.attx-book'
 ```
 
-pending、passthrough、结构无效和真实残留可使默认写回 blocked；`review.namebox_mismatch` 与 `review.residual_latin` 只是提示，不会拦截写回，不要因为姓名框样例多就强行部分输出。有限修复用完或无进展时用 export-jsonl --filter all 人工校对；不能无穷重跑来隐藏问题。术语子串建议可能误报，不能因此机械重译全项目。
+pending、passthrough、结构无效和真实残留可使默认写回 blocked；`review.residual_latin` 只是提示，不会拦截写回，译名一致性由术语表负责。有限修复用完或无进展时用 export-jsonl --filter all 人工校对；不能无穷重跑来隐藏问题。术语子串建议可能误报，不能因此机械重译全项目。
 
 主动试译 --limit N 时退出2可能只是剩余未处理条目，不代表缓存丢失。继续全量或明确保留样本，不能宣称已经完成。dry-run 返回0也可能携带 blocked 计划，未写文件。
 
@@ -85,11 +85,11 @@ pending、passthrough、结构无效和真实残留可使默认写回 blocked；
 
 整文件先验证再一个事务保存，失败不留半导入状态。中文尾屑可规范化，但真正日文残留保留并进入后续修复，默认写回仍检查。
 
-## 中文或姓名框仍有问题
+## 中文残留或译名不一致
 
 不能把所有假名删掉。完整日文、姓名、语义字形引用和保护串不机械清理，详情见[质量页](quality.md)。过宽 preserve 会隐藏漏翻，应只保护机器片段。
 
-姓名框与正文不同译名时先维护 glossary，再定向修复或人工 JSONL 校对。修改术语/note 不会自动重译已完成条目。RMMZ 首槽说话人不能被正文挤占，固定槽位不增加事件指令；最后槽的 overflow_lines 需要试玩或人工缩短译文，不裁掉句尾。
+译名不一致时先维护 glossary（`glossary add` 或构建术语表），再定向修复或人工 JSONL 校对；程序不做按格式的姓名一致性检查。修改术语/note 不会自动重译已完成条目。RMMZ 首槽说话人不能被正文挤占，固定槽位不增加事件指令；最后槽的 overflow_lines 需要试玩或人工缩短译文，不裁掉句尾。
 
 ## 备份和替换失败
 

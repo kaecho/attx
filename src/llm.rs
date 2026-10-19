@@ -138,7 +138,7 @@ fn system_prompt(source_lang: &str, target_lang: &str, profile: Profile) -> Stri
 - 忠实保留原意、语气和内容尺度，不净化、不扩写、不遗漏。
 - 形如 [CTRL_n] 的标记必须原样保留，数量与相对位置一致，不翻译。
 - 引擎占位符与标记（如 {{tag}}、%s、%d、\n）原样保留；普通方括号里的自然语言照常翻译。
-- 姓名栏（role/namebox）与正文对同一实体必须使用同一译名。
+- 同一人名、专名、术语和称谓在全文中必须使用同一译名；术语表词条优先，不要夹注原文。
 - 译文中不得残留源语假名或韩文；专有名词按术语表翻译，不要夹注原文。
 - 中文句尾气音 っ/ッ 不留假名；っすよ/っす 用中文口癖表达，长音 ー 写成 ～；间隔号或清单圆点 ・ 保留。
 - 独立的【姓名】行必须译成独立姓名行，正文另起行，不能遗漏姓名或正文；「く」等字形说明按语义翻译。
@@ -159,7 +159,7 @@ Rules:
 - Keep meaning, tone, and content rating. Do not censor, expand, or omit.
 - Tokens like [CTRL_n] must be kept verbatim, same count and relative position.
 - Engine placeholders ({{tag}}, %s, %d, \n) stay verbatim. Translate ordinary prose in square brackets.
-- A namebox/role label and body text for the same entity must share one translation.
+- The same person, proper noun, term or title must use one translation throughout; glossary entries take precedence.
 - Keep an independent 【speaker】 label with the same brackets, translated on its own line; do not omit the label or the following dialogue.
 - Use the target language; translate source-script residue unless that script belongs to the target language or an explicitly protected literal. Use the glossary for names.
 - prev/next neighbor lines are context only; do not translate them.

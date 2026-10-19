@@ -82,7 +82,7 @@ translate --workspace <dir> [--limit N] [--dry-run] [--retry-passthrough]
 repair --workspace <dir> [--limit N] [--dry-run]
 ```
 
-translate は pending と機械レビュー対象を処理し、retry-passthrough は原文仮置きを再 queue します。repair は pending、passthrough、残留、control、namebox 問題を有限に修復します。limit はユニット上限、dry-run は HTTP と translation cache 更新なしの計画です。
+translate は pending と機械レビュー対象を処理し、retry-passthrough は原文仮置きを再 queue します。repair は pending、passthrough、残留、control 問題を有限に修復します。limit はユニット上限、dry-run は HTTP と translation cache 更新なしの計画です。
 
 共通 TranslateReport:
 
@@ -98,7 +98,7 @@ translate は pending と機械レビュー対象を処理し、retry-passthroug
 | `planned` | 選ばれた初期対象数 |
 | `repaired` | 初期レビュー問題から解決した数 |
 | `repair_rounds` | 実行した修復パス数 |
-| `unresolved` | 実行後に書き込み不能な単位数（passthrough、構造失敗、対象文字残留）。advisory の namebox ずれは含まない |
+| `unresolved` | 実行後に書き込み不能な単位数（passthrough、構造失敗、対象文字残留） |
 | `normalized_lines` | 改行と Chinese 正規化で変わった行の signal |
 | `review` | 最終機械レビュー |
 
@@ -110,7 +110,7 @@ pending と review の問題は重複し得るため、全値を足して単純�
 writeback --workspace <dir> [--dry-run] [--no-learn] [--allow-partial]
 ```
 
-source/hash と anchor を検査し、正規化・固定 slot reflow・完全性検査の後に書きます。通常翻訳依頼の書き戻しに追加 permission はありません。未解決があれば既定で block します。block 条件は pending、passthrough、構造検査失敗のみで、`review.namebox_mismatch` と `review.residual_latin` は advisory として writeback を止めません。`skipped_note` は pending / passthrough / 構造失敗の内訳を示します。allow-partial はユーザーが未解決原文を残す output を認めた場合のみ使用します。no-learn は書き戻し後の経験まとめを省略します。
+source/hash と anchor を検査し、正規化・固定 slot reflow・完全性検査の後に書きます。通常翻訳依頼の書き戻しに追加 permission はありません。未解決があれば既定で block します。block 条件は pending、passthrough、構造検査失敗のみで、`review.residual_latin` は advisory として writeback を止めません。`skipped_note` は pending / passthrough / 構造失敗の内訳を示します。allow-partial はユーザーが未解決原文を残す output を認めた場合のみ使用します。no-learn は書き戻し後の経験まとめを省略します。
 
 | フィールド | 意味 |
 |---|---|
@@ -151,7 +151,7 @@ review --workspace <dir>
 
 status は `engine`、`game_path`、`source_lang`、`target_lang`、`total`、`translated`、`pending`、`passthrough`、`domains{domain:{total,translated}}`。
 
-review は `total`、`translated`、`pending`、`passthrough`、`glossary` と `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`namebox_mismatch`、`residual_latin`。各 bucket は `{count,sample:[{location,unit_id,detail}]}`、最大 40 sample。kana 分類は排他的、他 bucket と集約 residual は重複し得ます。`namebox_mismatch` と `residual_latin` は advisory で、repair 対象にはなるが writeback を止めません。review はモデルを呼ばず、警告があるだけで通常の操作終了コードを変えるものではありません。
+review は `total`、`translated`、`pending`、`passthrough`、`glossary` と `residual_source`、`kana_edge`、`kana_mixed`、`kana_untranslated`、`identical`、`control_loss`、`residual_latin`。各 bucket は `{count,sample:[{location,unit_id,detail}]}`、最大 40 sample。kana 分類は排他的、他 bucket と集約 residual は重複し得ます。`residual_latin` は advisory で、repair 対象にはなるが writeback を止めません。訳名の一貫性は glossary が担い、format ごとの専用規則はありません。review はモデルを呼ばず、警告があるだけで通常の操作終了コードを変えるものではありません。
 
 ## JSONL コマンド
 

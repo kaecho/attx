@@ -32,10 +32,11 @@ This uses no HTTP. It returns overall counts and these buckets, each containing 
 | `kana_untranslated` | Japanese passages that still need translation |
 | `identical` | Source text copied unchanged where translation is needed |
 | `control_loss` | Missing, changed, reordered, or incorrectly repeated protected tokens |
-| `namebox_mismatch` | Speaker/name relationship inconsistent between namebox and body |
 | `residual_latin` | Latin source fragment left inside a Chinese, Japanese, or Korean target |
 
-`namebox_mismatch` and `residual_latin` are advisory: `repair` targets them, but they never block writeback. Namebox comparison joins reflow-split translation slots and folds common Japanese shinjitai and Chinese simplified/traditional variants (汚/污, 桜/樱, 種/种, 說/说) before matching, so a deliberate localization of a name or a split speaker line is reported for review, not treated as unwritable. `residual_latin` ignores isolated single Latin graphemes and 2–4 character uppercase acronyms, and only reports fragments that also occur in the source line.
+`residual_latin` is advisory: `repair` targets it, but it never blocks writeback. It ignores isolated single Latin graphemes and 2–4 character uppercase acronyms, and only reports fragments that also occur in the source line.
+
+Entity and terminology consistency is deliberately data-driven, not a per-format check. The glossary reports advisory `glossary.violations` when an established term is missing from a translation, and preserve rules keep literals exact and structural. Nothing in review inspects speaker names, so a name legitimately rendered as a pronoun is never treated as unwritable.
 
 The three kana categories are disjoint classifications. Other buckets can overlap the aggregate or each other, so summing counts is not a unique unresolved-unit total. `review.glossary` has active/seen/applied term counts and `violations`; exact target-substring misses are advisory and can be false positives for inflected languages.
 

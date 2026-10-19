@@ -448,7 +448,7 @@ fn translate_workspace(
     let normalized_lines = normalize_cached(&store, &units, &mut translations, &meta.target_lang, &preserve, !dry_run)?;
     let pending_ids: BTreeSet<&str> = units.iter().filter(|u| !translations.contains_key(&u.id)).map(|u| u.id.as_str()).collect();
     let pending_before = pending_ids.len();
-    let initial_bad = review::repair_unit_ids(&units, &translations, &glossary, &meta.source_lang, &meta.target_lang, &preserve);
+    let initial_bad = review::blocking_unit_ids(&units, &translations, &meta.source_lang, &meta.target_lang, &preserve);
     let planned: Vec<&TextUnit> = units.iter()
         .filter(|u| pending_ids.contains(u.id.as_str()) || initial_bad.contains(&u.id))
         .take(limit.unwrap_or(usize::MAX)).collect();
@@ -460,7 +460,7 @@ fn translate_workspace(
             .with_notes(&notes).with_glossary(glossary.active(), settings.glossary.inject_limit).with_preserve(preserve.clone());
         let passes = if repair_only { settings.translation.repair_rounds.max(1) } else { settings.translation.repair_rounds.saturating_add(1) };
         for pass in 0..passes {
-            let bad = review::repair_unit_ids(&units, &translations, &glossary, &meta.source_lang, &meta.target_lang, &preserve);
+            let bad = review::blocking_unit_ids(&units, &translations, &meta.source_lang, &meta.target_lang, &preserve);
             let candidates: Vec<&TextUnit> = planned.iter().copied()
                 .filter(|u| !translations.contains_key(&u.id) || bad.contains(&u.id)).collect();
             if candidates.is_empty() {
@@ -469,7 +469,7 @@ fn translate_workspace(
             let feedback = candidates.iter().filter_map(|u| {
                 let tr = translations.get(&u.id)?;
                 let issue = quality::check_translation(u, &tr.translation_lines, &meta.source_lang, &meta.target_lang, &preserve)
-                    .err().map(|e| e.to_string()).unwrap_or_else(|| "speaker name inconsistent with namebox; use the established translation".into());
+                    .err().map(|e| e.to_string()).unwrap_or_else(|| "advisory review flagged this unit; re-check the source and the established terminology".into());
                 Some((u.id.clone(), format!("Issue: {issue}\nPrevious output: {}", tr.translation_lines.join("\n"))))
             }).collect();
             if pass > 0 || repair_only {
@@ -496,15 +496,12 @@ fn translate_workspace(
         }
     }
     let blocking = review::blocking_unit_ids(&units, &translations, &meta.source_lang, &meta.target_lang, &preserve);
-    let bad = review::repair_unit_ids(&units, &translations, &glossary, &meta.source_lang, &meta.target_lang, &preserve);
     let report = review::inspect(&units, &translations, &glossary, &meta.source_lang, &meta.target_lang, &preserve);
     let successful = |id: &str| translations.get(id).is_some_and(|tr| !tr.passthrough) && !blocking.contains(id);
     let translated = pending_ids.iter().filter(|id| successful(id)).count();
-    // A repaired unit must clear every finding, including advisory namebox
-    // drift; `successful` alone would call a still-flagged unit repaired.
-    let repaired = initial_bad.iter().filter(|id| successful(id) && !bad.contains(*id)).count();
-    // Namebox drift stays a repair target but is advisory for completion: only
-    // unwritable cached text keeps a run in needs_attention.
+    let repaired = initial_bad.iter().filter(|id| successful(id)).count();
+    // Only cached text that cannot be written keeps a run in needs_attention;
+    // advisory glossary/residue signals stay visible in `review`.
     let unresolved = blocking.len();
     let status = if unresolved > 0 || report.pending > 0 { "needs_attention" } else { "ok" };
     Ok(TranslateReport {

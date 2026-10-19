@@ -29,7 +29,7 @@ use crate::llm;
 use crate::model::{TextUnit, Translation};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const GLOSSARY_VERSION: u32 = 1;
@@ -358,26 +358,17 @@ fn build_llm(
     }
 
     // Rank by real occurrences in the source (not batch votes — those only say
-    // the sampled batches happened to contain the term). Namebox speaker plates
-    // bypass the floor and stay at the front so max_terms cannot drop them.
-    let namebox_set: BTreeSet<String> = namebox_terms(units)
-        .into_iter()
-        .map(|(s, _)| s)
-        .collect();
+    // the sampled batches happened to contain the term). Nothing bypasses the
+    // floor: a name that matters but occurs once is a term to add explicitly
+    // (`glossary add`) or to let the LLM extractor keep.
     let mut ranked: Vec<(String, usize)> = dst_votes
         .keys()
         .map(|src| (src.clone(), count_occurrences(units, src)))
-        .filter(|(src, n)| *n >= min_occ || namebox_set.contains(src))
+        .filter(|(_, n)| *n >= min_occ)
         .collect();
     let candidates = dst_votes.len();
     let above_threshold = ranked.len();
-    ranked.sort_by(|a, b| {
-        let an = namebox_set.contains(&a.0);
-        let bn = namebox_set.contains(&b.0);
-        bn.cmp(&an)
-            .then(b.1.cmp(&a.1))
-            .then_with(|| a.0.cmp(&b.0))
-    });
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let truncated = above_threshold.saturating_sub(max_terms);
     if truncated > 0 {
         eprintln!(
@@ -565,26 +556,6 @@ pub fn normalize_info(raw: &str) -> Option<String> {
         _ => return None,
     };
     Some(mapped.into())
-}
-
-pub fn is_namebox(u: &TextUnit) -> bool {
-    u.domain == "namebox" || u.role == "namebox"
-}
-
-/// Nameplate strings that must enter the glossary even if the miner missed them.
-pub fn namebox_terms(units: &[TextUnit]) -> Vec<(String, usize)> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for u in units {
-        if !is_namebox(u) {
-            continue;
-        }
-        let src = u.joined_text().trim().to_string();
-        if src.chars().count() < 2 || knowledge::is_machine_literal(&src) {
-            continue;
-        }
-        *counts.entry(src).or_insert(0) += 1;
-    }
-    counts.into_iter().collect()
 }
 
 pub fn term_hits_text(term: &GlossaryTerm, text: &str) -> bool {
@@ -918,14 +889,6 @@ mod tests {
         let terms = vec![sensitive, term("Alice", "爱丽丝", 3)];
         assert_eq!(select_for_batch(&terms, "may and Alice", 10).len(), 1);
         assert_eq!(select_for_batch(&terms, "May and Alice", 10).len(), 2);
-    }
-
-    #[test]
-    fn namebox_terms_are_counted() {
-        let mut u = unit("アレイ");
-        u.domain = "namebox".into();
-        u.role = "namebox".into();
-        assert_eq!(namebox_terms(&[u])[0].0, "アレイ");
     }
 
     #[test]

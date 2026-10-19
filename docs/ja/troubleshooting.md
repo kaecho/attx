@@ -84,12 +84,12 @@ attx writeback --workspace .attx-input
 
 | 症状 | 確認と対処 |
 |---|---|
-| writeback blocked | pending/passthrough/構造不正を解決する。namebox_mismatch と residual_latin は advisory で block 要因ではない。追加 permission の不足ではない |
+| writeback blocked | pending/passthrough/構造不正を解決する。residual_latin は advisory で block 要因ではない。追加 permission の不足ではない |
 | 部分 output が必要 | ユーザーが原文残留を受け入れた場合のみ --allow-partial。有効 subset を書き、exit2 を保持 |
 | backup failure | permission、disk、backup path が普通 file か確認。backup を勝手に削除して上書きしない |
 | dry-run 後に file がない | 予定だけの仕様。実 writeback して paths を読む |
 | 途中 I/O failure | per-file atomic で directory transaction ではない。既に書いた file と backup を確認して復旧 |
-| RMMZ speaker が不自然 | namebox_mismatch と export の role/訳を確認。第 1 speaker slot は保護される |
+| RMMZ speaker が不自然 | export の role/訳と glossary の訳名を確認。第 1 speaker slot は保護される |
 | RMMZ overflow_lines がある | 元 command/slot 数を保持するため、最後の slot に長い残りがあり得る。訳を簡潔に調整し再 import、ゲーム表示確認 |
 | plugin に漏れがある | plugins.js の対象表示 parameter を確認。plugin source は意図的に対象外 |
 | 文書の装飾が変わる | DOCX run 集約など adapter 固有の範囲を確認。機械 ok は renderer の見え方を保証しない |
