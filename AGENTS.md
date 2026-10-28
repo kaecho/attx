@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-- Crate `0.11.2`, edition `2024`, `rust-version = "1.89"`, MIT. One binary target, `attx` (`src/main.rs`). No library target, feature flags, or `[dev-dependencies]`.
+- Crate `0.12.0`, edition `2024`, `rust-version = "1.89"`, MIT. One binary target, `attx` (`src/main.rs`). No library target, feature flags, or `[dev-dependencies]`.
 - Core pipeline: `identify → extract → optional glossary → translate → mechanical review and bounded repair → safe writeback`.
 - Built-in adapters: `rmmz` (RPG Maker MV/MZ), `epub`, `html`, `docx`, `xlsx`, `srt`, `vtt`, `ass`, `lrc`, `csv`/TSV, `po`, `renpy`, `md`, `txt`, JSON sniffers `paratranz`, `vnt`, `mtool`, `i18next`, the `jsonl` escape hatch, and the generic `auto` content sniffer. Saved custom profiles use `custom:<name>`.
 - Outputs: document, subtitle, and JSON adapters write a sibling such as `book.zh.epub`. RMMZ writes in place. Custom profiles with `overwrite = true` write in place. `auto` on a directory writes `translated-<dst>/` and copies unsupported files unchanged. First replacement of an existing destination creates `{path}.attxbak`.
@@ -208,7 +208,7 @@ CI uses `cargo build --release --locked`, then `cargo test --locked -- --test-th
 ## Runtime/Tooling Preferences
 
 - Stable Rust, minimum `1.89`, edition 2024. No `rust-toolchain.toml`, no rustfmt/clippy config, no `.cargo/config.toml`, no MSRV CI job. CI and release float `dtolnay/rust-toolchain@stable`.
-- Cargo is the package manager and build tool. `Cargo.lock` is committed and matches `0.11.2`. There is no `[workspace]`, no `[features]`, no build script, and no `[lib]`.
+- Cargo is the package manager and build tool. `Cargo.lock` is committed and matches `0.12.0`. There is no `[workspace]`, no `[features]`, no build script, and no `[lib]`.
 - Release profile: `lto = true`, `codegen-units = 1`, `strip = true`.
 - Native binary only. No Node, Bun, npm, or Python runtime dependency for the tool itself.
 - Documentation uses Python 3.12, `mkdocs-material>=9.5`, and `mkdocs-static-i18n>=1.2`. `mkdocs build --strict` must pass.

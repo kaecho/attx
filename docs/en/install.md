@@ -2,7 +2,7 @@
 
 ## Release packages
 
-Download the package for your platform from [release v0.11.2](https://github.com/kaecho/attx/releases/tag/v0.11.2). Extract the whole archive so the example configuration, profiles, and agent skill remain available.
+Download the package for your platform from [release v0.12.0](https://github.com/kaecho/attx/releases/tag/v0.12.0). Extract the whole archive so the example configuration, profiles, and agent skill remain available.
 
 | Package | Target | Archive |
 |---|---|---|
