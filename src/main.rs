@@ -3,6 +3,7 @@ mod config;
 mod fileio;
 mod glossary;
 mod knowledge;
+mod layout;
 mod learn;
 mod llm;
 mod model;

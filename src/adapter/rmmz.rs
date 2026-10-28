@@ -1,4 +1,5 @@
 use super::{DetectHit, FormatAdapter, OutputFile};
+use crate::layout::{self, control_end};
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -852,32 +853,6 @@ pub fn normalize_for_writeback(unit: &TextUnit, translation: &mut Translation) -
     LayoutChange { reflowed, overflow_lines }
 }
 
-fn standalone_name(text: &str) -> Option<&str> {
-    let text = text.trim();
-    let body = text.strip_prefix('【')?.strip_suffix('】')?;
-    (!body.is_empty() && !body.contains(['【', '】', '\n'])).then_some(text)
-}
-
-/// Accept a collapsed label only where the source reserved a name slot.
-/// Leading controls belong to the body, never to the protected label.
-fn collapsed_name(text: &str) -> Option<(&str, &str, &str)> {
-    let mut start = 0;
-    while start < text.len() {
-        let ch = text[start..].chars().next()?;
-        if ch.is_whitespace() {
-            start += ch.len_utf8();
-        } else if let Some(end) = control_token_end(text, start) {
-            start = end;
-        } else {
-            break;
-        }
-    }
-    let tail = text[start..].strip_prefix('【')?;
-    let end = start + '【'.len_utf8() + tail.find('】')? + '】'.len_utf8();
-    let name = standalone_name(&text[start..end])?;
-    Some((name, &text[..start], &text[end..]))
-}
-
 fn fitted_unit_lines<'a>(
     unit: &TextUnit,
     lines: &'a [String],
@@ -887,36 +862,62 @@ fn fitted_unit_lines<'a>(
     if n < 2 || lines.is_empty() {
         return fit_lines_borrowed(lines, n, max_w);
     }
-    let source_name = unit.original_lines.first().and_then(|line| standalone_name(line));
-    let translated_name = lines.first().and_then(|line| standalone_name(line));
-    if let Some(name) = translated_name {
+    let first = &lines[0];
+    let source_label = unit
+        .original_lines
+        .first()
+        .and_then(|line| layout::standalone_label(line).map(|parts| (line, parts)));
+    let source_slot = source_label.map(|(line, _)| line);
+    let source_prefix = source_label.map_or("", |(_, parts)| parts.prefix);
+    // A label that already owns the first slot stays byte-for-byte intact,
+    // including surrounding colour/reset controls. A leading control is moved
+    // back to the body when the source label slot did not carry one, because
+    // game plugins match the label at the very start of the slot.
+    if let Some(parts) = layout::standalone_label(first) {
+        if source_slot.is_some() && !source_prefix.contains('\\') && parts.prefix.contains('\\') {
+            let mut body = Vec::with_capacity(lines.len());
+            let mut first_body = parts.prefix.to_owned();
+            if let Some(rest) = lines.get(1) {
+                first_body.push_str(rest);
+            }
+            body.push(first_body);
+            body.extend_from_slice(lines.get(2..).unwrap_or_default());
+            let fitted_body = fit_lines_borrowed(&body, n - 1, max_w);
+            let mut out = Vec::with_capacity(n);
+            out.push(parts.label.to_owned());
+            out.extend(fitted_body.into_owned());
+            return Cow::Owned(out);
+        }
         let body = fit_lines_borrowed(&lines[1..], n - 1, max_w);
-        if matches!(&body, Cow::Borrowed(_)) && lines[0] == name {
+        if matches!(&body, Cow::Borrowed(_)) {
             return Cow::Borrowed(lines);
         }
         let mut out = Vec::with_capacity(n);
-        out.push(name.to_owned());
+        out.push(first.clone());
         out.extend(body.into_owned());
         return Cow::Owned(out);
     }
-    if let Some(source_name) = source_name {
+    // The source reserved slot zero for a label. Recover the label from a
+    // collapsed first line, or fall back to the source label when the model
+    // omitted it, and reflow only the body slots.
+    if let Some(source_slot) = source_slot {
         let mut body = Vec::with_capacity(lines.len());
-        let name = if let Some((name, prefix, suffix)) = collapsed_name(&lines[0]) {
-            let mut first_body = String::with_capacity(prefix.len() + suffix.len());
-            first_body.push_str(prefix);
-            first_body.push_str(suffix);
+        let label = if let Some(parts) = layout::leading_label(first) {
+            let mut first_body = String::with_capacity(parts.prefix.len() + parts.suffix.len());
+            first_body.push_str(parts.prefix);
+            first_body.push_str(parts.suffix);
             if !first_body.is_empty() {
                 body.push(first_body);
             }
             body.extend_from_slice(&lines[1..]);
-            name
+            parts.label.to_owned()
         } else {
             body.extend_from_slice(lines);
-            source_name
+            source_slot.clone()
         };
         let fitted_body = fit_lines_borrowed(&body, n - 1, max_w);
         let mut out = Vec::with_capacity(n);
-        out.push(name.to_owned());
+        out.push(label);
         out.extend(fitted_body.into_owned());
         return Cow::Owned(out);
     }
@@ -992,7 +993,7 @@ fn display_width(s: &str) -> usize {
     let mut i = 0;
     let b = s.as_bytes();
     while i < b.len() {
-        if b[i] == b'\\' && let Some(end) = control_token_end(s, i) {
+        if b[i] == b'\\' && let Some(end) = control_end(s, i) {
                 i = end;
                 continue;
         }
@@ -1011,49 +1012,27 @@ fn spawns_half_width(ch: char) -> bool {
     (ch as u32) < 128
 }
 
-/// End offset of an RPG Maker control code starting at `i` (`s.as_bytes()[i]==b'\\'`),
-/// or None if it is a lone backslash.
-fn control_token_end(s: &str, i: usize) -> Option<usize> {
-    let b = s.as_bytes();
-    if i >= b.len() || b[i] != b'\\' {
-        return None;
-    }
-    let rest = &s[i + 1..];
-    if rest.is_empty() {
-        return None;
-    }
-    // Multi-letter codes with bracket args: \C[n] \I[n] \N[n] \V[n] \S[n] ...
-    // Also short codes: \. \| \! \> \< \^ \\ \{ \} \$
-    let first = rest.chars().next()?;
-    if matches!(
-        first,
-        '.' | '|' | '!' | '>' | '<' | '^' | '\\' | '{' | '}' | '$'
-    ) {
-        return Some(i + 1 + first.len_utf8());
-    }
-    // Letter + optional [args]
-    let mut j = i + 1;
-    while j < b.len() && b[j].is_ascii_alphabetic() {
-        j += 1;
-    }
-    if j < b.len() && b[j] == b'[' && let Some(close) = s[j + 1..].find(']') {
-            return Some(j + 1 + close + 1);
-    }
-    if j > i + 1 {
-        return Some(j);
-    }
-    None
+fn is_closing_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '，' | '。' | '！' | '？' | '、' | '」' | '』' | '；' | '：' | '…' | '〗' | '〕'
+            | '》' | '〉' | '］' | '｝' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | '）' | '】'
+            | ']' | '}' | '”' | '’'
+    )
 }
 
-fn is_closing_punctuation(ch: char) -> bool {
-    matches!(ch, '，' | '。' | '！' | '？' | '、' | '」' | '』' | '；' | '：' | '…'
-        | ',' | '.' | '!' | '?' | ';' | ':' | ')' | '）' | '】' | ']' | '}')
+fn is_opening_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        '「' | '『' | '（' | '(' | '【' | '〖' | '〔' | '《' | '〈' | '［' | '[' | '｛' | '{'
+            | '“' | '‘' | '"' | '\''
+    )
 }
 
 fn starts_closing_punctuation(text: &str) -> bool {
     let mut i = 0;
     while i < text.len() {
-        if let Some(end) = control_token_end(text, i) {
+        if let Some(end) = control_end(text, i) {
             i = end;
             continue;
         }
@@ -1079,7 +1058,7 @@ fn tokenize_controls(text: &str) -> Vec<TokenSpan> {
     let mut tokens = Vec::new();
     let mut start = 0;
     while start < text.len() {
-        if let Some(end) = control_token_end(text, start) {
+        if let Some(end) = control_end(text, start) {
             tokens.push(TokenSpan { start, end, width: 0, visible: None, next_is_closing: false });
             start = end;
         } else {
@@ -1119,6 +1098,9 @@ fn reflow_to_n(text: &str, n: usize, max_w: usize) -> Vec<String> {
     if n == 1 {
         return vec![text.into_owned()];
     }
+    // A leading label is one visible unit: line breaks may follow it but never
+    // land inside it, even when the label alone exceeds the width budget.
+    let label_end = layout::leading_label(&text).map_or(0, |parts| parts.end);
     let tokens = tokenize_controls(&text);
     let mut remaining_width: usize = tokens.iter().map(|token| token.width).sum();
     let mut lines = Vec::with_capacity(n);
@@ -1130,17 +1112,34 @@ fn reflow_to_n(text: &str, n: usize, max_w: usize) -> Vec<String> {
         }
         let mut width = 0;
         let mut latest_safe = None;
+        let mut latest_any = None;
+        let mut latest_space = None;
         let mut latest_punctuation = None;
+        let mut latest_label = None;
         let mut end = start;
-        while end < tokens.len() && width + tokens[end].width <= max_w {
+        while end < tokens.len()
+            && (width + tokens[end].width <= max_w || tokens[end].start < label_end)
+        {
             let token = &tokens[end];
             width += token.width;
-            if let Some(ch) = token.visible
-                && !token.next_is_closing
-            {
-                latest_safe = Some((end + 1, width));
-                if is_closing_punctuation(ch) {
-                    latest_punctuation = latest_safe;
+            if let Some(ch) = token.visible {
+                if token.end == label_end && token.end > 0 {
+                    latest_label = Some((end + 1, width));
+                }
+                if token.end >= label_end && !token.next_is_closing {
+                    latest_any = Some((end + 1, width));
+                    let next = text[token.end..].chars().next();
+                    let mid_word = ch.is_ascii_alphanumeric()
+                        && next.is_some_and(|next| next.is_ascii_alphanumeric());
+                    if !mid_word && !is_opening_punctuation(ch) {
+                        latest_safe = Some((end + 1, width));
+                        if ch.is_whitespace() {
+                            latest_space = latest_safe;
+                        }
+                        if is_closing_punctuation(ch) {
+                            latest_punctuation = latest_safe;
+                        }
+                    }
                 }
             }
             end += 1;
@@ -1150,11 +1149,14 @@ fn reflow_to_n(text: &str, n: usize, max_w: usize) -> Vec<String> {
             break;
         }
         let remaining_capacity = (n - lines.len() - 1).saturating_mul(max_w);
-        let preferred = latest_punctuation.filter(|(_, used_width)| {
-            remaining_width.saturating_sub(*used_width) <= remaining_capacity
+        let fits = |&(_, used_width): &(usize, usize)| {
+            remaining_width.saturating_sub(used_width) <= remaining_capacity
                 || remaining_width > (n - lines.len()).saturating_mul(max_w)
-        });
-        let Some((split, used_width)) = preferred.or(latest_safe) else {
+        };
+        let preferred = latest_punctuation.filter(fits).or_else(|| latest_space.filter(fits));
+        let Some((split, used_width)) =
+            preferred.or(latest_safe).or(latest_any).or(latest_label)
+        else {
             // No width-bounded split can keep closing punctuation with its text.
             // Preserve the remainder instead of losing content or splitting controls.
             while lines.len() + 1 < n {
@@ -1489,6 +1491,78 @@ mod tests {
         let mut named = layout_translation(&["【拉吉】", r"\SE[magao]「这是一句超过消息窗口宽度而且不能挤进名字行的非常长的台词。」"]);
         assert!(!normalize_for_writeback(&mismatch, &mut named).reflowed);
         assert_eq!(named.translation_lines[0], "【拉吉】");
+    }
+
+    #[test]
+    fn speaker_label_styles_and_controls_keep_slot_zero() {
+        let body = "「这是一段超过消息窗口宽度的台词，用来确认写回只会重排正文槽。」";
+        for (open, close) in [
+            ('【', '】'),
+            ('〖', '〗'),
+            ('〔', '〕'),
+            ('《', '》'),
+            ('〈', '〉'),
+            ('［', '］'),
+            ('[', ']'),
+        ] {
+            let source_label = format!("{open}ラージ{close}");
+            let translated_label = format!("{open}拉吉{close}");
+            let unit = layout_unit(&[&source_label, "こんにちは。"], 2);
+            let mut tr = layout_translation(&[&format!("{translated_label}{body}")]);
+            let change = normalize_for_writeback(&unit, &mut tr);
+            assert!(change.reflowed, "{open}{close}");
+            assert_eq!(tr.translation_lines[0], translated_label, "{open}{close}");
+            assert_eq!(tr.translation_lines[1], body, "{open}{close}");
+            assert!(!normalize_for_writeback(&unit, &mut tr).reflowed, "{open}{close}");
+        }
+    }
+
+    #[test]
+    fn control_wrapped_label_is_recovered_and_never_split() {
+        let unit = layout_unit(&[r"\C[2]【ラージ】\C[0]", "こんにちは。"], 2);
+        let mut tr = layout_translation(&[r"\C[2]【拉吉】\C[0]「你好，这是一段很长的正文。」"]);
+        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
+        assert_eq!(tr.translation_lines[0], "【拉吉】");
+        assert_eq!(tr.translation_lines[1], r"\C[2]\C[0]「你好，这是一段很长的正文。」");
+        assert!(!normalize_for_writeback(&unit, &mut tr).reflowed);
+
+        let mut standalone = layout_translation(&[r"\C[2]【拉吉】\C[0]", "你好。"]);
+        let expected = standalone.translation_lines.clone();
+        assert!(!normalize_for_writeback(&unit, &mut standalone).reflowed);
+        assert_eq!(standalone.translation_lines, expected);
+
+        let plain = layout_unit(&["【ラージ】", r"\SE[magao]「こんにちは。」"], 2);
+        let mut moved = layout_translation(&[r"\SE[magao]【拉吉】", "「你好。」"]);
+        assert!(normalize_for_writeback(&plain, &mut moved).reflowed);
+        assert_eq!(moved.translation_lines[0], "【拉吉】");
+        assert_eq!(moved.translation_lines[1], r"\SE[magao]「你好。」");
+    }
+
+    #[test]
+    fn embedded_label_is_atomic_when_source_has_no_name_slot() {
+        let unit = layout_unit(&[
+            "【ラージ】「とても長い台詞がここに続きます。」",
+            "二行目。",
+        ], 2);
+        let mut tr = layout_translation(&[
+            "【拉吉】「这是一段非常长的台词需要重新排版而不能把名字标签拆开。」",
+            "第二行。",
+        ]);
+        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
+        let out = &tr.translation_lines;
+        assert_eq!(out.len(), 2);
+        assert!(out[0].starts_with("【拉吉】"), "out={out:?}");
+        assert_eq!(out.iter().filter(|line| line.contains('【') || line.contains('】')).count(), 1, "out={out:?}");
+        assert_eq!(out.join(""), "【拉吉】「这是一段非常长的台词需要重新排版而不能把名字标签拆开。」第二行。");
+    }
+
+    #[test]
+    fn reflow_prefers_word_boundaries_and_opening_punctuation_is_never_orphaned() {
+        let out = reflow_to_n("alpha beta gamma delta", 2, 12);
+        assert_eq!(out, vec!["alpha beta ", "gamma delta"]);
+        let out = reflow_to_n("甲乙「丙丁戊己", 2, 4);
+        assert_eq!(out, vec!["甲乙", "「丙丁戊己"]);
+        assert_eq!(out.join(""), "甲乙「丙丁戊己");
     }
 
     #[test]

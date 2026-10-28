@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.2
+
+### Bug fixes
+
+- RMMZ speaker-label protection now recognizes `【】`, `[]`, `〖〗`, `〔〕`, `《》`, `〈〉`, and `［］`, including labels wrapped in colour or expression controls. Writeback keeps the label in slot zero, moves leading body controls back to the body, and never splits inside the label. The 0.8.1 two-slot `【名字】` case remains covered and is now generalized beyond it.
+- The RMMZ structural check reads raw message slots instead of masked text, so a label preceded by `\C[2]` or `\SE[...]` is no longer reported as missing. A missing label is still blocking for every supported bracket style.
+- Reflow prefers word boundaries, avoids splitting inside a leading label, and never leaves an opening quote at the end of a line.
+
 ## 0.11.1
 
 ### Changed

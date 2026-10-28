@@ -58,7 +58,7 @@ Ordinary unsupported plugin text can be absent from extraction; a completed run 
 
 RPG Maker event command lists have structural meaning. attx preserves the existing command count and reflows translated dialogue into the original number of `401` slots instead of adding commands and shifting event indices.
 
-Reflow uses display width and punctuation-aware boundaries, with 44 halfwidth cells as the layout threshold. Engine controls are not split as ordinary visible characters. A protected first-slot speaker label remains in that slot. If only two slots are available for a speaker label and body, the remaining body is kept, including unavoidable overflow, rather than truncated.
+Reflow uses display width and punctuation-aware boundaries, with 44 halfwidth cells as the layout threshold. Engine controls are not split as ordinary visible characters. A protected first-slot speaker label remains in that slot. Labels may use `【】`, `[]`, `〖〗`, `〔〕`, `《》`, `〈〉`, or `［］`, and colour or expression controls around the label do not hide it. A control that precedes a label but belongs to the body is moved back to the body slot. If only two slots are available for a speaker label and body, the remaining body is kept, including unavoidable overflow, rather than truncated.
 
 `writeback.reflowed_units` records affected units. `overflow_lines` reports unavoidable layout overflow, including a crowded final slot. These are layout signals, not a promise that every custom font or message plugin fits. Overflow must not be hidden by deleting text.
 
