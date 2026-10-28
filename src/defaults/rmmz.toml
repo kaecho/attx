@@ -1,12 +1,14 @@
-# attx built-in experience for RPG Maker MV/MZ plugin parameters.
+# attx built-in experience for RPG Maker MV/MZ plugin parameters and message
+# slot layout.
 #
-# Exported from the key tables in `src/adapter/rmmz_plugins.rs` so the baseline
-# is visible and overridable instead of buried in source. Embedded in the binary
-# via `include_str!`; read it with `attx learn defaults --format rmmz`.
+# Field entries mirror the key tables in `src/adapter/rmmz_plugins.rs`; layout
+# entries describe the message slot behavior. Embedded in the binary via
+# `include_str!`; read it with `attx learn defaults --format rmmz`.
 #
-# To override one of these, write an entry with the same `field` into
+# To override a field entry, write one with the same `field` into
 # `$ATTX_HOME/knowledge/rmmz.toml` (global) or `<workspace>/experience.toml`
-# (this project only). Later layers win.
+# (this project only). Layout entries are keyed by `label` + `domain` and are
+# managed with `attx learn layout`. Later layers win.
 #
 # Two notes on what these actually do at runtime:
 #   * `verdict = "extract"` entries are inert — `knowledge::apply()` can only
@@ -16,9 +18,9 @@
 #     internally, so shipping them changes no behaviour. They exist so you can
 #     see the list and override it.
 #
-# Every entry is scoped to `domain = "plugins"`: the same field names mean
-# different things in Map*.json, and an unscoped rule would silently drop
-# dialogue.
+# Every field entry below is scoped to `domain = "plugins"`: the same field
+# names mean different things in Map*.json, and an unscoped rule would silently
+# drop dialogue. Layout entries are separate and target message domains.
 
 format = "rmmz"
 version = 2
@@ -133,4 +135,11 @@ entry = [
   { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*message" },
   { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*help" },
   { kind = "field", verdict = "extract", scope = "any", domain = "plugins", source = "builtin", field = "*description" },
+
+  # ---- message slot layout ----
+  # The speaker label is data, not Rust: an agent can add another label style
+  # or a different width through `attx learn layout add` without a rebuild.
+  { kind = "layout", status = "approved", domain = "dialogue", source = "builtin", width = 44, leading_controls = "body", reason = "speaker label slot used by common message plugins", label = '^[【〖〔《〈［\[]([^】〗〕》〉］\]\r\n]+)[】〗〕》〉］\]]', control = '\\{2}|\\[A-Za-z]+\[[^\]\r\n]*\]|\\[A-Za-z]' },
+  # 405 scroll text has no speaker label, but it shares the 44-cell window.
+  { kind = "layout", status = "approved", domain = "scroll", source = "builtin", width = 44, leading_controls = "body", reason = "scroll text width", control = '\\{2}|\\[A-Za-z]+\[[^\]\r\n]*\]|\\[A-Za-z]' },
 ]

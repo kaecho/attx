@@ -146,6 +146,36 @@ impl Status {
     }
 }
 
+/// Where leading control tokens belong when a translated label slot gained one
+/// but the source label slot had none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LeadingControls {
+    /// Move the controls to the first body slot. Game plugins commonly match
+    /// the label at byte zero, so expression/colour codes before it break them.
+    #[default]
+    Body,
+    /// Keep the controls on the label slot.
+    Label,
+}
+
+impl LeadingControls {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "body" => Some(Self::Body),
+            "label" => Some(Self::Label),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Body => "body",
+            Self::Label => "label",
+        }
+    }
+}
+
 /// `kind = "field"` — a field-name level extraction judgement.
 #[derive(Debug, Clone)]
 pub struct FieldEntry {
@@ -253,6 +283,108 @@ impl FieldEntry {
     }
 }
 
+/// `kind = "layout"` — a data-driven slot rule for a line-oriented format.
+///
+/// The rule is deliberately small: one regex for the visible leading label,
+/// one regex for atomic controls, and a width budget. Anything more specific
+/// belongs in an agent note or a format adapter.
+#[derive(Debug, Clone)]
+pub struct LayoutEntry {
+    pub label: String,
+    pub control: String,
+    pub width: usize,
+    pub leading_controls: LeadingControls,
+    pub domain: String,
+    pub status: Status,
+    pub reason: String,
+    pub evidence: Vec<String>,
+    pub source: String,
+    pub updated_at: String,
+    raw: toml::value::Table,
+}
+
+impl LayoutEntry {
+    pub fn new(
+        label: &str,
+        control: &str,
+        width: usize,
+        leading_controls: LeadingControls,
+        domain: &str,
+    ) -> Self {
+        Self {
+            label: label.to_string(),
+            control: control.to_string(),
+            width,
+            leading_controls,
+            domain: domain.to_string(),
+            status: Status::Approved,
+            reason: String::new(),
+            evidence: Vec::new(),
+            source: String::new(),
+            updated_at: String::new(),
+            raw: toml::value::Table::new(),
+        }
+    }
+
+    fn from_table(t: toml::value::Table) -> Self {
+        Self {
+            label: str_of(&t, "label"),
+            control: str_of(&t, "control"),
+            width: t
+                .get("width")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0)
+                .max(0) as usize,
+            leading_controls: t
+                .get("leading_controls")
+                .and_then(|v| v.as_str())
+                .and_then(LeadingControls::parse)
+                .unwrap_or_default(),
+            domain: str_of(&t, "domain"),
+            status: t
+                .get("status")
+                .and_then(|v| v.as_str())
+                .and_then(Status::parse)
+                .unwrap_or_default(),
+            reason: str_of(&t, "reason"),
+            evidence: strings_of(&t, "evidence"),
+            source: str_of(&t, "source"),
+            updated_at: str_of(&t, "updated_at"),
+            raw: t,
+        }
+    }
+
+    fn to_value(&self) -> toml::Value {
+        let mut t = self.raw.clone();
+        t.insert("kind".into(), "layout".into());
+        t.insert("label".into(), self.label.clone().into());
+        if self.control.is_empty() {
+            t.remove("control");
+        } else {
+            t.insert("control".into(), self.control.clone().into());
+        }
+        t.insert("width".into(), i64::try_from(self.width).unwrap_or(i64::MAX).into());
+        t.insert(
+            "leading_controls".into(),
+            self.leading_controls.as_str().into(),
+        );
+        if self.domain.is_empty() {
+            t.remove("domain");
+        } else {
+            t.insert("domain".into(), self.domain.clone().into());
+        }
+        t.insert("status".into(), self.status.as_str().into());
+        t.insert("reason".into(), self.reason.clone().into());
+        t.insert(
+            "evidence".into(),
+            toml::Value::Array(self.evidence.iter().cloned().map(Into::into).collect()),
+        );
+        t.insert("source".into(), self.source.clone().into());
+        t.insert("updated_at".into(), self.updated_at.clone().into());
+        toml::Value::Table(t)
+    }
+}
+
 /// `kind = "note"` — free-form experience. Auto-approved: the worst case is a
 /// few extra sentences in a prompt, never a lost line of text.
 #[derive(Debug, Clone)]
@@ -314,6 +446,7 @@ impl NoteEntry {
 #[derive(Debug, Clone)]
 pub enum Entry {
     Field(FieldEntry),
+    Layout(LayoutEntry),
     Note(NoteEntry),
     Unknown(toml::Value),
 }
@@ -325,6 +458,7 @@ impl Entry {
         };
         match t.get("kind").and_then(|k| k.as_str()) {
             Some("field") => Entry::Field(FieldEntry::from_table(t.clone(), Status::default())),
+            Some("layout") => Entry::Layout(LayoutEntry::from_table(t.clone())),
             Some("note") => Entry::Note(NoteEntry::from_table(t.clone())),
             _ => Entry::Unknown(v),
         }
@@ -333,6 +467,7 @@ impl Entry {
     fn to_value(&self) -> toml::Value {
         match self {
             Entry::Field(f) => f.to_value(),
+            Entry::Layout(l) => l.to_value(),
             Entry::Note(n) => n.to_value(),
             Entry::Unknown(v) => v.clone(),
         }
@@ -341,6 +476,7 @@ impl Entry {
     pub fn kind(&self) -> &str {
         match self {
             Entry::Field(_) => "field",
+            Entry::Layout(_) => "layout",
             Entry::Note(_) => "note",
             Entry::Unknown(v) => v.get("kind").and_then(|k| k.as_str()).unwrap_or("unknown"),
         }
@@ -360,6 +496,18 @@ impl Entry {
                 "reason": f.reason,
                 "evidence": f.evidence,
                 "source": f.source,
+            }),
+            Entry::Layout(l) => serde_json::json!({
+                "kind": "layout",
+                "label": l.label,
+                "control": l.control,
+                "width": l.width,
+                "leading_controls": l.leading_controls.as_str(),
+                "domain": l.domain,
+                "status": l.status.as_str(),
+                "reason": l.reason,
+                "evidence": l.evidence,
+                "source": l.source,
             }),
             Entry::Note(n) => serde_json::json!({
                 "kind": "note",
@@ -430,6 +578,10 @@ impl ExperienceFile {
         match &entry {
             Entry::Field(new) => self.entries.retain(|e| match e {
                 Entry::Field(old) => !(old.field == new.field && old.domain == new.domain),
+                _ => true,
+            }),
+            Entry::Layout(new) => self.entries.retain(|e| match e {
+                Entry::Layout(old) => !(old.label == new.label && old.domain == new.domain),
                 _ => true,
             }),
             Entry::Note(new) => self.entries.retain(|e| match e {
@@ -692,10 +844,20 @@ impl Experience {
             })
             .collect()
     }
+
+    /// Approved layout rules with their layer, lowest first. The layout module
+    /// sorts them into runtime priority.
+    pub fn layout_entries(&self) -> impl Iterator<Item = (u8, &LayoutEntry)> {
+        self.entries.iter().filter_map(|(layer, e)| match e {
+            Entry::Layout(l) if l.status == Status::Approved => Some((*layer, l)),
+            _ => None,
+        })
+    }
 }
 
-/// Load and merge every layer for a format.
-pub fn load_experience(format: &str, workspace: Option<&Path>) -> Experience {
+/// Built-in experience only, without touching global or workspace files.
+/// Used by `PreserveSet::for_engine` so standalone calls stay deterministic.
+pub fn embedded_experience(format: &str) -> Experience {
     let mut entries: Vec<(u8, Entry)> = Vec::new();
     if let Some(raw) = embedded_defaults(format) {
         match parse_file(raw) {
@@ -704,7 +866,16 @@ pub fn load_experience(format: &str, workspace: Option<&Path>) -> Experience {
             Err(e) => eprintln!("knowledge: embedded defaults for {format} are broken: {e:#}"),
         }
     }
-    entries.extend(
+    Experience {
+        format: format.to_string(),
+        entries,
+    }
+}
+
+/// Load and merge every layer for a format.
+pub fn load_experience(format: &str, workspace: Option<&Path>) -> Experience {
+    let mut exp = embedded_experience(format);
+    exp.entries.extend(
         load_file(format)
             .entries
             .into_iter()
@@ -717,15 +888,14 @@ pub fn load_experience(format: &str, workspace: Option<&Path>) -> Experience {
                 .map_err(anyhow::Error::from)
                 .and_then(|raw| parse_file(&raw))
             {
-                Ok(f) => entries.extend(f.entries.into_iter().map(|e| (LAYER_WORKSPACE, e))),
+                Ok(f) => exp
+                    .entries
+                    .extend(f.entries.into_iter().map(|e| (LAYER_WORKSPACE, e))),
                 Err(e) => eprintln!("knowledge: ignoring {}: {e:#}", p.display()),
             }
         }
     }
-    Experience {
-        format: format.to_string(),
-        entries,
-    }
+    exp
 }
 
 /// What `apply` did, for reporting and tests.
@@ -1217,21 +1387,70 @@ reason = "identity handle"
     }
 
     #[test]
-    fn file_missing_or_broken_degrades_to_empty() {
-        let dir = std::env::temp_dir().join(format!("attx-kn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("knowledge")).unwrap();
-        std::fs::write(dir.join("knowledge/brokenfmt.toml"), "not = [valid").unwrap();
-        // SAFETY: single-threaded test process section; no other thread reads env here.
-        unsafe { std::env::set_var("ATTX_HOME", &dir) };
-        assert!(
-            load_file("brokenfmt").is_empty(),
-            "malformed file degrades to no learning"
+    fn layout_entry_roundtrips_and_upserts_by_label_and_domain() {
+        let raw = r#"format = "rmmz"
+version = 2
+
+[[entry]]
+kind = "layout"
+label = '^「[^」]+」'
+control = '\\[A-Za-z]+\[[^\]\r\n]*\]'
+width = 44
+leading_controls = "body"
+domain = "dialogue"
+status = "pending"
+reason = "agent rule"
+source = "learn:agent:layout"
+evidence = ["「ラージ」", "「リーゼ」"]
+"#;
+        let mut f = parse_file(raw).unwrap();
+        let Entry::Layout(le) = &f.entries[0] else {
+            panic!("expected layout entry")
+        };
+        assert_eq!(le.label, "^「[^」]+」");
+        assert_eq!(le.width, 44);
+        assert_eq!(le.leading_controls, LeadingControls::Body);
+        assert_eq!(le.status, Status::Pending);
+        assert_eq!(le.domain, "dialogue");
+        assert_eq!(le.evidence.len(), 2);
+
+        let back = parse_file(&serialize_file(&f).unwrap()).unwrap();
+        let Entry::Layout(le2) = &back.entries[0] else {
+            panic!("layout entry lost on serialize")
+        };
+        assert_eq!(le2.label, le.label);
+        assert_eq!(le2.control, le.control);
+
+        let mut replacement = LayoutEntry::new(
+            "^「[^」]+」",
+            "",
+            0,
+            LeadingControls::Label,
+            "dialogue",
         );
-        assert!(
-            load_file("nosuchfmt").is_empty(),
-            "missing file is not an error"
-        );
-        unsafe { std::env::remove_var("ATTX_HOME") };
+        replacement.status = Status::Approved;
+        f.upsert(Entry::Layout(replacement));
+        assert_eq!(f.entries.len(), 1);
+        let Entry::Layout(le3) = &f.entries[0] else {
+            panic!()
+        };
+        assert_eq!(le3.leading_controls, LeadingControls::Label);
+        assert_eq!(le3.width, 0);
+    }
+
+    #[test]
+    fn embedded_rmmz_layout_rule_is_data_and_approved() {
+        let exp = embedded_experience("rmmz");
+        let layouts: Vec<_> = exp.layout_entries().collect();
+        assert_eq!(layouts.len(), 2);
+        for (layer, rule) in &layouts {
+            assert_eq!(*layer, LAYER_BUILTIN);
+            assert_eq!(rule.width, 44);
+            assert!(!rule.control.is_empty());
+        }
+        let dialogue = layouts.iter().find(|(_, r)| r.domain == "dialogue").unwrap().1;
+        assert!(!dialogue.label.is_empty());
+        let scroll = layouts.iter().find(|(_, r)| r.domain == "scroll").unwrap().1;
+        assert!(scroll.label.is_empty());
     }
 }

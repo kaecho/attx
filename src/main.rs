@@ -14,9 +14,11 @@ mod quality;
 mod review;
 mod store;
 mod textio;
+use crate::knowledge::{Entry, LayoutEntry, LeadingControls};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -360,6 +362,77 @@ enum LearnCommands {
         #[arg(long)]
         format: Option<String>,
         /// Drop a note from `<workspace>/experience.toml`
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Manage data-driven slot/label layout rules
+    Layout {
+        #[command(subcommand)]
+        command: LayoutCommands,
+    },
+}
+
+/// Layout rules are experience entries (`kind = "layout"`). They are data, so
+/// an agent can add a label style or width for one game without a rebuild.
+#[derive(Subcommand, Debug)]
+enum LayoutCommands {
+    /// Add or replace a layout rule
+    Add {
+        /// Format id (see `attx formats`)
+        #[arg(long)]
+        format: String,
+        /// Regex for a leading label, matched at the first visible character
+        #[arg(long)]
+        label: String,
+        /// Regex for atomic control tokens ignored around labels
+        #[arg(long, default_value = "")]
+        control: String,
+        /// Reflow width in half-width cells; 0 inherits an existing width for the domain
+        #[arg(long, default_value_t = 0)]
+        width: usize,
+        /// body|label: where a leading control belongs when the source label slot had none
+        #[arg(long, default_value = "body")]
+        leading_controls: String,
+        /// Restrict to one unit domain (for example `dialogue`); empty = all
+        #[arg(long, default_value = "")]
+        domain: String,
+        /// Why the rule exists, with observed evidence
+        #[arg(long, default_value = "")]
+        reason: String,
+        /// Write to this workspace's experience.toml instead of global knowledge
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// List active layout rules (JSON)
+    List {
+        /// Restrict to one format id
+        #[arg(long)]
+        format: Option<String>,
+        /// Read `<workspace>/experience.toml` instead of global knowledge
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Remove a layout rule by its label regex and domain
+    Remove {
+        #[arg(long)]
+        format: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long, default_value = "")]
+        domain: String,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Try a line against the active rules and print where the label ends
+    Test {
+        #[arg(long)]
+        format: String,
+        /// Sample line
+        #[arg(long)]
+        text: String,
+        /// Only rules for this domain; empty tries every rule
+        #[arg(long, default_value = "")]
+        domain: String,
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
@@ -1040,7 +1113,198 @@ fn run_learn(command: LearnCommands, settings: &config::Settings) -> Result<()> 
                 "pass exactly one of --field (extraction entry) or --name (note)"
             ),
         },
+        LearnCommands::Layout { command } => run_layout(command),
     }
+}
+
+fn run_layout(command: LayoutCommands) -> Result<()> {
+    match command {
+        LayoutCommands::Add {
+            format,
+            label,
+            control,
+            width,
+            leading_controls,
+            domain,
+            reason,
+            workspace,
+        } => {
+            crate::layout::validate(&label, &control)?;
+            let leading = LeadingControls::parse(&leading_controls).ok_or_else(|| {
+                anyhow::anyhow!("--leading-controls must be `body` or `label`")
+            })?;
+            let mut entry = LayoutEntry::new(&label, &control, width, leading, &domain);
+            entry.reason = reason;
+            entry.source = learn::agent_source("layout");
+            entry.updated_at = unix_now_string();
+            let (path, layer) = save_layout_entry(&format, entry, workspace.as_deref())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "ok",
+                    "format": format,
+                    "layer": layer,
+                    "file": path,
+                    "label": label,
+                    "control": control,
+                    "width": width,
+                    "leading_controls": leading_controls,
+                    "domain": domain,
+                }))?
+            );
+            Ok(())
+        }
+        LayoutCommands::List { format, workspace } => {
+            let mut layouts = Vec::new();
+            if let Some(ws) = workspace {
+                let file = knowledge::load_workspace_file(&ws, format.as_deref().unwrap_or(""))?;
+                collect_layouts(&file, "workspace", format.as_deref(), &mut layouts);
+            } else if let Some(want) = format {
+                let file = knowledge::load_file(&want);
+                collect_layouts(&file, "global", None, &mut layouts);
+            } else {
+                for file in knowledge::all_files() {
+                    collect_layouts(&file, "global", None, &mut layouts);
+                }
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "layouts": layouts.len(),
+                    "entries": layouts,
+                    "note": "built-in layout rules are not listed here; see `attx learn defaults --format <id>`",
+                }))?
+            );
+            Ok(())
+        }
+        LayoutCommands::Remove {
+            format,
+            label,
+            domain,
+            workspace,
+        } => {
+            let mut file = match workspace.as_deref() {
+                Some(ws) => knowledge::load_workspace_file(ws, &format)?,
+                None => knowledge::load_file(&format),
+            };
+            if file.format.is_empty() {
+                file.format = format.clone();
+            }
+            let before = file.entries.len();
+            file.entries.retain(|e| match e {
+                Entry::Layout(l) => !(l.label == label && l.domain == domain),
+                _ => true,
+            });
+            let removed = before - file.entries.len();
+            let path = match workspace.as_deref() {
+                Some(ws) => knowledge::save_workspace_file(ws, &file)?,
+                None => knowledge::save_file(&file)?,
+            };
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "ok",
+                    "removed": removed,
+                    "format": format,
+                    "file": path.display().to_string(),
+                })
+            );
+            Ok(())
+        }
+        LayoutCommands::Test {
+            format,
+            text,
+            domain,
+            workspace,
+        } => {
+            let exp = knowledge::load_experience(&format, workspace.as_deref());
+            let rules = crate::layout::LayoutRules::from_experience(&exp);
+            let result = rules.probe(&domain, &text);
+            match result {
+                Some((rule, parts)) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "matched": true,
+                        "label": parts.label,
+                        "prefix": parts.prefix,
+                        "suffix": parts.suffix,
+                        "standalone": !rule.has_visible_text(parts.suffix),
+                        "domain": rule.domain,
+                        "width": rule.width,
+                        "effective_width": rules.effective_width(&domain),
+                        "source": rule.source,
+                        "label_end": parts.end,
+                    }))?
+                ),
+                None => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "matched": false,
+                        "format": format,
+                        "domain": domain,
+                    }))?
+                ),
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_layouts(
+    file: &knowledge::ExperienceFile,
+    layer: &str,
+    format: Option<&str>,
+    out: &mut Vec<serde_json::Value>,
+) {
+    if format.is_some_and(|want| !file.format.is_empty() && file.format != want) {
+        return;
+    }
+    for entry in &file.entries {
+        if let Entry::Layout(_) = entry {
+            let mut v = entry.to_json();
+            v["format"] = serde_json::json!(file.format);
+            v["layer"] = serde_json::json!(layer);
+            out.push(v);
+        }
+    }
+}
+
+fn save_layout_entry(
+    format: &str,
+    entry: LayoutEntry,
+    workspace: Option<&std::path::Path>,
+) -> Result<(String, &'static str)> {
+    match workspace {
+        Some(ws) => {
+            let mut file = knowledge::load_workspace_file(ws, format)?;
+            if !file.format.is_empty() && file.format != format {
+                anyhow::bail!(
+                    "workspace experience is for `{}`, not `{format}`",
+                    file.format
+                );
+            }
+            file.format = format.to_string();
+            file.upsert(Entry::Layout(entry));
+            let path = knowledge::save_workspace_file(ws, &file)?;
+            Ok((path.display().to_string(), "workspace"))
+        }
+        None => {
+            let mut file = knowledge::load_file(format);
+            if file.format.is_empty() {
+                file.format = format.to_string();
+            }
+            file.upsert(Entry::Layout(entry));
+            let path = knowledge::save_file(&file)?;
+            Ok((path.display().to_string(), "global"))
+        }
+    }
+}
+
+fn unix_now_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
 }
 
 fn run_preserve(command: PreserveCommands) -> Result<()> {

@@ -138,9 +138,23 @@ text = "役割ごとの語調を維持する。"
 status = "approved"
 source = "manual"
 updated_at = ""
+
+[[entry]]
+kind = "layout"
+label = '^「[^」]+」'
+control = ''
+width = 0
+leading_controls = "body"
+status = "approved"
+domain = "dialogue"
+reason = "このゲームは先頭 slot の話者名を引用符で囲む"
+source = "learn:agent:layout"
+updated_at = ""
 ```
 
 field は小文字の名前で、先頭 `*` は suffix match。verdict は skip/extract、scope は top/nested/any、domain が空なら全 domain、status は pending/approved です。confidence、reason、evidence、source、updated_at は由来・判断の記録です。未知 kind と追加情報は保持されますが、未知 kind を実行することはありません。旧 version=1 の `[[rule]]` も読み込み、書き出しは version=2 です。
+
+layout entry は `label`（最初の可視文字から照合する正規表現）、`control`（原子 token の正規表現）、`width`（半角 cell、0 は同 domain の承認済み幅を継承）、`leading_controls`（body/label）、`domain` を持ちます。approved の規則だけが writeback と構造 label 検査に使われます。`learn layout add` で追加し、`learn layout test` で実サンプルを確認します。`learn summarize` は繰り返す先頭 slot から pending 規則を提案できます。
 
 適用順は embedded default、global format knowledge、workspace override。後の layer が優先し、同 layer は exact field が suffix より優先、同条件なら skip が優先します。承認済みだけを使います。
 

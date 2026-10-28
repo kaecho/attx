@@ -89,6 +89,8 @@ attx writeback --workspace .attx-novel
 
 既定では pending や invalid が残れば出力を block します。block 条件は pending、passthrough、構造検査失敗のみです。`residual_latin` は advisory なので含みません。ユーザーが未解決原文を含む出力を受け入れたときだけ `writeback --allow-partial` または `run --allow-partial` を使います。有効な訳のみ適用し、その他は原文を保ち、結果は needs_attention と終了 2 です。
 
+slot を持つ形式は `kind = "layout"` の経験 entry を利用できます。entry は先頭 label の正規表現、control token の正規表現、半角幅の予算、先頭 control を label と body のどちらに置くかを宣言します。writeback と構造 label 検査は形式名ではなく有効な規則を読みます。builtin、global、workspace の層を統合し、workspace が優先されます。`learn review` 待ちの pending 規則は適用されません。`learn summarize` は繰り返す先頭 slot の印から規則を提案し、`learn layout test` は実サンプルで label の終端を確認します。
+
 モデル出力の改行は構造検査の前に正規化します。CRLF と単独 CR は LF にし、array/long_text の埋め込み改行は行に分割し、short_text が分割された場合は CJK 同士なら連結し、Latin 境界なら空白 1 つを保ちます。保護 token・markup・空白のみの行は、モデルが落とし行数が一致する場合に原文から復元します。SRT/VTT と LRC の writeback は元ファイルの改行コード（CRLF/LF）を引き継ぎます。
 
 RMMZ は固定スロットへ再配置し、`reflowed_units` と `overflow_lines` を報告します。[RPG Maker](rmmz.md)と[ワークスペース](workspace.md)で source hash、backup、cache 同期を確認してください。

@@ -100,6 +100,8 @@ attx learn note --workspace <工作区> --name voice --text "<一条具体翻译
 
 作品内用 `--workspace`。全局 `--format` 会影响未来作品，不能自动扩大作用域。专有名词走 glossary，不用泛泛的 prompt note。学习不会自动重译已完成条目。
 
+首槽标签样式不在内置规则里时，先用 `attx learn layout test` 对真实样本验证正则，再用 `attx learn layout add --workspace <工作区>` 添加作品级规则。布局规则是经验数据，不要把某个游戏的标签样式写进源码或默认扩大到全局。`learn summarize` 生成的 pending 布局规则需要用户批准。
+
 ## 按需参考
 
 | 工作 | 参考 |

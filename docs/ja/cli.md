@@ -122,7 +122,7 @@ source/hash と anchor を検査し、正規化・固定 slot reflow・完全性
 | `skipped_note` | 未適用理由 |
 | `units_skipped` | pending、passthrough、構造検査失敗で未適用の数 |
 | `normalized_lines` | Chinese 正規化 signal |
-| `reflowed_units` | RMMZ fixed slot の再配置数 |
+| `reflowed_units` | 有効な layout 規則による slot 再配置数 |
 | `overflow_lines` | 表示幅からはみ出す行の signal |
 | `review` | 最終レビュー |
 | `learned` | 自動経験まとめ実行時のみ SummaryReport |
@@ -206,8 +206,14 @@ check は `active_terms`、`terms_seen`、`terms_fully_applied`、`violations[{s
 | `list` | `[--format <id>] [--workspace <dir>]` |
 | `defaults` | `--format <id>` |
 | `forget` | `--field <field> [--format <id>]` または `--name <name> [--format <id>] [--workspace <dir>]` |
+| `layout add` | `--format <id> --label <regex> [--control <regex>] [--width 0] [--leading-controls body\|label] [--domain <domain>] [--reason <text>] [--workspace <dir>]` |
+| `layout list` | `[--format <id>] [--workspace <dir>]` |
+| `layout remove` | `--format <id> --label <regex> [--domain <domain>] [--workspace <dir>]` |
+| `layout test` | `--format <id> --text <line> [--domain <domain>] [--workspace <dir>]` |
 
-summarize の普通実行は無料の証拠集計、llm は有料審査です。SummaryReport は `format`、`units_scanned`、`fields_seen`、`entries_written`、`pending`、`notes`、`file`。note report は `format`、`topic`、`name`、`source`、`text`、`file`、`layer`、`reaches_prompt`。prompt だけが翻訳に入ります。
+summarize の普通実行は無料の証拠集計、llm は有料審査です。SummaryReport は `format`、`units_scanned`、`fields_seen`、`entries_written`、`pending`、`layouts`、`notes`、`file`。繰り返す短い先頭 slot が同じ区切り文字を共有すると、pending の `kind = "layout"` 提案になります。note report は `format`、`topic`、`name`、`source`、`text`、`file`、`layer`、`reaches_prompt`。prompt だけが翻訳に入ります。
+
+`layout` は writeback と構造 label 検査が使うデータ駆動の slot 規則です。`label` 正規表現は最初の可視文字から照合し、`control` は原子 token、`width` は半角 cell の予算（0 は同 domain の既存幅を継承）、`leading_controls` は先頭 control を label と body のどちらに置くか、`domain` は対象 unit domain です。`add` は正規表現を検証して global または workspace に approved で保存します。`test` は `label`、`prefix`、`suffix`、`standalone`、`label_end`、`width`、`effective_width`、`source` を返します。`remove` は完全一致の label と domain を削除します。組み込み規則は list に出ないため `defaults --format <id>` で確認します。
 
 pending は `pending` と `entries`。entry は `index`、`format` と証拠・field 情報を持ちます。review は `approved`、`rejected`、`remaining`、`files_written`。1-based index の comma list を使い、approve/reject がなければエラーです。approve-all は存在しますが、エージェントの独断使用は禁止です。
 

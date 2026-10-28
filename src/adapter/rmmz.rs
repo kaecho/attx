@@ -1,6 +1,7 @@
 use super::{DetectHit, FormatAdapter, OutputFile};
-use crate::layout::{self, control_end};
+use crate::layout;
 use crate::model::{ItemType, TextUnit, Translation, needs_translation};
+use crate::preserve::PreserveSet;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 const CODE_NAME: i64 = 101;
 const CODE_CHOICES: i64 = 102;
@@ -713,7 +715,11 @@ fn apply_unit(
             write_short(root, &unit.location, lines)?;
         }
         ItemType::LongText => {
-            write_long_text_with_reflow(root, unit, lines, translation.is_some())?;
+            // The pipeline applies workspace layout rules before rendering and
+            // missing translations use the exact original slots. Re-fitting
+            // here with builtin rules could undo a workspace width or a
+            // game-specific label rule.
+            write_long_text_with_reflow(root, unit, lines, false)?;
         }
     }
     Ok(())
@@ -782,6 +788,10 @@ fn write_long_text(root: &mut Value, unit: &TextUnit, lines: &[String]) -> Resul
     write_long_text_with_reflow(root, unit, lines, true)
 }
 
+/// Built-in layout experience only. Workspace/global rules are applied by the
+/// pipeline before rendering; this fallback keeps direct adapter calls safe.
+static BUILTIN_RULES: LazyLock<PreserveSet> = LazyLock::new(|| PreserveSet::for_engine("rmmz"));
+
 fn write_long_text_with_reflow(root: &mut Value, unit: &TextUnit, lines: &[String], reflow: bool) -> Result<()> {
     if unit.source_line_paths.is_empty() {
         bail!("missing source slots at {}", unit.location);
@@ -790,7 +800,7 @@ fn write_long_text_with_reflow(root: &mut Value, unit: &TextUnit, lines: &[Strin
     // Fit translation into the original number of 401/405 slots.
     let n_src = unit.source_line_paths.len();
     let fitted = if reflow {
-        fitted_unit_lines(unit, lines, n_src, DEFAULT_MSG_WIDTH)
+        layout::fit(unit, lines, n_src, BUILTIN_RULES.layout()).0
     } else {
         if lines.len() != n_src {
             bail!("original line count does not match source slots at {}", unit.location);
@@ -817,158 +827,8 @@ fn write_long_text_with_reflow(root: &mut Value, unit: &TextUnit, lines: &[Strin
     Ok(())
 }
 
-/// Default message window display width (half-width cells). CJK ≈ 2.
-const DEFAULT_MSG_WIDTH: usize = 44;
-
-/// Changes to the physical message slots, shared by caching and rendering.
-#[derive(Default, Debug)]
-pub struct LayoutChange {
-    pub reflowed: bool,
-    /// Number of emitted slots wider than the default 44 half-width cells.
-    /// Overflow is retained, not truncated, when the available slots cannot fit it.
-    pub overflow_lines: usize,
-}
-
-/// Normalize an RPG Maker message before rendering or saving its translation.
-/// Repeated calls leave fitted lines unchanged, including unavoidable overflow.
-pub fn normalize_for_writeback(unit: &TextUnit, translation: &mut Translation) -> LayoutChange {
-    if unit.engine != "rmmz"
-        || unit.item_type != ItemType::LongText
-        || unit.source_line_paths.is_empty()
-        || translation.translation_lines.is_empty()
-    {
-        return LayoutChange::default();
-    }
-    let fitted = fitted_unit_lines(
-        unit,
-        &translation.translation_lines,
-        unit.source_line_paths.len(),
-        DEFAULT_MSG_WIDTH,
-    );
-    let overflow_lines = fitted.iter().filter(|line| display_width(line) > DEFAULT_MSG_WIDTH).count();
-    let reflowed = fitted.as_ref() != translation.translation_lines.as_slice();
-    if reflowed {
-        translation.translation_lines = fitted.into_owned();
-    }
-    LayoutChange { reflowed, overflow_lines }
-}
-
-fn fitted_unit_lines<'a>(
-    unit: &TextUnit,
-    lines: &'a [String],
-    n: usize,
-    max_w: usize,
-) -> Cow<'a, [String]> {
-    if n < 2 || lines.is_empty() {
-        return fit_lines_borrowed(lines, n, max_w);
-    }
-    let first = &lines[0];
-    let source_label = unit
-        .original_lines
-        .first()
-        .and_then(|line| layout::standalone_label(line).map(|parts| (line, parts)));
-    let source_slot = source_label.map(|(line, _)| line);
-    let source_prefix = source_label.map_or("", |(_, parts)| parts.prefix);
-    // A label that already owns the first slot stays byte-for-byte intact,
-    // including surrounding colour/reset controls. A leading control is moved
-    // back to the body when the source label slot did not carry one, because
-    // game plugins match the label at the very start of the slot.
-    if let Some(parts) = layout::standalone_label(first) {
-        if source_slot.is_some() && !source_prefix.contains('\\') && parts.prefix.contains('\\') {
-            let mut body = Vec::with_capacity(lines.len());
-            let mut first_body = parts.prefix.to_owned();
-            if let Some(rest) = lines.get(1) {
-                first_body.push_str(rest);
-            }
-            body.push(first_body);
-            body.extend_from_slice(lines.get(2..).unwrap_or_default());
-            let fitted_body = fit_lines_borrowed(&body, n - 1, max_w);
-            let mut out = Vec::with_capacity(n);
-            out.push(parts.label.to_owned());
-            out.extend(fitted_body.into_owned());
-            return Cow::Owned(out);
-        }
-        let body = fit_lines_borrowed(&lines[1..], n - 1, max_w);
-        if matches!(&body, Cow::Borrowed(_)) {
-            return Cow::Borrowed(lines);
-        }
-        let mut out = Vec::with_capacity(n);
-        out.push(first.clone());
-        out.extend(body.into_owned());
-        return Cow::Owned(out);
-    }
-    // The source reserved slot zero for a label. Recover the label from a
-    // collapsed first line, or fall back to the source label when the model
-    // omitted it, and reflow only the body slots.
-    if let Some(source_slot) = source_slot {
-        let mut body = Vec::with_capacity(lines.len());
-        let label = if let Some(parts) = layout::leading_label(first) {
-            let mut first_body = String::with_capacity(parts.prefix.len() + parts.suffix.len());
-            first_body.push_str(parts.prefix);
-            first_body.push_str(parts.suffix);
-            if !first_body.is_empty() {
-                body.push(first_body);
-            }
-            body.extend_from_slice(&lines[1..]);
-            parts.label.to_owned()
-        } else {
-            body.extend_from_slice(lines);
-            source_slot.clone()
-        };
-        let fitted_body = fit_lines_borrowed(&body, n - 1, max_w);
-        let mut out = Vec::with_capacity(n);
-        out.push(label);
-        out.extend(fitted_body.into_owned());
-        return Cow::Owned(out);
-    }
-    fit_lines_borrowed(lines, n, max_w)
-}
-
-#[cfg(test)]
-fn fit_lines_with_width(lines: &[String], n: usize, max_w: usize) -> Vec<String> {
-    fit_lines_borrowed(lines, n, max_w).into_owned()
-}
-
-/// Keep safe boundaries and reflow only the suffix needing more room.
-/// The final slot may overflow; event command indices never move.
-fn fit_lines_borrowed(lines: &[String], n: usize, max_w: usize) -> Cow<'_, [String]> {
-    if n == 0 {
-        return Cow::Owned(Vec::new());
-    }
-    let mut reflow_from = None;
-    for (i, line) in lines.iter().enumerate().take(n.saturating_sub(1)) {
-        if display_width(line) > max_w
-            || lines.get(i + 1).is_some_and(|next| starts_closing_punctuation(next))
-        {
-            reflow_from = Some(i);
-            break;
-        }
-    }
-    if let Some(start) = reflow_from {
-        let mut merged = String::with_capacity(lines[start..].iter().map(String::len).sum());
-        for line in &lines[start..] {
-            merged.push_str(line);
-        }
-        let mut out = Vec::with_capacity(n);
-        out.extend_from_slice(&lines[..start]);
-        out.extend(reflow_to_n(&merged, n - start, max_w));
-        return Cow::Owned(out);
-    }
-    if lines.len() == n {
-        return Cow::Borrowed(lines);
-    }
-    let mut out = Vec::with_capacity(n);
-    out.extend_from_slice(&lines[..lines.len().min(n - 1)]);
-    if lines.len() >= n {
-        let mut last = String::with_capacity(lines[n - 1..].iter().map(String::len).sum());
-        for line in &lines[n - 1..] {
-            last.push_str(line);
-        }
-        out.push(last);
-    }
-    out.resize(n, String::new());
-    Cow::Owned(out)
-}
+// Layout normalization is pipeline-owned; direct adapter tests use the helper
+// in the test module below.
 
 fn is_actor_name_ref(s: &str) -> bool {
     let s = s.trim();
@@ -986,191 +846,6 @@ fn is_actor_name_ref(s: &str) -> bool {
         && rest.ends_with(']')
         && rest.len() > 2
         && rest[1..rest.len() - 1].chars().all(|c| c.is_ascii_digit())
-}
-
-fn display_width(s: &str) -> usize {
-    let mut w = 0usize;
-    let mut i = 0;
-    let b = s.as_bytes();
-    while i < b.len() {
-        if b[i] == b'\\' && let Some(end) = control_end(s, i) {
-                i = end;
-                continue;
-        }
-        let ch = s[i..].chars().next().unwrap();
-        w += if spawns_half_width(ch) {
-            1
-        } else {
-            2
-        };
-        i += ch.len_utf8();
-    }
-    w
-}
-
-fn spawns_half_width(ch: char) -> bool {
-    (ch as u32) < 128
-}
-
-fn is_closing_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '，' | '。' | '！' | '？' | '、' | '」' | '』' | '；' | '：' | '…' | '〗' | '〕'
-            | '》' | '〉' | '］' | '｝' | ',' | '.' | '!' | '?' | ';' | ':' | ')' | '）' | '】'
-            | ']' | '}' | '”' | '’'
-    )
-}
-
-fn is_opening_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '「' | '『' | '（' | '(' | '【' | '〖' | '〔' | '《' | '〈' | '［' | '[' | '｛' | '{'
-            | '“' | '‘' | '"' | '\''
-    )
-}
-
-fn starts_closing_punctuation(text: &str) -> bool {
-    let mut i = 0;
-    while i < text.len() {
-        if let Some(end) = control_end(text, i) {
-            i = end;
-            continue;
-        }
-        let ch = text[i..].chars().next().unwrap();
-        if !ch.is_whitespace() {
-            return is_closing_punctuation(ch);
-        }
-        i += ch.len_utf8();
-    }
-    false
-}
-
-struct TokenSpan {
-    start: usize,
-    end: usize,
-    width: usize,
-    visible: Option<char>,
-    next_is_closing: bool,
-}
-
-/// Each token borrows a byte span; no character-sized strings are allocated.
-fn tokenize_controls(text: &str) -> Vec<TokenSpan> {
-    let mut tokens = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        if let Some(end) = control_end(text, start) {
-            tokens.push(TokenSpan { start, end, width: 0, visible: None, next_is_closing: false });
-            start = end;
-        } else {
-            let ch = text[start..].chars().next().unwrap();
-            let end = start + ch.len_utf8();
-            tokens.push(TokenSpan {
-                start,
-                end,
-                width: if spawns_half_width(ch) { 1 } else { 2 },
-                visible: Some(ch),
-                next_is_closing: false,
-            });
-            start = end;
-        }
-    }
-    let mut next_is_closing = false;
-    for token in tokens.iter_mut().rev() {
-        token.next_is_closing = next_is_closing;
-        if let Some(ch) = token.visible
-            && !ch.is_whitespace()
-        {
-            next_is_closing = is_closing_punctuation(ch);
-        }
-    }
-    tokens
-}
-
-fn reflow_to_n(text: &str, n: usize, max_w: usize) -> Vec<String> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let text = if text.contains('\n') {
-        Cow::Owned(text.replace('\n', ""))
-    } else {
-        Cow::Borrowed(text)
-    };
-    if n == 1 {
-        return vec![text.into_owned()];
-    }
-    // A leading label is one visible unit: line breaks may follow it but never
-    // land inside it, even when the label alone exceeds the width budget.
-    let label_end = layout::leading_label(&text).map_or(0, |parts| parts.end);
-    let tokens = tokenize_controls(&text);
-    let mut remaining_width: usize = tokens.iter().map(|token| token.width).sum();
-    let mut lines = Vec::with_capacity(n);
-    let mut start = 0;
-    while start < tokens.len() {
-        if lines.len() + 1 == n {
-            lines.push(text[tokens[start].start..].to_owned());
-            break;
-        }
-        let mut width = 0;
-        let mut latest_safe = None;
-        let mut latest_any = None;
-        let mut latest_space = None;
-        let mut latest_punctuation = None;
-        let mut latest_label = None;
-        let mut end = start;
-        while end < tokens.len()
-            && (width + tokens[end].width <= max_w || tokens[end].start < label_end)
-        {
-            let token = &tokens[end];
-            width += token.width;
-            if let Some(ch) = token.visible {
-                if token.end == label_end && token.end > 0 {
-                    latest_label = Some((end + 1, width));
-                }
-                if token.end >= label_end && !token.next_is_closing {
-                    latest_any = Some((end + 1, width));
-                    let next = text[token.end..].chars().next();
-                    let mid_word = ch.is_ascii_alphanumeric()
-                        && next.is_some_and(|next| next.is_ascii_alphanumeric());
-                    if !mid_word && !is_opening_punctuation(ch) {
-                        latest_safe = Some((end + 1, width));
-                        if ch.is_whitespace() {
-                            latest_space = latest_safe;
-                        }
-                        if is_closing_punctuation(ch) {
-                            latest_punctuation = latest_safe;
-                        }
-                    }
-                }
-            }
-            end += 1;
-        }
-        if end == tokens.len() {
-            lines.push(text[tokens[start].start..].to_owned());
-            break;
-        }
-        let remaining_capacity = (n - lines.len() - 1).saturating_mul(max_w);
-        let fits = |&(_, used_width): &(usize, usize)| {
-            remaining_width.saturating_sub(used_width) <= remaining_capacity
-                || remaining_width > (n - lines.len()).saturating_mul(max_w)
-        };
-        let preferred = latest_punctuation.filter(fits).or_else(|| latest_space.filter(fits));
-        let Some((split, used_width)) =
-            preferred.or(latest_safe).or(latest_any).or(latest_label)
-        else {
-            // No width-bounded split can keep closing punctuation with its text.
-            // Preserve the remainder instead of losing content or splitting controls.
-            while lines.len() + 1 < n {
-                lines.push(String::new());
-            }
-            lines.push(text[tokens[start].start..].to_owned());
-            break;
-        };
-        lines.push(text[tokens[start].start..tokens[split - 1].end].to_owned());
-        remaining_width = remaining_width.saturating_sub(used_width);
-        start = split;
-    }
-    lines.resize(n, String::new());
-    lines
 }
 
 fn navigate_mut<'a>(root: &'a mut Value, compact_rest: &str) -> Result<&'a mut Value> {
@@ -1372,35 +1047,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fit_lines_reflows_long_cjk_into_slots() {
-        let long = "上午的课就先到这里。下午会进行结合实践的课程，请大家到训练场集合。".to_string();
-        let out = fit_lines_with_width(std::slice::from_ref(&long), 3, 44);
-        assert_eq!(out.len(), 3);
-        assert!(out.iter().filter(|l| !l.is_empty()).count() >= 2, "out={out:?}");
-        assert!(
-            out[..2].iter().all(|l| display_width(l) <= 44),
-            "non-last lines within width: {out:?} widths={:?}",
-            out.iter().map(|l| display_width(l)).collect::<Vec<_>>()
-        );
-        assert_eq!(out.join(""), long.replace('\n', ""));
-    }
-
-    #[test]
-    fn fit_lines_keeps_equal_width_safe_lines() {
-        let lines = vec!["短い一行。".into(), "もう一行。".into(), "三行目。".into()];
-        let out = fit_lines_with_width(&lines, 3, 44);
-        assert_eq!(out, lines);
-    }
-
-    #[test]
-    fn fit_lines_does_not_split_control_codes() {
-        let s = "\\C[27]你好世界，这是一段比较长的测试文本用来检查控制符。".to_string();
-        let out = fit_lines_with_width(&[s], 2, 20);
-        assert!(out.iter().any(|l| l.contains("\\C[27]")), "out={out:?}");
-        assert!(!out.iter().any(|l| l.contains("\\C[2") && !l.contains("\\C[27]")));
-    }
-
     fn layout_unit(source: &[&str], slots: usize) -> TextUnit {
         TextUnit {
             id: "report-layout".into(),
@@ -1423,6 +1069,15 @@ mod tests {
             source_hash: "unchanged-source-hash".into(),
             passthrough: false,
         }
+    }
+
+    fn normalize_for_writeback(unit: &TextUnit, translation: &mut Translation) -> crate::layout::LayoutChange {
+        layout::normalize(
+            unit,
+            translation,
+            unit.source_line_paths.len(),
+            BUILTIN_RULES.layout(),
+        )
     }
 
     #[test]
@@ -1494,158 +1149,6 @@ mod tests {
     }
 
     #[test]
-    fn speaker_label_styles_and_controls_keep_slot_zero() {
-        let body = "「这是一段超过消息窗口宽度的台词，用来确认写回只会重排正文槽。」";
-        for (open, close) in [
-            ('【', '】'),
-            ('〖', '〗'),
-            ('〔', '〕'),
-            ('《', '》'),
-            ('〈', '〉'),
-            ('［', '］'),
-            ('[', ']'),
-        ] {
-            let source_label = format!("{open}ラージ{close}");
-            let translated_label = format!("{open}拉吉{close}");
-            let unit = layout_unit(&[&source_label, "こんにちは。"], 2);
-            let mut tr = layout_translation(&[&format!("{translated_label}{body}")]);
-            let change = normalize_for_writeback(&unit, &mut tr);
-            assert!(change.reflowed, "{open}{close}");
-            assert_eq!(tr.translation_lines[0], translated_label, "{open}{close}");
-            assert_eq!(tr.translation_lines[1], body, "{open}{close}");
-            assert!(!normalize_for_writeback(&unit, &mut tr).reflowed, "{open}{close}");
-        }
-    }
-
-    #[test]
-    fn control_wrapped_label_is_recovered_and_never_split() {
-        let unit = layout_unit(&[r"\C[2]【ラージ】\C[0]", "こんにちは。"], 2);
-        let mut tr = layout_translation(&[r"\C[2]【拉吉】\C[0]「你好，这是一段很长的正文。」"]);
-        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
-        assert_eq!(tr.translation_lines[0], "【拉吉】");
-        assert_eq!(tr.translation_lines[1], r"\C[2]\C[0]「你好，这是一段很长的正文。」");
-        assert!(!normalize_for_writeback(&unit, &mut tr).reflowed);
-
-        let mut standalone = layout_translation(&[r"\C[2]【拉吉】\C[0]", "你好。"]);
-        let expected = standalone.translation_lines.clone();
-        assert!(!normalize_for_writeback(&unit, &mut standalone).reflowed);
-        assert_eq!(standalone.translation_lines, expected);
-
-        let plain = layout_unit(&["【ラージ】", r"\SE[magao]「こんにちは。」"], 2);
-        let mut moved = layout_translation(&[r"\SE[magao]【拉吉】", "「你好。」"]);
-        assert!(normalize_for_writeback(&plain, &mut moved).reflowed);
-        assert_eq!(moved.translation_lines[0], "【拉吉】");
-        assert_eq!(moved.translation_lines[1], r"\SE[magao]「你好。」");
-    }
-
-    #[test]
-    fn embedded_label_is_atomic_when_source_has_no_name_slot() {
-        let unit = layout_unit(&[
-            "【ラージ】「とても長い台詞がここに続きます。」",
-            "二行目。",
-        ], 2);
-        let mut tr = layout_translation(&[
-            "【拉吉】「这是一段非常长的台词需要重新排版而不能把名字标签拆开。」",
-            "第二行。",
-        ]);
-        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
-        let out = &tr.translation_lines;
-        assert_eq!(out.len(), 2);
-        assert!(out[0].starts_with("【拉吉】"), "out={out:?}");
-        assert_eq!(out.iter().filter(|line| line.contains('【') || line.contains('】')).count(), 1, "out={out:?}");
-        assert_eq!(out.join(""), "【拉吉】「这是一段非常长的台词需要重新排版而不能把名字标签拆开。」第二行。");
-    }
-
-    #[test]
-    fn reflow_prefers_word_boundaries_and_opening_punctuation_is_never_orphaned() {
-        let out = reflow_to_n("alpha beta gamma delta", 2, 12);
-        assert_eq!(out, vec!["alpha beta ", "gamma delta"]);
-        let out = reflow_to_n("甲乙「丙丁戊己", 2, 4);
-        assert_eq!(out, vec!["甲乙", "「丙丁戊己"]);
-        assert_eq!(out.join(""), "甲乙「丙丁戊己");
-    }
-
-    #[test]
-    fn latest_punctuation_break_wins_over_punctuation_type_order() {
-        let text = "甲。乙，丙丁戊己";
-        let out = reflow_to_n(text, 2, 12);
-        assert_eq!(out, vec!["甲。乙，", "丙丁戊己"]);
-        assert_eq!(out.join(""), text);
-    }
-
-    #[test]
-    fn closing_punctuation_never_starts_a_reflowed_line() {
-        for punctuation in ['，', '。', '！', '？', '、', '」', '』'] {
-            let text = format!("甲乙{punctuation}丙丁");
-            let out = reflow_to_n(&text, 2, 4);
-            assert_eq!(out.join(""), text);
-            assert_eq!(out[0], "甲");
-            assert!(!starts_closing_punctuation(&out[1]));
-        }
-        let out = reflow_to_n("甲。！？乙", 2, 2);
-        assert_eq!(out, vec!["", "甲。！？乙"]);
-    }
-
-    #[test]
-    fn control_spans_are_atomic_and_remain_with_body() {
-        let text = r"\SE[magao]甲乙\C[27]丙丁\I[12]戊己\V[999]庚辛壬癸";
-        let out = reflow_to_n(text, 4, 6);
-        assert_eq!(out.join(""), text);
-        for control in [r"\SE[magao]", r"\C[27]", r"\I[12]", r"\V[999]"] {
-            assert_eq!(out.iter().filter(|line| line.contains(control)).count(), 1);
-        }
-        let unit = layout_unit(&["【ラージ】", "一行。", "二行。", "三行。", "四行。"], 5);
-        let mut tr = layout_translation(&["【拉吉】", text]);
-        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
-        assert_eq!(tr.translation_lines[0], "【拉吉】");
-        assert_eq!(tr.translation_lines[1..].join(""), text);
-        assert!(!normalize_for_writeback(&unit, &mut tr).reflowed);
-    }
-
-    #[test]
-    fn early_punctuation_does_not_force_avoidable_last_slot_overflow() {
-        let text = "甲。乙丙丁戊己庚辛壬";
-        let out = reflow_to_n(text, 2, 12);
-        assert_eq!(out.join(""), text);
-        assert!(out.iter().all(|line| display_width(line) <= 12), "out={out:?}");
-        assert_eq!(out[0], "甲。乙丙丁戊");
-    }
-
-    #[test]
-    fn name_is_not_reused_when_body_exceeds_multiple_available_slots() {
-        let unit = layout_unit(&["【ラージ】", "一行。", "二行。", "三行。"], 4);
-        let text = r"\SE[magao]甲乙丙丁戊己庚辛壬癸".repeat(12);
-        let mut tr = layout_translation(&["【拉吉】", &text]);
-        let first = normalize_for_writeback(&unit, &mut tr);
-        assert!(first.reflowed);
-        assert_eq!(first.overflow_lines, 1);
-        assert_eq!(tr.translation_lines[0], "【拉吉】");
-        assert!(tr.translation_lines[1].starts_with(r"\SE[magao]"));
-        assert_eq!(tr.translation_lines[1..].join(""), text);
-        let fitted = tr.translation_lines.clone();
-        let second = normalize_for_writeback(&unit, &mut tr);
-        assert!(!second.reflowed);
-        assert_eq!(second.overflow_lines, 1);
-        assert_eq!(tr.translation_lines, fitted);
-    }
-
-    #[test]
-    fn safe_prefix_boundaries_and_unavoidable_final_overflow_are_idempotent() {
-        let unit = layout_unit(&["一行。", "二行。", "三行。"], 3);
-        let long = "很长的台词需要重新分行但是最后一行超出窗口宽度时仍必须完整保存内容不能截断或者丢失任何字句。";
-        let mut tr = layout_translation(&["保留这一行。", long]);
-        assert!(normalize_for_writeback(&unit, &mut tr).reflowed);
-        assert_eq!(tr.translation_lines[0], "保留这一行。");
-        assert_eq!(tr.translation_lines[1..].join(""), long);
-        let expected = tr.translation_lines.clone();
-        let second = normalize_for_writeback(&unit, &mut tr);
-        assert!(!second.reflowed);
-        assert_eq!(tr.translation_lines, expected);
-        assert_eq!(fitted_unit_lines(&unit, &tr.translation_lines, 3, DEFAULT_MSG_WIDTH).as_ref(), expected.as_slice());
-        assert_eq!(tr.source_hash, "unchanged-source-hash");
-    }
-
-    #[test]
     fn reextract_uses_first_write_json_backups_and_explicit_origin() {
         let root = super::super::test_dir("rmmz-source-backups");
         let data = root.join("data");
@@ -1705,12 +1208,21 @@ mod tests {
     }
 
     fn fixture_translations(units: &[TextUnit]) -> BTreeMap<String, Translation> {
-        units.iter().map(|unit| (unit.id.clone(), Translation {
-            unit_id: unit.id.clone(),
-            translation_lines: unit.original_lines.iter().map(|line| format!("译文:{line}")).collect(),
-            source_hash: TextUnit::source_hash(&unit.original_lines),
-            passthrough: false,
-        })).collect()
+        units.iter().map(|unit| {
+            let mut translation = Translation {
+                unit_id: unit.id.clone(),
+                translation_lines: unit.original_lines.iter().map(|line| format!("译文:{line}")).collect(),
+                source_hash: TextUnit::source_hash(&unit.original_lines),
+                passthrough: false,
+            };
+            layout::normalize(
+                unit,
+                &mut translation,
+                unit.source_line_paths.len(),
+                BUILTIN_RULES.layout(),
+            );
+            (unit.id.clone(), translation)
+        }).collect()
     }
 
     #[test]

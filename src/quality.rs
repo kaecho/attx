@@ -1,4 +1,3 @@
-use crate::layout;
 use crate::model::{self, ItemType, TextUnit};
 use crate::preserve::{self, PreserveSet};
 use anyhow::{Result, bail};
@@ -259,26 +258,26 @@ pub fn check_translation(
     }
     let src = visible_lines(&unit.original_lines, preserve).join("\n");
     let dst = visible_lines(lines, preserve).join("\n");
-    if unit.engine == "rmmz"
-        && unit
-            .original_lines
-            .first()
-            .is_some_and(|line| layout::standalone_label(line).is_some())
+    if let Some(source_first) = unit.original_lines.first()
+        && let Some(rule) = preserve
+            .layout()
+            .find(unit, source_first)
+            .filter(|rule| rule.standalone_label(source_first).is_some())
     {
         let head = lines.first().map(String::as_str).unwrap_or_default();
-        let Some(label) = layout::leading_label(head) else {
+        let Some(label) = rule.leading_label(head) else {
             bail!("missing translated speaker label");
         };
         let source_has_body = unit
             .original_lines
             .iter()
             .skip(1)
-            .any(|line| layout::has_visible_text(line));
-        let translated_has_body = layout::has_visible_text(label.suffix)
+            .any(|line| rule.has_visible_text(line));
+        let translated_has_body = rule.has_visible_text(label.suffix)
             || lines
                 .iter()
                 .skip(1)
-                .any(|line| layout::has_visible_text(line));
+                .any(|line| rule.has_visible_text(line));
         if source_has_body && !translated_has_body {
             bail!("missing dialogue after speaker label");
         }
@@ -616,6 +615,7 @@ mod tests {
 
     #[test]
     fn speaker_label_check_accepts_controls_and_bracket_variants() {
+        let preserve = PreserveSet::for_engine("rmmz");
         let source = |label: &str| unit(ItemType::LongText, &[label, "こんにちは。"]);
         for (source_label, translated_label) in [
             ("【ラージ】", "【拉吉】"),
@@ -628,12 +628,12 @@ mod tests {
         ] {
             let u = source(source_label);
             assert!(
-                check_translation(&u, &lines(&[translated_label, "你好。"]), "ja", "zh", PreserveSet::core()).is_ok(),
+                check_translation(&u, &lines(&[translated_label, "你好。"]), "ja", "zh", &preserve).is_ok(),
                 "source={source_label} translated={translated_label}"
             );
             // Dropping the label is structural damage regardless of its style.
             assert!(
-                check_translation(&u, &lines(&["你好。", ""]), "ja", "zh", PreserveSet::core()).is_err(),
+                check_translation(&u, &lines(&["你好。", ""]), "ja", "zh", &preserve).is_err(),
                 "missing label for source={source_label}"
             );
         }
@@ -645,17 +645,17 @@ mod tests {
                 &lines(&["【拉吉】", r"\SE[magao]「你好。」"]),
                 "ja",
                 "zh",
-                PreserveSet::core()
+                &preserve
             )
             .is_ok()
         );
         // The check reads raw slots, so a preserved control before the label
         // does not mask the label.
         let moved_control = lines(&[r"\SE[magao]【拉吉】", "「你好。」"]);
-        let result = check_translation(&controlled_body, &moved_control, "ja", "zh", PreserveSet::core());
+        let result = check_translation(&controlled_body, &moved_control, "ja", "zh", &preserve);
         assert!(result.is_ok(), "{moved_control:?}: {result:?}");
         let collapsed = lines(&["【拉吉】你好。"]);
-        let result = check_translation(&u, &collapsed, "ja", "zh", PreserveSet::core());
+        let result = check_translation(&u, &collapsed, "ja", "zh", &preserve);
         assert!(result.is_ok(), "{collapsed:?}: {result:?}");
         let controlled = unit(ItemType::LongText, &[r"\C[2]【ラージ】\C[0]", "こんにちは。"]);
         assert!(
@@ -664,13 +664,40 @@ mod tests {
                 &lines(&[r"\C[2]【拉吉】\C[0]", "你好。"]),
                 "ja",
                 "zh",
-                PreserveSet::core()
+                &preserve
             )
             .is_ok()
         );
-        assert!(check_translation(&u, &lines(&["【拉吉】"]), "ja", "zh", PreserveSet::core()).is_err());
+        assert!(check_translation(&u, &lines(&["【拉吉】"]), "ja", "zh", &preserve).is_err());
         let plain = unit(ItemType::LongText, &["こんにちは。", "元気ですか。"]);
-        assert!(check_translation(&plain, &lines(&["你好。", "你好吗。"]), "ja", "zh", PreserveSet::core()).is_ok());
+        assert!(check_translation(&plain, &lines(&["你好。", "你好吗。"]), "ja", "zh", &preserve).is_ok());
+    }
+
+    #[test]
+    fn layout_rules_apply_to_any_engine() {
+        use crate::knowledge::{self, LeadingControls, LayoutEntry, Status};
+        use crate::layout::LayoutRules;
+        let mut exp = knowledge::Experience {
+            format: "custom:novel".into(),
+            entries: Vec::new(),
+        };
+        let mut rule = LayoutEntry::new("^«[^»]+»", "", 0, LeadingControls::Body, "dialogue");
+        rule.status = Status::Approved;
+        exp.entries.push((2, knowledge::Entry::Layout(rule)));
+        let preserve = PreserveSet::core()
+            .clone()
+            .with_layout(LayoutRules::from_experience(&exp));
+
+        let mut source = unit(ItemType::LongText, &["«名前»", "本文"]);
+        source.engine = "custom:novel".into();
+        assert!(
+            check_translation(&source, &lines(&["«名字»", "译文"]), "ja", "zh", &preserve).is_ok()
+        );
+        assert!(check_translation(&source, &lines(&["译文"]), "ja", "zh", &preserve).is_err());
+        assert!(
+            check_translation(&source, &lines(&["«名字»"]), "ja", "zh", &preserve).is_err(),
+            "a label without the source body is structural damage"
+        );
     }
 
     #[test]
@@ -716,11 +743,12 @@ mod tests {
     #[test]
     fn independent_speaker_and_dialogue_cannot_be_omitted() {
         let source = unit(ItemType::LongText, &["【アレイ】", "こんにちは"]);
+        let preserve = PreserveSet::for_engine("rmmz");
         for invalid in [lines(&["你好"]), lines(&["【艾蕾】"]), lines(&["【【艾蕾】你好"])] {
-            assert!(check_translation(&source, &invalid, "ja", "zh", PreserveSet::core()).is_err());
+            assert!(check_translation(&source, &invalid, "ja", "zh", &preserve).is_err());
         }
-        assert!(check_translation(&source, &lines(&["【艾蕾】", "你好"]), "ja", "zh", PreserveSet::core()).is_ok());
-        assert!(check_translation(&source, &lines(&["【艾蕾】你好"]), "ja", "zh", PreserveSet::core()).is_ok());
+        assert!(check_translation(&source, &lines(&["【艾蕾】", "你好"]), "ja", "zh", &preserve).is_ok());
+        assert!(check_translation(&source, &lines(&["【艾蕾】你好"]), "ja", "zh", &preserve).is_ok());
     }
 
     #[test]

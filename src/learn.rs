@@ -96,6 +96,103 @@ fn count_controls(lines: &[String]) -> usize {
     preserve::PreserveSet::core().mask_unit_lines(lines).1.len()
 }
 
+/// Repeated short first-slot markers are layout evidence, not extraction
+/// evidence. A game that puts `【名前】` in its own message slot shows up as the
+/// same delimiter pair across many distinct labels.
+#[derive(Debug, Default, Clone)]
+struct LayoutStats {
+    shapes: BTreeMap<(char, char), ShapeStats>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ShapeStats {
+    units: usize,
+    labels: BTreeSet<String>,
+    domains: BTreeSet<String>,
+    samples: Vec<String>,
+}
+
+/// Minimum units before a delimiter shape becomes a proposal. Below this a
+/// chapter heading and a coincidence look the same.
+const LAYOUT_MIN_SAMPLE: usize = 4;
+const LAYOUT_MAX_LABEL_CHARS: usize = 32;
+
+fn collect_layout(units: &[TextUnit], preserve: &preserve::PreserveSet) -> LayoutStats {
+    let mut stats = LayoutStats::default();
+    for u in units {
+        if u.original_lines.len() < 2 || u.source_line_paths.len() < 2 {
+            continue;
+        }
+        let first = u.original_lines[0].trim();
+        let (masked, _) = preserve.mask_line(first);
+        if masked.trim_start().starts_with("[CTRL_") {
+            continue;
+        }
+        let char_count = first.chars().count();
+        if !(3..=LAYOUT_MAX_LABEL_CHARS).contains(&char_count) {
+            continue;
+        }
+        let Some(open) = first.chars().next() else { continue };
+        let Some(close) = first.chars().next_back() else { continue };
+        if open == close
+            || open.is_alphanumeric()
+            || close.is_alphanumeric()
+            || open.is_whitespace()
+            || close.is_whitespace()
+            || first.contains(['\n', '\r', '。', '！', '？', '!', '?'])
+        {
+            continue;
+        }
+        let shape = stats.shapes.entry((open, close)).or_default();
+        shape.units += 1;
+        shape.labels.insert(first.to_string());
+        shape.domains.insert(u.domain.clone());
+        if shape.samples.len() < 3 {
+            shape.samples.push(truncate(first, 40));
+        }
+    }
+    stats
+}
+
+fn propose_layouts(stats: &LayoutStats, now: &str) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for ((open, close), shape) in &stats.shapes {
+        if shape.units < LAYOUT_MIN_SAMPLE || shape.labels.len() < 2 {
+            continue;
+        }
+        let domain = if shape.domains.len() == 1 {
+            shape.domains.iter().next().cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let pattern = format!(
+            "^{}[^{}{}\\r\\n]{{1,{}}}{}",
+            regex::escape(&open.to_string()),
+            regex::escape(&open.to_string()),
+            regex::escape(&close.to_string()),
+            LAYOUT_MAX_LABEL_CHARS,
+            regex::escape(&close.to_string()),
+        );
+        let mut entry = knowledge::LayoutEntry::new(
+            &pattern,
+            "",
+            0,
+            knowledge::LeadingControls::Body,
+            &domain,
+        );
+        entry.status = Status::Pending;
+        entry.source = SOURCE_AUTO.into();
+        entry.reason = format!(
+            "{} units reserve slot zero for a short label delimited by `{open}` and `{close}`",
+            shape.units
+        );
+        entry.evidence = shape.samples.clone();
+        entry.updated_at = now.to_string();
+        out.push(Entry::Layout(entry));
+    }
+    out
+}
+
 /// Collect per-field and run-level evidence from a workspace.
 fn collect(
     units: &[TextUnit],
@@ -295,6 +392,8 @@ pub struct SummaryReport {
     pub entries_written: usize,
     /// Of those, how many need `attx learn review --approve`.
     pub pending: usize,
+    /// Newly proposed slot/label layout rules.
+    pub layouts: usize,
     pub notes: usize,
     pub file: String,
 }
@@ -339,6 +438,35 @@ pub fn summarize(workspace: &Path, use_llm: bool, settings: &Settings) -> Result
         file.upsert(entry);
         written += 1;
     }
+    let layout_candidates = propose_layouts(
+        &collect_layout(&units, &preserve::load(workspace, &meta.engine)),
+        &now,
+    );
+    let approved_layouts = crate::layout::LayoutRules::from_experience(&merged);
+    let mut layouts = 0usize;
+    for entry in layout_candidates {
+        let (skip, duplicate) = match &entry {
+            Entry::Layout(new) => {
+                let covered = !new.evidence.is_empty()
+                    && new
+                        .evidence
+                        .iter()
+                        .all(|sample| approved_layouts.probe(&new.domain, sample).is_some());
+                let duplicate = file.entries.iter().any(|e| {
+                    matches!(e, Entry::Layout(old) if old.label == new.label && old.domain == new.domain)
+                });
+                (covered, duplicate)
+            }
+            _ => (false, false),
+        };
+        if skip || duplicate {
+            continue;
+        }
+        pending += 1;
+        layouts += 1;
+        written += 1;
+        file.upsert(entry);
+    }
     let notes = notes_for(&meta.engine, &run, &now);
     let note_count = notes.len();
     for n in notes {
@@ -352,6 +480,7 @@ pub fn summarize(workspace: &Path, use_llm: bool, settings: &Settings) -> Result
         fields_seen: stats.len(),
         entries_written: written + note_count,
         pending,
+        layouts,
         notes: note_count,
         file: path.display().to_string(),
     })
@@ -429,8 +558,12 @@ pub fn pending_items() -> Vec<PendingItem> {
     let mut n = 0usize;
     for f in knowledge::all_files() {
         for (i, e) in f.entries.iter().enumerate() {
-            let Entry::Field(fe) = e else { continue };
-            if fe.status != Status::Pending {
+            let pending = match e {
+                Entry::Field(fe) => fe.status == Status::Pending,
+                Entry::Layout(le) => le.status == Status::Pending,
+                _ => false,
+            };
+            if !pending {
                 continue;
             }
             n += 1;
@@ -485,9 +618,16 @@ pub fn review(approve: &[usize], reject: &[usize]) -> Result<ReviewReport> {
                 continue;
             }
             if ok {
-                if let Entry::Field(fe) = &mut file.entries[idx] {
-                    fe.status = Status::Approved;
-                    fe.updated_at = now.clone();
+                match &mut file.entries[idx] {
+                    Entry::Field(fe) => {
+                        fe.status = Status::Approved;
+                        fe.updated_at = now.clone();
+                    }
+                    Entry::Layout(le) => {
+                        le.status = Status::Approved;
+                        le.updated_at = now.clone();
+                    }
+                    _ => {}
                 }
                 approved += 1;
             } else {
@@ -1019,6 +1159,35 @@ mod tests {
         assert_eq!(n, 1);
         let exp = knowledge::load_experience("txt", Some(&ws));
         assert_eq!(exp.prompt_notes(), vec!["soft voice".to_string()]);
+    }
+
+    #[test]
+    fn repeated_first_slot_markers_become_a_pending_layout_rule() {
+        let mut units = Vec::new();
+        for (i, name) in ["アレイ", "リーゼ", "ラージ", "エレノア", "カイ"].iter().enumerate() {
+            let mut u = unit(&format!("Map00{i}.json/1/0/0"), "");
+            u.domain = "dialogue".into();
+            u.item_type = ItemType::LongText;
+            u.original_lines = vec![format!("【{name}】"), "こんにちは。".into()];
+            u.source_line_paths = vec![
+                format!("Map00{i}.json/1/0/0"),
+                format!("Map00{i}.json/1/0/1"),
+            ];
+            units.push(u);
+        }
+        let proposals = propose_layouts(
+            &collect_layout(&units, &preserve::PreserveSet::for_engine("rmmz")),
+            "1",
+        );
+        assert_eq!(proposals.len(), 1);
+        let Entry::Layout(rule) = &proposals[0] else {
+            panic!("expected layout proposal")
+        };
+        assert_eq!(rule.status, Status::Pending);
+        assert_eq!(rule.domain, "dialogue");
+        assert!(rule.label.starts_with("^【"), "label={}", rule.label);
+        assert_eq!(rule.evidence.len(), 3);
+        assert_eq!(rule.source, SOURCE_AUTO);
     }
 
     #[test]

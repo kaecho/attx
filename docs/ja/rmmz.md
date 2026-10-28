@@ -60,7 +60,9 @@ attx learn list --format rmmz
 
 会話の writeback は元の 401 スロット数とイベントコマンド数を変えません。訳文が長くなっても command を足したり削除したりせず、表示幅と句読点を考慮して元スロットへ再配置します。control token は分断しません。
 
-先頭スロットが話者 label である場合、そのスロットを保護して本文を残りへ配置します。話者と本文を混ぜて先頭を消費する方法ではありません。label は `【】`、`[]`、`〖〗`、`〔〕`、`《》`、`〈〉`、`［］` に対応し、label の前後にある色・表情 control では認識が崩れません。本文に属する control が label の前へ移動した場合は本文スロットへ戻します。2 スロットが label と body の場合、body は残り 1 スロットに収める必要があります。本文を黙って切り捨てず、避けられない残りは最後のスロットに保持します。
+先頭スロットが話者 label である場合、そのスロットを保護して本文を残りへ配置します。話者と本文を混ぜて先頭を消費する方法ではありません。label は `【】`、`[]`、`〖〗`、`〔〕`、`《》`、`〈〉`、`［］` に対応し、label の前後にある色・表情 control では認識が崩れません。本文に属する control が label の前へ移動した場合は本文スロットへ戻します。
+
+label 規則は adapter のコードではなくデータです。組み込み RMMZ 既定には `kind = "layout"` の経験 entry があり、label 正規表現、control 正規表現、44 cell の幅を宣言します。ゲーム固有の label は `attx learn layout add` で追加し、`attx learn layout test` で実スロットを確認します。workspace 規則は global 規則を上書きし、writeback のたびに読み込まれます。`attx learn summarize` は複数 unit の先頭 slot が同じ区切り文字を共有するとき pending 規則を提案し、`attx learn review --approve` の後だけ有効になります。2 スロットが label と body の場合、body は残り 1 スロットに収める必要があります。本文を黙って切り捨てず、避けられない残りは最後のスロットに保持します。
 
 基準幅は 44 halfwidth cells です。最終スロットなどで収まりきらなければ `overflow_lines` に報告します。半角セルの推定は font、plugin、window size の実際の見え方を保証しません。`reflowed_units` は再配置したユニット数です。
 

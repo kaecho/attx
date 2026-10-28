@@ -44,6 +44,10 @@ The three kana categories are disjoint classifications. Other buckets can overla
 
 Source-language detection is a script heuristic covering common Latin, CJK, Hangul, Cyrillic, Arabic, Devanagari, and Thai ranges. Shared scripts, short strings, names, and same-script translation pairs limit its accuracy. Tags select prompts and heuristics; they are not an automatic language-identification service.
 
+## Layout rules
+
+Slot-aware formats can carry an approved `kind = "layout"` experience entry. The entry supplies a leading-label regex, a control-token regex, a half-width width budget, and whether leading controls belong to the label or the body. Writeback and the structural label check read the active rule, not a hard-coded format name. Built-in, global, and workspace layers merge, and the workspace wins. Pending rules waiting for `learn review` do not apply. `learn summarize` can propose a rule from repeated slot-zero markers; `learn layout test` shows where a candidate regex ends the label on a real sample.
+
 ## Line-break normalization
 
 Model output is normalized before structural checks. CRLF and lone CR collapse to LF. Embedded newlines split into separate lines for `array` and `long_text` units, and a `short_text` response that arrives split is joined: adjacent CJK text joins with no separator, while a Latin boundary keeps one space. A line that contains only protected tokens, markup, or whitespace is restored from the source when the model drops it and the line counts agree. Subtitle (SRT/VTT) and LRC writeback reuse the source file's line ending.

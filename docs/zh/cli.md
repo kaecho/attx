@@ -83,7 +83,7 @@ review --workspace <dir>
 
 ### 写回报告
 
-`files`、`units_applied`、`paths[]` 是实际写回规模，dry-run 时仅为计划。`dry_run`、`status`、`skipped_note`、`units_skipped` 说明完整性；`normalized_lines`、`reflowed_units`、`overflow_lines` 说明规范化/布局；`review` 为审校，运行经验总结时才附 `learned`。blocked 通常 files=0、paths=[]，不会生成输出或修改规范化缓存。
+`files`、`units_applied`、`paths[]` 是实际写回规模，dry-run 时仅为计划。`dry_run`、`status`、`skipped_note`、`units_skipped` 说明完整性；`normalized_lines`、`reflowed_units`、`overflow_lines` 说明规范化/布局（布局规则来自经验条目，不限 RMMZ）；`review` 为审校，运行经验总结时才附 `learned`。blocked 通常 files=0、paths=[]，不会生成输出或修改规范化缓存。
 
 review 含 total、translated、pending、passthrough、glossary 和 residual_source/kana_edge/kana_mixed/kana_untranslated/identical/control_loss/residual_latin。每类 count 加最多 40 个 `{location,unit_id,detail}` 样例。residual_latin 是提示项：会进入 repair 候选，但不拦截写回；译名一致性由术语表负责，不做按格式的专项规则。auto_coverage 含 supported_files、copied_files、unsupported_total、unsupported_paths、excluded_entries、excluded_paths；两个路径样例各最多50项，排除目录根计1。这些是报告样例上限，不是质量检查范围上限。
 
@@ -148,13 +148,18 @@ learn list [--format <id>] [--workspace <dir>]
 learn defaults --format <id>
 learn forget --field <字段> [--format <id>]
 learn forget --name <id> [--workspace <dir> | --format <id>]
+learn layout add --format <id> --label <正则> [--control <正则>] [--width 0] [--leading-controls body|label] [--domain <域>] [--reason <说明>] [--workspace <dir>]
+learn layout list [--format <id>] [--workspace <dir>]
+learn layout remove --format <id> --label <正则> [--domain <域>] [--workspace <dir>]
+learn layout test --format <id> --text <样例行> [--domain <域>] [--workspace <dir>]
 ```
 
-- summarize/scan 普通运行不调模型，--llm 有额外费用，返回 format、units_scanned、fields_seen、entries_written、pending、notes、file；写入全局格式经验。
+- summarize/scan 普通运行不调模型，--llm 有额外费用，返回 format、units_scanned、fields_seen、entries_written、pending、layouts、notes、file；写入全局格式经验。重复出现的首槽短标记会生成 pending 的 `kind = "layout"` 提案。
 - note 默认 topic=prompt，name 默认空，同名更新。作品用 workspace，全局用 format；其他 topic 仅供人读，不进入翻译 prompt。返回 format、topic、name、source、text、file、layer、reaches_prompt。至少选 workspace 或 format。
-- pending 返回 pending、entries，每项有从 1 起的 index、format 和证据。review 按刚读取的索引批准/拒绝，返回 approved、rejected、remaining、files_written；CLI 有 --approve-all，但代理不得自行使用。至少指定一种操作。
+- pending 返回 pending、entries，每项有从 1 起的 index、format 和证据；字段规则和布局规则都会出现。review 按刚读取的索引批准/拒绝，返回 approved、rejected、remaining、files_written；CLI 有 --approve-all，但代理不得自行使用。至少指定一种操作。
 - list 返回 formats、knowledge、note，项含 format/version/kinds/entries，作品层另有 layer。不会把内置基线混入这份全局/作品列表。
-- defaults 输出内置 TOML，目前 rmmz 有基线。
+- defaults 输出内置 TOML，目前 rmmz 有基线和布局规则。
 - forget 必须恰好指定 field 或 name；field 在全局经验中，不能配 --workspace。返回 forgotten 及 field/name、status。
+- layout 管理写回和结构标签检查使用的槽位规则：label 正则从首个可见字符开始匹配，control 正则描述原子控制符，width 是半角宽度（0 表示继承该域已有的宽度），leading-controls 决定前导控制符归标签还是正文，domain 可选。add 校验正则并写入全局或工作区经验；test 输出 label、prefix、suffix、standalone、label_end、width、effective_width、source；remove 按精确 label 正则和 domain 删除。内置规则不在 list 里，用 defaults 查看。
 
 经验、术语和保护规则的完整落盘结构、层优先级及审批边界见[工作区页](workspace.md)。命令源码：[src/main.rs](https://github.com/kaecho/attx/blob/main/src/main.rs)，代理契约：[cli-command-contract.md](https://github.com/kaecho/attx/blob/main/skills/attx/references/cli-command-contract.md)。

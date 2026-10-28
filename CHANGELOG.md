@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Slot layout is data-driven. A `kind = "layout"` experience entry supplies a leading-label regex, an atomic-control regex, a half-width width budget, a domain, and whether a leading control belongs to the label or the body. Built-in RMMZ rules live in `src/defaults/rmmz.toml`; adapter code no longer owns the bracket table.
+- `quality::check_translation` and writeback slot fitting read the active layout rules for any engine. A format that adds a rule gets the same label protection and structural check without a source change.
+- `learn layout add|list|remove|test` lets an agent add or probe a rule. `learn summarize` proposes a pending rule when repeated short first slots share delimiters; `learn review` approves it. Existing approved rules suppress duplicate proposals.
+
 ## 0.11.2
 
 ### Bug fixes

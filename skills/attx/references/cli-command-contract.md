@@ -127,7 +127,7 @@ attx writeback --workspace <工作区> [--dry-run] [--no-learn] [--allow-partial
 | `status`、`skipped_note` | `ok|blocked|needs_attention` 及解释 |
 | `units_skipped` | 本次未应用的单元 |
 | `normalized_lines` | 规范化信号 |
-| `reflowed_units` | RMMZ 对白槽位重排单元 |
+| `reflowed_units` | 生效布局规则重排的槽位单元 |
 | `overflow_lines` | 布局溢出信号，不能静默忽略 |
 | `review` | 全量机械审校报告 |
 | `learned` | 运行自动经验总结时的结果 |
@@ -212,9 +212,15 @@ attx learn list [--format <id>] [--workspace <工作区>]
 attx learn defaults --format <id>
 attx learn forget --field <字段> [--format <id>]
 attx learn forget --name <短名> [--workspace <工作区> | --format <id>]
+attx learn layout add --format <id> --label <正则> [--control <正则>] [--width 0] [--leading-controls body|label] [--domain <域>] [--reason <说明>] [--workspace <工作区>]
+attx learn layout list [--format <id>] [--workspace <工作区>]
+attx learn layout remove --format <id> --label <正则> [--domain <域>] [--workspace <工作区>]
+attx learn layout test --format <id> --text <样例行> [--domain <域>] [--workspace <工作区>]
 ```
 
-`summarize` 的 `scan` 别名仍可用。普通总结不调用模型，`--llm`/配置中的 LLM 复核有费用，不擅自启用。`learned` 含 `entries_written`、`pending`、`notes`、`file`；其提取经验不等于文风学习。
+`summarize` 的 `scan` 别名仍可用。普通总结不调用模型，`--llm`/配置中的 LLM 复核有费用，不擅自启用。`learned` 含 `entries_written`、`pending`、`layouts`、`notes`、`file`；其提取经验不等于文风学习。重复出现的首槽短标记会生成 pending 的 `kind = "layout"` 规则。
+
+布局规则是数据：`label` 正则从首个可见字符开始匹配，`control` 正则描述原子控制符，`width` 是半角宽度（0 表示继承该 domain 已有的宽度），`leading-controls` 决定前导控制符归标签还是正文，`domain` 限定 unit 类型。写回和结构标签检查读取当前内置、全局、工作区三层合并结果，不在代码里按 engine 写死。先 `layout test` 验证样本，再 `layout add --workspace` 加作品级规则；不要为了单个游戏的标签样式改源码或扩大全局范围。pending 布局规则需要用户批准后才生效。
 
 pending 的 skip 提案可能删除可提取文本，必须报告证据并交用户审阅。CLI 有 `--approve-all`，代理不得自行使用。
 

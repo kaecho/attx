@@ -94,6 +94,8 @@ attx repair --workspace './.attx-novel'
 
 达上限或无进展后，报告 `unresolved`，再用全量 JSONL 人工审校。不要不断重新运行 repair 把有限预算变成无限调用。默认 writeback 拦截待译和无效单元；明确使用 `--allow-partial` 才写有效子集，未解决位置保留原文，返回 2。
 
+槽位型格式可以带 `kind = "layout"` 经验条目：标签正则、控制符正则、半角宽度预算，以及前导控制符属于标签还是正文。写回和结构标签检查读取当前规则，不按格式名写死。内置、全局、工作区三层合并，工作区优先；等待 `learn review` 的 pending 规则不生效。`learn summarize` 会从重复首槽标记提出规则，`learn layout test` 用真实样本显示候选正则把标签切到哪里。
+
 ## 写回规范化与布局
 
 模型返回的换行会先规范化再做结构检查：CRLF 和单独 CR 统一为 LF；array/long_text 中内嵌的换行拆成多行；short_text 被拆行时合并，两侧都是 CJK 就直接相连，拉丁边界保留一个空格。只含保护符、标记或空白的行，在模型丢弃且行数一致时从原文恢复。SRT/VTT 与 LRC 写回沿用源文件的行尾（CRLF 或 LF）。

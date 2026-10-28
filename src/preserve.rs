@@ -5,6 +5,8 @@
 //! HTML/XML tags. Workspace rules append patterns. Overlapping hits keep the
 //! leftmost-longest span.
 
+use crate::layout::LayoutRules;
+use crate::knowledge;
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -65,11 +67,15 @@ struct Compiled {
 #[derive(Debug, Clone)]
 pub struct PreserveSet {
     rules: Vec<Compiled>,
+    layout: LayoutRules,
 }
 
 impl PreserveSet {
     fn empty() -> Self {
-        Self { rules: Vec::new() }
+        Self {
+            rules: Vec::new(),
+            layout: LayoutRules::none(),
+        }
     }
 
     /// Engine controls, brace/printf placeholders, and literal mask tokens.
@@ -92,7 +98,18 @@ impl PreserveSet {
         if matches!(engine, "auto" | "epub" | "html" | "xml" | "md" | "docx" | "srt" | "vtt") {
             s.push_builtin(INLINE_TAG, "inline HTML/XML tag");
         }
+        s.layout = LayoutRules::from_experience(&knowledge::embedded_experience(engine));
         s
+    }
+
+    pub fn layout(&self) -> &LayoutRules {
+        &self.layout
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_layout(mut self, layout: LayoutRules) -> Self {
+        self.layout = layout;
+        self
     }
 
     fn push_builtin(&mut self, pattern: &str, info: &str) {
@@ -216,6 +233,7 @@ pub fn path(workspace: &Path) -> PathBuf {
 pub fn load(workspace: &Path, engine: &str) -> PreserveSet {
     let mut s = PreserveSet::for_engine(engine);
     s.merge_file(&path(workspace));
+    s.layout = LayoutRules::from_experience(&knowledge::load_experience(engine, Some(workspace)));
     s
 }
 

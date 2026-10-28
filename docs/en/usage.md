@@ -188,9 +188,23 @@ text = "Use concise menu labels."
 status = "approved"
 source = "learn:agent:menus"
 updated_at = ""
+
+[[entry]]
+kind = "layout"
+label = '^「[^」]+」'
+control = ''
+width = 0
+leading_controls = "body"
+status = "approved"
+domain = "dialogue"
+reason = "This game wraps the speaker name in quotes in slot zero."
+source = "learn:agent:layout"
+updated_at = ""
 ```
 
 Field entries use lowercased `field`; a leading `*` matches a suffix. `verdict` is `skip` or `extract`, `scope` is `any`, `top`, or `nested`, and `status` is `approved` or `pending`. Empty `domain` applies to all domains. Confidence, reason, evidence, source, and timestamp record provenance, not permission to activate a destructive rule. Notes have `topic`, `text`, `status`, `source`, and `updated_at`; the CLI's named-note key is represented by its source identity.
+
+Layout entries use `label` (regex matched at the first visible character), `control` (regex for atomic tokens), `width` (half-width cells; `0` inherits an approved width for the domain), `leading_controls` (`body` or `label`), and `domain`. Only approved entries act. `learn layout add` writes one, `learn layout test` probes a sample, and `learn summarize` can propose a pending rule from repeated slot-zero markers. Writeback and the structural label check use the merged rules for any engine, not a hard-coded format name.
 
 The active merge is built-in defaults, global experience, then workspace experience. A later layer takes precedence. Within one layer, exact fields beat suffix rules and skip beats extract on a tie. Only approved fields and approved nonempty prompt notes act. Unknown entry kinds/fields survive serialization but do not acquire executable behavior. Older version-1 `[[rule]]` experience is read as approved compatibility data.
 

@@ -36,6 +36,7 @@ doctor [--ping] [--json]                          formats
 detect --input <file-or-dir>                      analyze --input <file-or-dir> [--src ja]
 profile new|infer|test|save|list
 learn summarize (alias: scan) | note | pending | review | list | defaults | forget
+learn layout add|list|remove|test                  slot/label rules
 glossary build|list|add|remove|import|export|check
 preserve list|add|remove
 init --input <file-or-dir> [--engine <id>|--profile <path-or-name>] [--workspace <dir>] [--infer]
@@ -72,7 +73,7 @@ import-jsonl --workspace <dir> --input <file>
 - Requests go to `{base_url}/chat/completions`. `extra` is merged into the body last except `messages`. Effective timeout is `client.timeout.max(30)`.
 - Batching splits on `batch_chars`, `max_context_items`, and scene changes (`engine`, `context`, file). Prompt ids are positional within each batch (`1..n`). Unknown or duplicate ids are dropped; malformed rows are skipped without invalidating other rows.
 - `LlmFailure` separates fatal errors from retryable transport errors. `408`, `429`, and `5xx` retry. Other HTTP errors, including `401`, `403`, and `404`, are fatal and stop queued work. Exhausted units become `passthrough` translations that retain the source text and set the flag.
-- Accepted output must pass preserve-token multiplicity/order checks and `quality::check_translation`. `quality::normalize_lines` applies safe fixes before hard rejection. `review::blocking_unit_ids` treats passthrough, structural failure, and visible kana residue as blocking; glossary and speaker consistency are advisory.
+- Accepted output must pass preserve-token multiplicity/order checks and `quality::check_translation`. `quality::normalize_lines` applies safe fixes before hard rejection. `review::blocking_unit_ids` treats passthrough, structural failure, and visible kana residue as blocking; glossary and speaker consistency are advisory. Speaker-label structure is checked only when an approved `kind = "layout"` experience rule matches the source slot.
 - `review` reports `residual_source`, `kana_edge`, `kana_mixed`, `kana_untranslated`, `identical`, `control_loss`, `residual_latin`, and `glossary.violations`; samples are capped at 40. Only the blocking conditions above gate writeback.
 - `translate` and `run` perform `repair_rounds + 1` passes. `repair` performs `max(repair_rounds, 1)` targeted passes. Repair is bounded; it is not an infinite retry loop.
 
@@ -81,7 +82,7 @@ import-jsonl --workspace <dir> --input <file>
 - `FormatAdapter` (`src/adapter/mod.rs`) exposes `id`, `label`, `extensions`, `input_kind`, `detect`, `extract`, and `writeback`. Adapters are pure I/O: no HTTP, no SQLite, no workspace policy.
 - `all_adapters()` order is detect priority: `rmmz`, `epub`, `html`, `docx`, `xlsx`, `srt`, `vtt`, `ass`, `lrc`, `csv`, `po`, `renpy`, `md`, `txt`, `paratranz`, `vnt`, `mtool`, `i18next`, `jsonl`, `auto`. `adapter::detect` skips `auto`; `pipeline::detect_any` runs built-ins, then saved profiles, then `AutoAdapter`. `--engine` uses `detect_or_force` and claims the forced engine even when detection soft-fails.
 - `output_sibling` produces `<stem>.<target>.<ext>`. `jsonl` writes a file sibling or `<dir>/translated.jsonl`. `rmmz` writes live `data/` and `js/plugins.js`.
-- RMMZ extraction prefers `data_origin/` when it contains `System.json`; writeback always targets `content_root/data/`. Domains are `dialogue`, `scroll`, `namebox`, `choices`, `system`, `base`, and `plugins`. Event commands are never inserted or deleted. `401`/`405` text is refitted into the existing slot count, with `44` half-width cells per line; overflow is retained and reported.
+- RMMZ extraction prefers `data_origin/` when it contains `System.json`; writeback always targets `content_root/data/`. Domains are `dialogue`, `scroll`, `namebox`, `choices`, `system`, `base`, and `plugins`. Event commands are never inserted or deleted. `401`/`405` text is refitted into the existing slot count using the active `kind = "layout"` rule; the built-in rule sets `44` half-width cells. Overflow is retained and reported.
 - RMMZ plugin `.js` sources are never rewritten. Only plugin parameters in `js/plugins.js` are updated, and a plugin extract error is skipped rather than fatal.
 - `auto` sniffs JSON, XML, YAML, INI, TOML, and prose with byte spans. Directory mode copies unsupported files, preserves source encoding and permissions, and excludes `.attx*`, `.git`, `node_modules`, `translated-*`, backups, editor backups, and symlinks. Report copy-only and excluded coverage honestly.
 - Custom profiles are declarative and `deny_unknown_fields`: `name`, `label`, `extensions`, `detect_regex`, `min_units`, `overwrite`, `skip_lines`, `notes`, and `rules` (`line_regex`, `json_keys`, `json_paths`). `profile infer` is limited to three attempts, forces `overwrite = false`, and must pass extraction plus a lossless source roundtrip.
@@ -105,7 +106,7 @@ import-jsonl --workspace <dir> --input <file>
 |---|---|
 | `src/` | CLI, pipeline, LLM, store, model, config, glossary, knowledge, learn, profile, quality, review, layout, textio, fileio |
 | `src/adapter/` | One adapter or helper per format; `mod.rs` holds the trait and registry |
-| `src/defaults/` | Embedded built-in experience (`rmmz.toml`, included by `knowledge.rs`) |
+| `src/defaults/` | Embedded built-in experience (`rmmz.toml`, field and layout entries, included by `knowledge.rs`) |
 | `skills/attx/` | Authoritative agent protocol: `SKILL.md` plus `references/` |
 | `docs/{en,zh,ja}/` | Human documentation, 16 pages per locale; MkDocs Material with folder i18n |
 | `profiles/examples/` | Template profiles, not auto-loaded |
@@ -131,7 +132,7 @@ python -m venv .venv
 .venv/bin/mkdocs build --strict       # output: site/ (gitignored)
 ```
 
-CI uses `cargo build --release --locked`, then `cargo test --locked -- --test-threads=1`, then smokes `doctor` and `--help`. Rustfmt and Clippy are not gated. `cargo test` runs 227 inline unit tests; there is no integration crate and no doctest target.
+CI uses `cargo build --release --locked`, then `cargo test --locked -- --test-threads=1`, then smokes `doctor` and `--help`. Rustfmt and Clippy are not gated. `cargo test` runs 230 inline unit tests; there is no integration crate and no doctest target.
 
 ## Code Conventions & Common Patterns
 
@@ -157,6 +158,7 @@ CI uses `cargo build --release --locked`, then `cargo test --locked -- --test-th
 
 - `knowledge::apply` is a pure filter that only removes units. An `Extract` entry cannot invent a unit the adapter never produced; a machine-literal `Extract` is vetoed. Layers are builtin (`rmmz` only), then `$ATTX_HOME/knowledge/<engine>.toml`, then `<workspace>/experience.toml`. `--no-knowledge` restores pre-learning extraction exactly.
 - Learned `Skip` proposals stay `Pending` until `attx learn review` approves them. Never use `--approve-all` as an agent. Translation-style notes go through `learn note`; proper nouns go through the glossary.
+- Layout rules are `kind = "layout"` experience entries. `label` is matched at the first visible byte after `control` tokens and whitespace, `width` is half-width cells (`0` inherits an approved width for the domain), and `leading_controls` selects label or body for a leading control. Built-in RMMZ rules live in `src/defaults/rmmz.toml`. Pending rules do not apply. Add game-specific rules with `learn layout add --workspace`, validate with `learn layout test`, and keep them out of global scope unless the user accepts the wider effect.
 - The glossary is off by default. `run` builds one only when translation is enabled, `--no-glossary` is absent, and `[glossary].enabled` or `--glossary` is set. It splits extraction into 3500-character batches, capped at 40. `glossary check` is advisory.
 - Preserve rules mask literals as `[CTRL_n]` before translation. Non-reorderable literals require exact multiplicity and order after unmasking.
 - `export-jsonl` writes `id` = `location`, so its own output roundtrips. Imported JSONL must match an existing unit by `location`, then by `id`; source text must match exactly. Unknown ids, duplicates, lost preserve tokens, and structural failures reject the import.
@@ -188,12 +190,12 @@ CI uses `cargo build --release --locked`, then `cargo test --locked -- --test-th
 | `src/adapter/rmmz_plugins.rs` | Plugin parameter extraction and `js/plugins.js` writeback; never rewrites plugin sources |
 | `src/profile.rs` | `FormatProfile`, `custom:<name>`, saved-profile discovery, declarative rules |
 | `src/config.rs` | `Settings`, config search, defaults, `example_toml()`, `require_llm` |
-| `src/knowledge.rs` | Experience layers, `apply`, built-in `rmmz.toml` |
+| `src/knowledge.rs` | Experience layers and entry kinds (`field`, `layout`, `note`), `apply`, built-in `rmmz.toml` |
 | `src/learn.rs` | Evidence thresholds, pending proposals, notes, post-writeback summarize |
 | `src/glossary.rs` | Glossary build, term selection, batch injection, `check` |
 | `src/preserve.rs` | Built-in and workspace regexes, `[CTRL_n]` masking, multiplicity checks |
 | `src/quality.rs` | `normalize_lines` safe fixes and `check_translation` hard rejection |
-| `src/layout.rs` | Shared control-token and speaker-label parsing for writeback and structural checks |
+| `src/layout.rs` | Data-driven label/control/width rules, slot fitting, reflow primitives |
 | `src/review.rs` | Mechanical scan, blocking set, sample-capped report |
 | `src/textio.rs` | Encoding detection, UTF-8 output contract |
 | `skills/attx/SKILL.md` | Authoritative agent workflow, authorization boundaries, hard stops |
@@ -226,7 +228,7 @@ Configuration defaults:
 
 ## Testing & QA
 
-- 227 `#[test]` functions across 30 of 32 source files, all in inline `#[cfg(test)] mod tests` at file bottoms. No `tests/` crate, no benches, no doctests, no coverage thresholds, no `[dev-dependencies]`.
+- 230 `#[test]` functions across 30 of 32 source files, all in inline `#[cfg(test)] mod tests` at file bottoms. No `tests/` crate, no benches, no doctests, no coverage thresholds, no `[dev-dependencies]`.
 - Untested: `src/main.rs` and `src/adapter/jsonl.rs`. Thin coverage: `src/store.rs` (1), `src/config.rs` and `src/model.rs` (2 each). `src/pipeline.rs` has 5 tests. CLI dispatch, SQLite behavior, and quality gates can regress while `cargo test` stays green, so run a real CLI smoke when touching those paths.
 - Test style: `use super::*`, behavior-sentence names, plain `assert!`/`assert_eq!`, std plus production crates, no network, no subprocesses.
 - Shared fixture `adapter::test_dir(name)` returns `temp_dir()/attx-test-{pid}-{name}`, creates it, and never cleans it. Most tests leave directories behind. `auto.rs` uses a counter and a `Drop` guard; `rmmz_plugins` and a few others remove before create.

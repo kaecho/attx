@@ -12,7 +12,7 @@
 | `profile.toml` | 自定义/推断规则快照 |
 | `glossary.toml` | 本作品术语 |
 | `preserve.toml` | 本作品额外保护正则 |
-| `experience.toml` | 本作品经验及 prompt note |
+| `experience.toml` | 本作品经验、布局规则及 prompt note |
 
 元数据包含 engine、game_path、content_root、source_lang、target_lang、created_at，另保存内部源文快照和 Profile 摘要。源和目标语言标签会规范化。已有工作区的内容根、引擎及语向不可改用；init 检测不同输入/语言时要求新目录。Profile 内容改变也要求新工作区；修改工作区规则的 overwrite 标志不能绕过摘要校验。
 
@@ -109,13 +109,25 @@ text = "同一角色的称呼保持一致。"
 status = "approved"
 source = "learn:agent:voice"
 updated_at = ""
+
+[[entry]]
+kind = "layout"
+label = '^「[^」]+」'
+control = ''
+width = 0
+leading_controls = "body"
+status = "approved"
+domain = "dialogue"
+reason = "该游戏用引号包住首槽说话人"
+source = "learn:agent:layout"
+updated_at = ""
 ```
 
 这是 schema 示例，不是批准建议。优先级从低到高为内置基线、按格式的全局 knowledge、工作区 experience。更高层优先；同层精确字段优于前导 `*` 后缀字段，再冲突时 skip 优于 extract。scope 为 top/nested/any，domain 空表示任何域；field 应为小写。
 
 field entry 的 verdict 为 skip/extract，status 为 pending/approved，其他 confidence/reason/evidence/source/updated_at 提供证据与来源。知识层只过滤适配器已经提取的单元；extract 可以避免其他规则丢弃，却不能凭空创造适配器未产出的文本，也不能复活机器字面值。没有通用表达式语言或任意值谓词。
 
-note entry 的 topic、text、status、source、updated_at 保存明确要求。只有 approved 且 topic=prompt 的非空文本会进入后续翻译系统提示；其他 topic 供人读取。未知 kind 和额外字段保留但不执行。旧 schema 1 的 rule 可以读入，写回使用 schema 2。
+layout entry 描述槽位结构：label 正则从首个可见字符开始匹配，control 正则匹配原子控制符，width 是半角宽度（0 表示继承该 domain 已有宽度），leading_controls 为 body 或 label，domain 可限定 dialogue 等单元类型。写回和结构标签检查使用 approved 的规则；pending 规则不生效。未知 kind 和额外字段保留但不执行。旧 schema 1 的 rule 可以读入，写回使用 schema 2。
 
 全局经验存于 `$ATTX_HOME/knowledge/<format>.toml` 或平台配置目录；不是直接给所有格式共同使用。内置当前有 rmmz 基线，可用 learn defaults 查看。
 

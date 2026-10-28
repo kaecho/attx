@@ -140,7 +140,7 @@ Standalone JSONL uses no workspace repair passes, so `repaired` and `repair_roun
 | `skipped_note` | Explanation when units cannot be applied; splits pending, passthrough, and failed structural checks |
 | `units_skipped` | Pending, passthrough, or invalid units omitted from the applied subset |
 | `normalized_lines` | Line-break and Chinese-target normalization changes |
-| `reflowed_units` | RMMZ fixed-slot layout changes |
+| `reflowed_units` | Slot layout changes made by the active layout rule |
 | `overflow_lines` | Unavoidable layout overflow, not silently truncated text |
 | `review` | Mechanical report using normalized candidate text |
 | `learned` | Optional actual post-writeback summary report |
@@ -202,8 +202,14 @@ List returns `source_lang`, `target_lang`, `count`, and `terms`, with `--all` ad
 | `learn list` | Optional `--format <id> --workspace <dir>` |
 | `learn defaults` | Required `--format <id>` |
 | `learn forget` | Exactly one of `--field <field>` or `--name <name>`; optional `--format <id> --workspace <dir>` |
+| `learn layout add` | Required `--format <id> --label <regex>`; `--control <regex> --width 0 --leading-controls body --domain "" --reason ""`; optional `--workspace <dir>` |
+| `learn layout list` | Optional `--format <id> --workspace <dir>` |
+| `learn layout remove` | Required `--format <id> --label <regex>`; `--domain ""`; optional `--workspace <dir>` |
+| `learn layout test` | Required `--format <id> --text <line>`; optional `--domain "" --workspace <dir>` |
 
-`summarize` returns `format`, `units_scanned`, `fields_seen`, `entries_written`, `pending`, `notes`, and `file`. Ordinary summarization is local; `--llm` requests paid review. `note` returns `format/topic/name/source/text/file/layer/reaches_prompt`. If both workspace and format are supplied, the workspace is the write destination and the explicit format must match its experience identity; use one scope to keep intent clear.
+`summarize` returns `format`, `units_scanned`, `fields_seen`, `entries_written`, `pending`, `layouts`, `notes`, and `file`. Ordinary summarization is local; `--llm` requests paid review. Repeated short first slots that share delimiters become a pending `kind = "layout"` proposal. `note` returns `format/topic/name/source/text/file/layer/reaches_prompt`. If both workspace and format are supplied, the workspace is the write destination and the explicit format must match its experience identity; use one scope to keep intent clear.
+
+`learn layout` manages the data-driven slot rules used by writeback and the structural label check. A rule contains a `label` regex matched at the first visible character, an optional `control` regex for atomic tokens, a `width` in half-width cells (`0` inherits an existing width for the domain), `leading_controls = "body" | "label"`, and an optional `domain`. `add` validates both regexes and writes an approved rule to global knowledge or a workspace. `test` prints `label`, `prefix`, `suffix`, `standalone`, `label_end`, `width`, `effective_width`, and `source` for one sample. `remove` matches the exact label regex and domain. Built-in defaults are not listed; use `learn defaults --format <id>`.
 
 `pending` returns count and entries with current 1-based indices. `review` returns `approved/rejected/remaining/files_written`. Approval can activate text-removing skip rules; agents must not run `--approve-all` on their own. No selections is an error.
 

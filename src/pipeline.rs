@@ -558,14 +558,10 @@ fn writeback_locked(
         let Some(tr) = translations.get_mut(&u.id).filter(|tr| !tr.passthrough) else { continue };
         let normalized = quality::normalize_lines(u, &mut tr.translation_lines, &meta.target_lang, &preserve);
         normalized_lines += normalized;
-        let mut reflowed = false;
-        if meta.engine == "rmmz" {
-            let layout = adapter::rmmz::normalize_for_writeback(u, tr);
-            reflowed = layout.reflowed;
-            reflowed_units += usize::from(reflowed);
-            overflow_lines += layout.overflow_lines;
-        }
-        if normalized > 0 || reflowed {
+        let change = crate::layout::normalize(u, tr, u.source_line_paths.len(), preserve.layout());
+        reflowed_units += usize::from(change.reflowed);
+        overflow_lines += change.overflow_lines;
+        if normalized > 0 || change.reflowed {
             changed.push(u.id.as_str());
         }
     }
